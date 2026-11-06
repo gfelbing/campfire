@@ -3,20 +3,25 @@
 //! A session is one `CONNECT /wt` upgrade. The client opens exactly one
 //! bidirectional stream — the **command stream** — and speaks newline-delimited
 //! JSON on it (README §5): `join` → `hello`, then `chat`/`typing` events flow
-//! both ways. Movement arrives as QUIC datagrams (Phase 3); for now datagrams
-//! are drained and counted so the socket stays healthy.
+//! both ways. Movement travels on QUIC datagrams in both directions:
+//! inbound `MovementBatch` datagrams are validated into the world, outbound
+//! tick batches (README §5) are pushed through a per-session datagram queue.
 //!
 //! The server is a pure relay here: every outbound message is queued on the
 //! per-user channel owned by [`crate::world::World`], and a writer task drains
-//! it onto the command stream. One stream in, one stream out — no fan-out
-//! logic lives in this file.
+//! it onto the command stream. One stream in, one stream out, one datagram
+//! pipe each way — no fan-out logic lives in this file.
 
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use campfire_protocol::{ChatMsg, ClientMsg, ErrorCode, ServerMsg, to_line};
+use bytes::Bytes;
+use campfire_protocol::{
+    ChatMsg, ClientMsg, ErrorCode, MovementBatch, ServerMsg, from_line, to_line,
+};
 use h3_axum::WebTransportSession;
 use h3_webtransport::server::AcceptedBi;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -24,6 +29,10 @@ use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
 use crate::world::World;
+
+/// The session's `(room, user id)` once joined, shared between the command
+/// task and the datagram tasks.
+type Who = Arc<Mutex<Option<(String, String)>>>;
 
 /// A JSON line longer than this is refused (README §14: no unbounded reads).
 const MAX_LINE_BYTES: usize = 80 * 1024;
@@ -97,14 +106,37 @@ impl RateLimit {
 /// One connected session: runs until the command stream (or the QUIC
 /// connection) dies, then removes the user from the world.
 async fn session_task(world: World, session: WebTransportSession) {
-    // Drain datagrams so QUIC flow control never stalls; movement is decoded
-    // by the Phase 3 movement path.
+    // (room, user id) once joined, so the datagram tasks can attribute
+    // inbound movement and nobody can move before joining.
+    let who: Who = Arc::new(Mutex::new(None));
+
+    // Inbound datagrams: movement batches (README §5).
     let mut datagrams = session.datagram_reader();
+    let who_in = who.clone();
+    let world_in = world.clone();
     let datagram_task = tokio::spawn(async move {
-        // Movement datagrams are decoded in Phase 3; drain them so flow
-        // control never stalls and the socket stays healthy.
         while let Ok(dg) = datagrams.read_datagram().await {
-            debug!(bytes = dg.payload().len(), "datagram (ignored)");
+            let Ok(batch) =
+                from_line::<MovementBatch>(std::str::from_utf8(dg.payload()).unwrap_or(""))
+            else {
+                debug!("undecodable datagram ignored");
+                continue;
+            };
+            if let Some((room, id)) = who_in.lock().unwrap().clone() {
+                world_in.apply_movement(&room, &id, &batch.m);
+            }
+        }
+    });
+
+    // Outbound datagrams: the 50 ms tick pushes movement batches through this
+    // queue (README §5).
+    let (dtx, mut dtx_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+    let mut dtx_sender = session.datagram_sender();
+    let datagram_sink = tokio::spawn(async move {
+        while let Some(chunk) = dtx_rx.recv().await {
+            if dtx_sender.send_datagram(Bytes::from(chunk)).is_err() {
+                break; // connection is gone
+            }
         }
     });
 
@@ -135,17 +167,22 @@ async fn session_task(world: World, session: WebTransportSession) {
     };
 
     match command {
-        Some(stream) => run_command_stream(&world, stream).await,
+        Some(stream) => run_command_stream(&world, stream, who, dtx).await,
         None => debug!("no command stream"),
     }
 
     datagram_task.abort();
+    datagram_sink.abort();
 }
 
 /// Read `join`/`chat`/`typing` lines, enforce limits, and relay through the
 /// world. Returns when the stream ends, idles out, or breaks a hard limit.
-async fn run_command_stream<S>(world: &World, stream: S)
-where
+async fn run_command_stream<S>(
+    world: &World,
+    stream: S,
+    who: Who,
+    dtx: mpsc::UnboundedSender<Vec<u8>>,
+) where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + 'static,
 {
     let (mut rd, mut wr) = tokio::io::split(stream);
@@ -200,7 +237,7 @@ where
                         warn!("session exceeded message rate");
                         break 'read;
                     }
-                    if !dispatch(world, &line, &tx, &mut session, &mut chat) {
+                    if !dispatch(world, &line, &tx, &mut session, &mut chat, &who, &dtx) {
                         break 'read;
                     }
                 }
@@ -211,6 +248,7 @@ where
 
     if let Some((room, id, _)) = &session {
         world.leave(room, id);
+        *who.lock().unwrap() = None; // no more movement for this session
         info!(user = %id, room = %room, "user left");
     }
     drop(tx); // writer task finishes and shuts the stream down
@@ -225,6 +263,8 @@ fn dispatch(
     tx: &mpsc::UnboundedSender<ServerMsg>,
     session: &mut Option<(String, String, String)>,
     chat_limit: &mut RateLimit,
+    who: &Who,
+    dtx: &mpsc::UnboundedSender<Vec<u8>>,
 ) -> bool {
     match campfire_protocol::from_line::<ClientMsg>(line) {
         Ok(ClientMsg::Join { room, name, avatar }) => {
@@ -243,11 +283,13 @@ fn dispatch(
             {
                 return send(tx, ErrorCode::BadMessage);
             }
-            match world.join(&room, name, avatar.clone(), tx.clone()) {
+            match world.join(&room, name, avatar.clone(), tx.clone(), dtx.clone()) {
                 Ok(joined) => {
-                    *session = Some((room.clone(), joined.you.clone(), name.to_owned()));
+                    let you = joined.you;
+                    *session = Some((room.clone(), you.clone(), name.to_owned()));
+                    *who.lock().unwrap() = Some((room.clone(), you.clone()));
                     let msg = ServerMsg::Hello {
-                        you: joined.you,
+                        you,
                         room,
                         users: joined.users,
                         chat: joined.chat,
@@ -255,6 +297,7 @@ fn dispatch(
                     tx.send(msg).is_ok()
                 }
                 Err(crate::world::JoinError::RoomFull) => send(tx, ErrorCode::RoomFull),
+                Err(crate::world::JoinError::UnknownRoom) => send(tx, ErrorCode::UnknownRoom),
             }
         }
         Ok(ClientMsg::Chat { text }) => {

@@ -1,16 +1,21 @@
-//! Phase 2 acceptance tests (README §11): WebTransport session layer.
+//! Phase 2 + 3 acceptance tests (README §11): WebTransport session layer and
+//! world movement.
 //!
 //! Uses `wtransport` — the reference Rust WebTransport implementation — as a
 //! real, browser-grade client. Every scenario runs over **actual HTTP/3 on
 //! QUIC** against the real server stack: join → hello, presence broadcast,
 //! chat echo, typing relay, leave notification, per-session rate limits,
-//! validation errors, and datagram tolerance.
+//! validation errors, and datagram tolerance (Phase 2), plus movement
+//! validation with datagram fan-out and chat history for a third joiner
+//! (Phase 3).
 
 use std::net::SocketAddr;
 use std::time::Duration;
 
 use bytes::Bytes;
-use campfire_protocol::{ClientMsg, ErrorCode, ServerMsg, from_line, to_line};
+use campfire_protocol::{
+    ClientMsg, Dir, ErrorCode, MovementBatch, MovementEntry, ServerMsg, from_line, to_line,
+};
 use tokio::io::AsyncWriteExt;
 use wtransport::Connection;
 
@@ -85,6 +90,37 @@ async fn join(addr: SocketAddr, room: &str, name: &str) -> (TestClient, String) 
         panic!("expected hello after join");
     };
     (c, you)
+}
+
+/// Send one movement entry as a datagram (README §5 wire shape).
+fn move_datagram(id: &str, x: f32, y: f32, seq: u64) -> Bytes {
+    let batch = MovementBatch {
+        m: vec![MovementEntry {
+            id: id.to_owned(),
+            x,
+            y,
+            d: Dir::East,
+            moving: 1,
+            seq,
+        }],
+    };
+    Bytes::from(serde_json::to_vec(&batch).unwrap())
+}
+
+/// Wait for a movement datagram that carries an entry for `who` and return
+/// the position it reports. Batches for other users are skipped.
+async fn recv_movement(conn: &Connection, who: &str) -> (f32, f32) {
+    loop {
+        let dg = tokio::time::timeout(RECV_TIMEOUT, conn.receive_datagram())
+            .await
+            .expect("timed out waiting for a movement datagram")
+            .expect("connection died waiting for a datagram");
+        let batch: MovementBatch =
+            serde_json::from_slice(dg.payload().as_ref()).expect("datagram is a movement batch");
+        if let Some(e) = batch.m.iter().find(|e| e.id == who) {
+            return (e.x, e.y);
+        }
+    }
 }
 
 #[tokio::test]
@@ -175,7 +211,7 @@ async fn join_hello_presence_chat_typing_leave() {
 #[tokio::test]
 async fn chat_rate_limit_allows_one_per_second() {
     let (addr, _root) = start_server().await;
-    let (mut c, _) = join(addr, "r", "chatty").await;
+    let (mut c, _) = join(addr, "island", "chatty").await;
 
     for i in 0..5 {
         c.send(&ClientMsg::Chat {
@@ -223,9 +259,23 @@ async fn validation_errors_are_reported() {
         }
     ));
 
+    // Room id: not a known map.
+    c.send(&ClientMsg::Join {
+        room: "nowhere".into(),
+        name: "alice".into(),
+        avatar: None,
+    })
+    .await;
+    assert!(matches!(
+        c.recv().await,
+        ServerMsg::Error {
+            code: ErrorCode::UnknownRoom
+        }
+    ));
+
     // Name: empty after trimming.
     c.send(&ClientMsg::Join {
-        room: "r".into(),
+        room: "island".into(),
         name: "   ".into(),
         avatar: None,
     })
@@ -239,7 +289,7 @@ async fn validation_errors_are_reported() {
 
     // Name: over the 24-char limit.
     c.send(&ClientMsg::Join {
-        room: "r".into(),
+        room: "island".into(),
         name: "x".repeat(25),
         avatar: None,
     })
@@ -274,7 +324,7 @@ async fn validation_errors_are_reported() {
 
     // Valid join, then an over-long chat.
     c.send(&ClientMsg::Join {
-        room: "r".into(),
+        room: "island".into(),
         name: "alice".into(),
         avatar: None,
     })
@@ -302,7 +352,7 @@ async fn validation_errors_are_reported() {
 #[tokio::test]
 async fn datagrams_are_drained_without_breaking_the_session() {
     let (addr, _root) = start_server().await;
-    let (mut c, _) = join(addr, "r", "mover").await;
+    let (mut c, _) = join(addr, "island", "mover").await;
 
     // Movement datagrams (Phase 3's payload) are discarded for now, but the
     // session must stay healthy afterwards.
@@ -318,4 +368,104 @@ async fn datagrams_are_drained_without_breaking_the_session() {
         panic!("expected chat echo after datagram");
     };
     assert_eq!(text, "still here");
+}
+
+/// Phase 3 acceptance test (README §11): two in-process clients join the same
+/// room, move, and each receives the other's deltas; an invalid move is
+/// rejected; chat round-trips with history for a third joiner.
+#[tokio::test]
+async fn movement_relay_invalid_move_rejected_chat_history() {
+    let (addr, _root) = start_server().await;
+
+    let (mut a, a_id) = join(addr, "office", "alice").await;
+    let (mut b, b_id) = join(addr, "office", "bob").await;
+    // Alice is told about bob (her queue must be drained before the chat part).
+    let ServerMsg::Joined { user } = a.recv().await else {
+        panic!("expected joined event for bob");
+    };
+    assert_eq!(user.id, b_id);
+
+    // Spawn is the office center (20.5, 15.5). Give the speed gate (8 tiles/s)
+    // a 300 ms headroom before the first 1-tile step.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    // Alice walks one tile east; Bob receives her delta on a datagram.
+    a.conn
+        .send_datagram(move_datagram(&a_id, 21.5, 15.5, 1))
+        .unwrap();
+    let (x, y) = recv_movement(&b.conn, &a_id).await;
+    assert_eq!(
+        (x, y),
+        (21.5, 15.5),
+        "bob must see alice at her new position"
+    );
+
+    // Alice "teleports" 14 tiles: far beyond 8 tiles/s, so the server rejects
+    // it. Nothing is broadcast for the rejected move.
+    a.conn
+        .send_datagram(move_datagram(&a_id, 35.5, 15.5, 2))
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    // Alice's next step from the *accepted* position is a normal 1-tile walk:
+    // it is relayed, and it proves the teleport never moved her.
+    a.conn
+        .send_datagram(move_datagram(&a_id, 22.5, 15.5, 3))
+        .unwrap();
+    let (x, y) = recv_movement(&b.conn, &a_id).await;
+    assert_eq!(
+        (x, y),
+        (22.5, 15.5),
+        "bob must see the accepted step, never the rejected teleport"
+    );
+
+    // Bob walks one tile west; Alice receives his delta (skipping the batches
+    // that only carry alice's entries).
+    b.conn
+        .send_datagram(move_datagram(&b_id, 19.5, 15.5, 1))
+        .unwrap();
+    let (x, y) = recv_movement(&a.conn, &b_id).await;
+    assert_eq!(
+        (x, y),
+        (19.5, 15.5),
+        "alice must see bob at his new position"
+    );
+
+    // Chat round-trip; the third joiner gets the history.
+    a.send(&ClientMsg::Chat { text: "hey".into() }).await;
+    b.send(&ClientMsg::Chat { text: "yo".into() }).await;
+    let ServerMsg::Chat { from, text, .. } = a.recv().await else {
+        panic!("expected chat echo at alice");
+    };
+    assert_eq!((from.as_str(), text.as_str()), (a_id.as_str(), "hey"));
+    let ServerMsg::Chat { from, text, .. } = b.recv().await else {
+        panic!("expected chat echo at bob");
+    };
+    assert_eq!((from.as_str(), text.as_str()), (a_id.as_str(), "hey"));
+    let ServerMsg::Chat { from, text, .. } = a.recv().await else {
+        panic!("expected chat echo at alice");
+    };
+    assert_eq!((from.as_str(), text.as_str()), (b_id.as_str(), "yo"));
+    let ServerMsg::Chat { from, text, .. } = b.recv().await else {
+        panic!("expected chat echo at bob");
+    };
+    assert_eq!((from.as_str(), text.as_str()), (b_id.as_str(), "yo"));
+
+    let mut c = TestClient::connect(addr).await;
+    c.send(&ClientMsg::Join {
+        room: "office".into(),
+        name: "carol".into(),
+        avatar: None,
+    })
+    .await;
+    let ServerMsg::Hello { users, chat, .. } = c.recv().await else {
+        panic!("expected hello for carol");
+    };
+    assert_eq!(users.len(), 3, "carol's hello lists all three users");
+    let texts: Vec<&str> = chat.iter().map(|m| m.text.as_str()).collect();
+    assert_eq!(
+        texts,
+        vec!["hey", "yo"],
+        "carol's hello carries the chat history"
+    );
 }

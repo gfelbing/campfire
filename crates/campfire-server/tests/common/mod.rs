@@ -34,6 +34,7 @@ pub async fn start_server() -> (SocketAddr, CertificateDer<'static>) {
     let endpoint = quinn::Endpoint::server(conf, "127.0.0.1:0".parse().unwrap()).unwrap();
     let addr = endpoint.local_addr().unwrap();
     let world = campfire_server::world::World::new();
+    let _tick = campfire_server::world::start_ticking(world.clone());
     let app = campfire_server::api::router(world);
     tokio::spawn(campfire_server::run_endpoint(endpoint, app));
     (addr, root)

@@ -77,10 +77,12 @@ async fn http3_healthz_index_and_maps() {
     assert_eq!(status, 200);
     assert!(body.contains("Campfire"));
 
-    // /api/v1/maps — empty until Phase 3 ships the first maps.
+    // /api/v1/maps — the two bundled maps, sorted by id.
     let (status, body) = get(addr, &root, "/api/v1/maps").await;
     assert_eq!(status, 200);
-    assert_eq!(body, "[]");
+    let maps: Vec<serde_json::Value> = serde_json::from_str(&body).unwrap();
+    let ids: Vec<&str> = maps.iter().map(|m| m["id"].as_str().unwrap()).collect();
+    assert_eq!(ids, vec!["island", "office"], "maps body: {body}");
 
     // Unknown path → 404.
     let (status, _) = get(addr, &root, "/nope").await;

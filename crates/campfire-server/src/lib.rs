@@ -21,6 +21,7 @@ pub async fn run(cfg: &config::Config) -> Result<()> {
     let local = endpoint.local_addr()?;
     let world = world::World::new();
     info!(%local, "campfire listening over HTTP/3 (QUIC)");
+    let _tick = world::start_ticking(world.clone());
     run_endpoint(endpoint, api::router(world)).await;
     Ok(())
 }

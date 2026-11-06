@@ -81,6 +81,8 @@ pub enum ErrorCode {
     ChatTooLong,
     /// Room id exceeds the length limit.
     RoomTooLong,
+    /// Room id is not a known map.
+    UnknownRoom,
 }
 
 /// Client → server, reliable stream.
@@ -139,9 +141,9 @@ pub struct MovementEntry {
     pub x: f32,
     pub y: f32,
     pub d: Dir,
-    /// Moving flag (`mv` on the wire).
+    /// Moving flag (`mv` on the wire): 0 = idle, 1 = moving.
     #[serde(rename = "mv")]
-    pub moving: bool,
+    pub moving: u8,
     /// Monotonic sequence number (`s`); the client keeps the newest entry.
     #[serde(rename = "s")]
     pub seq: u64,
@@ -224,12 +226,12 @@ mod tests {
                 x: 41.5,
                 y: 12.75,
                 d: Dir::East,
-                moving: true,
+                moving: 1,
                 seq: 4821,
             }],
         };
         let line = to_line(&msg);
-        assert!(line.contains(r#""mv":true"#) && line.contains(r#""s":4821"#));
+        assert!(line.contains(r#""mv":1"#) && line.contains(r#""s":4821"#));
         assert_eq!(from_line::<MovementBatch>(&line).unwrap(), msg);
     }
 

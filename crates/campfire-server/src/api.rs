@@ -24,9 +24,6 @@ use crate::world::World;
 /// Phase 1: placeholder page; Phase 4 replaces the embed with `client/dist`.
 static STATIC: Dir<'static> = include_dir!("$CARGO_MANIFEST_DIR/../../static");
 
-/// Bundled Tiled JSON maps (Phase 3 adds the first two).
-static MAPS: Dir<'static> = include_dir!("$CARGO_MANIFEST_DIR/../../maps");
-
 static START: OnceLock<Instant> = OnceLock::new();
 
 /// Call once at process start (used for the health payload).
@@ -71,24 +68,17 @@ async fn healthz(State(world): State<World>) -> Json<Health> {
     })
 }
 
-/// `GET /api/v1/maps` → one entry per `*.json` in the embedded `maps/` dir.
+/// `GET /api/v1/maps` → one entry per bundled map, sorted by id.
 async fn list_maps() -> Json<Vec<MapInfo>> {
-    let maps = MAPS
-        .files()
-        .filter(|f| f.path().extension().is_some_and(|e| e == "json"))
-        .map(|f| {
-            let id = f
-                .path()
-                .file_stem()
-                .map(|s| s.to_string_lossy().into_owned())
-                .unwrap_or_default();
-            MapInfo {
-                name: id.clone(),
-                thumb: None,
-                id,
-            }
+    let mut maps: Vec<MapInfo> = campfire_maps::bundled()
+        .values()
+        .map(|m| MapInfo {
+            id: m.id.clone(),
+            name: m.name.clone(),
+            thumb: None,
         })
         .collect();
+    maps.sort_by(|a, b| a.id.cmp(&b.id));
     Json(maps)
 }
 
