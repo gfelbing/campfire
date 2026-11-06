@@ -1,0 +1,42 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/campfire-server",
+    "crates/campfire-protocol",
+    "crates/campfire-maps",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+license = "MIT"
+repository = "https://github.com/campfire/campfire"
+
+# Centralized dependency pins (README §10). Bump here, nowhere else.
+[workspace.dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "time", "sync", "signal"] }
+thiserror = "2"
+clap = { version = "4", features = ["derive"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+bytes = "1"
+quinn = "0.11"
+rustls = "0.23"
+h3 = "0.0"
+h3-quinn = "0.0"
+h3-axum = { version = "0.3", features = ["webtransport"] }
+h3-webtransport = "0.1"
+turn-server = { version = "4.1", default-features = false, features = ["tcp", "ssl"] }
+axum = "0.8"
+
+# Internal crates
+campfire-protocol = { path = "crates/campfire-protocol" }
+campfire-maps = { path = "crates/campfire-maps" }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"

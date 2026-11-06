@@ -1,0 +1,10 @@
+# Rust
+/target
+
+# Web client (Phase 4)
+client/node_modules/
+client/dist/
+
+# Local env / secrets
+.env
+*.local
