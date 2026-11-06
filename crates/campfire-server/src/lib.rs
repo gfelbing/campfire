@@ -6,7 +6,9 @@
 
 pub mod api;
 pub mod config;
+pub mod realtime;
 pub mod tls;
+pub mod world;
 
 use anyhow::Result;
 use tracing::{debug, info};
@@ -17,8 +19,9 @@ pub async fn run(cfg: &config::Config) -> Result<()> {
     let quinn_conf = tls::server_config_from_files(&cfg.cert, &cfg.key, cfg.idle_timeout())?;
     let endpoint = quinn::Endpoint::server(quinn_conf, cfg.listen)?;
     let local = endpoint.local_addr()?;
+    let world = world::World::new();
     info!(%local, "campfire listening over HTTP/3 (QUIC)");
-    run_endpoint(endpoint, api::router()).await;
+    run_endpoint(endpoint, api::router(world)).await;
     Ok(())
 }
 

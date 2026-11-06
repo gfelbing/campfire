@@ -1,20 +1,24 @@
-//! HTTP/3 API: embedded static client, map list, health.
+//! HTTP/3 API: embedded static client, map list, health, WebTransport.
 //!
-//! Everything is served from the single QUIC socket (README §4). `users`/
-//! `rooms` in the health payload are wired to world state in Phase 3.
+//! Everything is served from the single QUIC socket (README §4). Health
+//! reports live world state (users/rooms) starting with Phase 2.
 
 use std::sync::OnceLock;
 use std::time::Instant;
 
+use axum::extract::State;
 use axum::http::StatusCode;
 use axum::http::Uri;
 use axum::http::header;
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{connect, get};
 use axum::{Json, Router};
 use include_dir::{Dir, include_dir};
 use serde::Serialize;
 use tracing::debug;
+
+use crate::realtime::handle_wt;
+use crate::world::World;
 
 /// Web client, embedded at compile time (README §3: single deploy artifact).
 /// Phase 1: placeholder page; Phase 4 replaces the embed with `client/dist`.
@@ -33,8 +37,8 @@ pub fn mark_start() {
 #[derive(Serialize)]
 struct Health {
     status: &'static str,
-    users: u64,
-    rooms: u64,
+    users: usize,
+    rooms: usize,
     uptime_secs: u64,
 }
 
@@ -45,20 +49,24 @@ struct MapInfo {
     thumb: Option<String>,
 }
 
-pub fn router() -> Router {
+pub fn router(world: World) -> Router {
     Router::new()
         .route("/healthz", get(healthz))
         .route("/api/v1/maps", get(list_maps))
+        // WebTransport realtime session (README §5).
+        .route("/wt", connect(handle_wt))
         // Everything else is a static asset (or a 404).
         .fallback(handle_static)
+        .with_state(world)
 }
 
-async fn healthz() -> Json<Health> {
+async fn healthz(State(world): State<World>) -> Json<Health> {
+    let (users, rooms) = world.stats();
     let uptime_secs = START.get().map(|s| s.elapsed().as_secs()).unwrap_or(0);
     Json(Health {
         status: "ok",
-        users: 0,
-        rooms: 0,
+        users,
+        rooms,
         uptime_secs,
     })
 }

@@ -7,44 +7,20 @@
 //! port with an rcgen-generated self-signed certificate — no external tools
 //! needed, so it runs on CI.
 
-use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::Duration;
 
 use bytes::Buf;
-use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+use rustls::pki_types::CertificateDer;
 
-/// Self-signed cert for `localhost` + the matching root for client verification.
-fn dev_certs() -> (
-    Vec<CertificateDer<'static>>,
-    PrivateKeyDer<'static>,
-    CertificateDer<'static>,
-) {
-    let key_pair = rcgen::KeyPair::generate().unwrap();
-    let cert = rcgen::CertificateParams::new(vec!["localhost".into()])
-        .unwrap()
-        .self_signed(&key_pair)
-        .unwrap();
-    (
-        vec![cert.der().to_vec().into()],
-        PrivateKeyDer::Pkcs8(key_pair.serialize_der().into()),
-        cert.der().to_vec().into(),
-    )
-}
-
-/// Start the real server (quinn endpoint + accept loop) on an ephemeral port.
-async fn start_server() -> (SocketAddr, CertificateDer<'static>) {
-    let (certs, key, root) = dev_certs();
-    let conf = campfire_server::tls::server_config(certs, key, Duration::from_secs(30)).unwrap();
-    let endpoint = quinn::Endpoint::server(conf, "127.0.0.1:0".parse().unwrap()).unwrap();
-    let addr = endpoint.local_addr().unwrap();
-    let app = campfire_server::api::router();
-    tokio::spawn(campfire_server::run_endpoint(endpoint, app));
-    (addr, root)
-}
+mod common;
+use common::start_server;
 
 /// One HTTP/3 GET against the server, verified against the rcgen root.
-async fn get(addr: SocketAddr, root: &CertificateDer<'static>, uri: &str) -> (u16, String) {
+async fn get(
+    addr: std::net::SocketAddr,
+    root: &CertificateDer<'static>,
+    uri: &str,
+) -> (u16, String) {
     let mut roots = rustls::RootCertStore::empty();
     roots.add(root.clone()).unwrap();
     let provider = Arc::new(rustls::crypto::ring::default_provider());

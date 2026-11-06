@@ -24,6 +24,7 @@ h3-quinn.workspace = true
 h3-webtransport.workspace = true
 include_dir.workspace = true
 quinn.workspace = true
+rand.workspace = true
 rustls.workspace = true
 rustls-pemfile.workspace = true
 serde.workspace = true
@@ -36,3 +37,4 @@ turn-server.workspace = true
 [dev-dependencies]
 http.workspace = true
 rcgen.workspace = true
+wtransport = { version = "0.7", features = ["dangerous-configuration"] }
