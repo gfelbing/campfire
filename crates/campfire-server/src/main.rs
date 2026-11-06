@@ -1,22 +1,23 @@
-//! Campfire — a virtual-office-style virtual office.
+//! campfire — the single Campfire service binary.
 //!
-//! One binary listening on one port number (443): QUIC/HTTP/3 + WebTransport
-//! + STUN on UDP, TURN/TLS on TCP. See README.md for the implementation plan.
-//!
-//! Phase 0: workspace skeleton — the binary boots and reports itself.
-//! Sockets and the router arrive in Phase 1.
+//! One binary, one port number (README §2): QUIC/HTTP/3 + WebTransport + STUN
+//! on UDP, TURN/TLS on TCP. This file only boots the library; all behaviour
+//! lives in `campfire_server` (lib.rs) so tests and tooling can reuse it.
 
-fn main() {
-    println!(
-        "campfire-server {} — phase 0 skeleton (no listeners yet)",
-        env!("CARGO_PKG_VERSION")
-    );
-}
+use anyhow::Result;
+use campfire_server::config::Config;
+use clap::Parser;
 
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn version_is_set() {
-        assert!(!env!("CARGO_PKG_VERSION").is_empty());
-    }
+#[tokio::main]
+async fn main() -> Result<()> {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "campfire_server=info".into()),
+        )
+        .init();
+
+    campfire_server::api::mark_start();
+    let cfg = Config::parse();
+    campfire_server::run(&cfg).await
 }
