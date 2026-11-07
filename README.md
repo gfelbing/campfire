@@ -388,6 +388,10 @@ One developer, estimates in days. **MVP (walking + presence) = Phases 0–4 (≈
 - Security pass: final limits, input validation audit, TURN credential abuse limits ([§14](#14-security--abuse-limits)), TLS config review, dependency audit.
 - E2E suite (headless browser over HTTP/3, fake media) covering movement, chat, bubble join/leave.
 - **Done when:** targets in [§13](#13-performance-targets) met on 2 vCPU; CI (including scheduled E2E) green for a week.
+- *Delivery note:* shipped in adapted form:
+  - **Load harness** `tools/loadtest` (`cargo run -p campfire-loadtest -- --url https://127.0.0.1:8443/wt --users 50 --ramp 6 --groups 3 --group-size 3`): ramps real QUIC/WebTransport bots that join real map rooms, walk at the client's cadence (0.4-tile steps @ 60 ms, under the 8 tiles/s gate), chat within the 1/s room limit, and park clusters on the spawn tile so the bubble engine forms calls whose members then relay fake SDP — the full server path minus real WebRTC. Verified against the dev server: 50 users, 2 rooms, 2 live bubbles, mean tick 0.16 ms (`campfire_tick_seconds_total`/`campfire_ticks_total`), zero connect errors/drops. The forced-relay soak variant and a 2 vCPU target rig remain manual (single dev machine here).
+  - **Security pass:** every [§14](#14-security--abuse-limits) limit verified present in code (movement 30/s + 8 tiles/s speed gate, chat 1/s, stream 50/s, 256 KB/s, datagram ≤ 1 200 B, SDP 64 KB, ICE 1 KB, room cap 2 048, TURN mint limiter with per-IP cache); TLS 1.3-only rustls with `h3`-only ALPN on UDP. `cargo audit` (0.22): no vulnerabilities; one allowed warning (`rustls-pemfile` unmaintained — it only parses our own PEM files at boot, and its removal is tied to quinn/rustls helper churn upstream; tracked).
+  - **Headless E2E** `tools/e2e/e2e.js` (puppeteer-core driving the installed Brave/Chromium headless with `--use-fake-device-for-media-stream`, `--origin-to-force-quic-on`): two pages auto-join via URL params, each sees the other in presence, a chat line broadcasts A → B, the co-located pair forms a bubble call (🎧 badges) that holds, and B's walk-away tears it down. Passing against the dev server. The browser half that stays manual: relay-only (`iceTransportPolicy: "relay"`) variant and the 9+ voice-only downgrade.
 
 ## 12. Testing strategy
 
@@ -396,6 +400,7 @@ One developer, estimates in days. **MVP (walking + presence) = Phases 0–4 (≈
 - **Integration** (in-process server on ephemeral ports + real QUIC/WebTransport clients from Rust): join/hello/leave, movement ordering, invalid-move rejection, rate limiting, datagram loss (client keeps newest seq), SSE fallback equivalence, signaling relay policy.
 - **WebRTC E2E** (headless Chromium with `--use-fake-ui-for-media-stream --use-fake-device-for-media-stream`, over HTTP/3): two pages — a proximity bubble reaches `connectionState === "connected"` with media flowing; 3+ pages, walk-away leave mid-call; relay variant with `iceTransportPolicy: "relay"`.
 - **Load** (`tools/loadtest`, manual + nightly): ramp users and call groups, measure tick latency, relay bandwidth, CPU; output a small report per run.
+- **E2E** (`tools/e2e/e2e.js`, puppeteer-core + the installed Brave/Chromium in headless mode with fake media and `--origin-to-force-quic-on`): two pages join via URL params, assert presence, chat broadcast, a held bubble call (🎧 badges) and walk-away teardown. Needs `npm i` in `tools/e2e`; the server must be running (`just server`).
 
 ## 13. Performance targets (Phase 9 gate)
 
@@ -417,7 +422,7 @@ Numbers are verified with `tools/loadtest`, not assumed; binary movement encodin
 ## 14. Security & abuse limits
 
 - TLS 1.3 mandatory on both sockets; same certificate for QUIC and TURN; only `h3` ALPN offered on UDP.
-- Per-session rate limits: movement ≤ 30 msg/s, chat ≤ 1 msg/s, stream messages ≤ 50 msg/s, inbound ≤ 256 KB/s, single datagram ≤ 1 300 B, chat ≤ 500 chars, name ≤ 24 chars, SDP ≤ 64 KB, ICE candidates ≤ 1 KB.
+- Per-session rate limits: movement ≤ 30 msg/s, chat ≤ 1 msg/s, stream messages ≤ 50 msg/s, inbound ≤ 256 KB/s, single datagram ≤ 1 200 B, chat ≤ 500 chars, name ≤ 24 chars, SDP ≤ 64 KB, ICE candidates ≤ 1 KB.
 - Server is authoritative for movement validity (speed + walkability), room membership, and call membership; the client is a pure presenter.
 - **TURN credentials** (RFC 8489): HMAC-signed with a server secret (`--turn-secret`, auto-generated if absent), 1 h TTL, a fresh pair minted at most once per 10 min per IP — repeats inside that window (the whole office behind one NAT) get the cached pair, so every user of a shared IP still gets working relay credentials. Known accepted risk: the endpoint is anonymous in v1, so a determined attacker can mint relay credentials and burn bandwidth — mitigated by the mint rate limit, TURN allocation monitoring, and short TTLs; per-user quotas would need accounts (backlog).
 - No unbounded allocations: all incoming messages parse through size-bounded buffers; per-room user cap (default 2 048) with a clear `error` to joiners beyond it.
@@ -440,7 +445,7 @@ Numbers are verified with `tools/loadtest`, not assumed; binary movement encodin
   accept loop, closes open QUIC connections cleanly, and drains for 1 s.
 - **Firewall:** allow `443/udp` and `443/tcp` (and nothing else for this service).
 - **DNS:** A/AAAA record for the hostname; the TLS name must match (browsers verify it for both QUIC and `turns:`).
-- **`--external-host`** matters whenever the box sits behind NAT/LB: STUN answers with the public address (XOR-MAPPED-ADDRESS) and TURN announces it to clients.
+- **`--external`** matters whenever the box sits behind NAT/LB: STUN answers with the public address (XOR-MAPPED-ADDRESS) and TURN announces it to clients.
 - **TLS / ACME:**
   - Dev: `just certs` (local CA + signed localhost cert) and `just trust` (CA into the NSS store). One caveat, verified in a Brave netlog: **Chromium trusts only its built-in roots for QUIC** — a user-installed CA verifies fine over TCP but always fails the QUIC handshake (`CERTIFICATE_VERIFY_FAILED`), so the dev loop launches the browser with the cert pinned by SPKI: `just brave` (`--origin-to-force-quic-on` + `--ignore-certificate-errors-spki-list`). The dev server binds `[::]:8443` because browsers resolve `localhost` to `::1` first.
   - Prod: Let's Encrypt. Note that **HTTP-01 validation is impossible** — it requires plaintext HTTP over TCP, which this server deliberately does not listen on. Use **DNS-01** (via `acme2-rs` with your DNS provider, or `certbot --manual`/DNS plugin on the host) and mount the PEM. A publicly-trusted cert needs no browser flags for QUIC.

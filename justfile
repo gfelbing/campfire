@@ -94,3 +94,13 @@ server *args:
 # Quick HTTP/3 sanity check against a running server.
 h3:
 	curl --http3 -sk https://127.0.0.1:8443/healthz
+
+# Load harness (README §11 Phase 9): needs a running server.
+loadtest *args:
+	cargo run -p campfire-loadtest --release -- \
+	  --url https://127.0.0.1:8443/wt "$@"
+
+# Headless browser E2E (README §11 Phase 9): needs a running server and
+# one-time `npm i` in tools/e2e.
+e2e *args:
+	node tools/e2e/e2e.js --browser "$(command -v brave || command -v chromium || echo chromium)" "$@"

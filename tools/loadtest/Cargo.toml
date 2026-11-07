@@ -1,0 +1,22 @@
+[package]
+name = "campfire-loadtest"
+description = "Campfire load harness (README §11 Phase 9): walking users + call groups over real QUIC."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "loadtest"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+bytes.workspace = true
+campfire-protocol.workspace = true
+campfire-maps.workspace = true
+clap.workspace = true
+rand.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+wtransport = { workspace = true, features = ["dangerous-configuration"] }

@@ -4,6 +4,7 @@ members = [
     "crates/campfire-server",
     "crates/campfire-protocol",
     "crates/campfire-maps",
+    "tools/loadtest",
 ]
 
 [workspace.package]
@@ -45,6 +46,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 turn-server = { version = "4.1", default-features = false, features = ["tcp", "ssl"] }
 thiserror = "2"
+wtransport = "0.7"
 
 # Internal crates
 campfire-protocol = { path = "crates/campfire-protocol" }
