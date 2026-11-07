@@ -15,6 +15,7 @@ WORKDIR /build
 # in the same stage as cargo so the static embed is fresh.
 COPY rust-toolchain.toml Cargo.toml Cargo.lock ./
 COPY crates ./crates
+COPY tools/loadtest ./tools/loadtest
 COPY client ./client
 COPY maps ./maps
 COPY justfile ./
