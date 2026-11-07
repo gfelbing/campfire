@@ -1,6 +1,6 @@
 //! CLI configuration for the campfire binary.
 
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -46,9 +46,23 @@ pub struct Config {
 
     /// Externally visible address of this server, advertised by the TURN
     /// server for relayed allocations. Defaults to `listen` (correct for
-    /// dev; set behind a NAT/firewall).
-    #[arg(long)]
+    /// dev; set behind a NAT/firewall). Accepts `ip:port` or a bare `ip`
+    /// (the port then falls back to `--listen`'s).
+    #[arg(long, value_parser = parse_external)]
     pub external: Option<SocketAddr>,
+}
+
+/// `--external` accepts `ip:port` or a bare `ip`. A bare IP is stored with
+/// port 0 — [`Config::external_addr`] fills it in from `--listen`, since the
+/// port is known only after all args are parsed.
+fn parse_external(s: &str) -> Result<SocketAddr, String> {
+    if let Ok(addr) = s.parse::<SocketAddr>() {
+        return Ok(addr);
+    }
+    let ip: IpAddr = s
+        .parse()
+        .map_err(|_| format!("invalid socket address or IP: {s:?}"))?;
+    Ok(SocketAddr::new(ip, 0))
 }
 
 impl Config {
@@ -56,8 +70,59 @@ impl Config {
         Duration::from_secs(self.idle_timeout_secs)
     }
 
-    /// Address to advertise to peers (`--external` or `listen`).
+    /// Address to advertise to peers (`--external` or `listen`). A bare-IP
+    /// `--external` (parsed as port 0) inherits `--listen`'s port.
     pub fn external_addr(&self) -> SocketAddr {
-        self.external.unwrap_or(self.listen)
+        match self.external {
+            Some(addr) if addr.port() == 0 => SocketAddr::new(addr.ip(), self.listen.port()),
+            Some(addr) => addr,
+            None => self.listen,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cfg(listen: &str, external: Option<&str>) -> Config {
+        let mut c = Config::parse_from([
+            "campfire",
+            "--listen",
+            listen,
+            "--cert",
+            "certs/cert.pem",
+            "--key",
+            "certs/key.pem",
+        ]);
+        c.external = external.map(parse_external).transpose().unwrap();
+        c
+    }
+
+    #[test]
+    fn external_defaults_to_listen() {
+        let c = cfg("127.0.0.1:8443", None);
+        assert_eq!(c.external_addr().to_string(), "127.0.0.1:8443");
+    }
+
+    #[test]
+    fn external_bare_ip_inherits_listen_port() {
+        let c = cfg("0.0.0.0:443", Some("192.168.178.200"));
+        assert_eq!(c.external_addr().to_string(), "192.168.178.200:443");
+        // a different listen port carries over too
+        let c = cfg("0.0.0.0:8443", Some("203.0.113.7"));
+        assert_eq!(c.external_addr().to_string(), "203.0.113.7:8443");
+    }
+
+    #[test]
+    fn external_full_socket_addr_wins() {
+        let c = cfg("0.0.0.0:443", Some("203.0.113.7:8443"));
+        assert_eq!(c.external_addr().to_string(), "203.0.113.7:8443");
+    }
+
+    #[test]
+    fn external_rejects_garbage() {
+        assert!(parse_external("campfire.example.com").is_err());
+        assert!(parse_external("192.168.178.200:99999").is_err());
     }
 }
