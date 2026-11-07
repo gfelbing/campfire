@@ -260,9 +260,15 @@ export class CallManager {
     const peer = this.peers.get(from);
     if (!peer) return;
     void (async () => {
-      await peer.setRemoteOffer(sdp);
-      const answer = await peer.createAnswer();
-      this.send.sendCallAnswer(from, answer);
+      try {
+        await peer.setRemoteOffer(sdp);
+        const answer = await peer.createAnswer();
+        this.send.sendCallAnswer(from, answer);
+      } catch (err) {
+        // Expected in the impolite glare case ("keeping our own offer") —
+        // our answer to *their* offer of ours is already in flight.
+        this.hooks.onLog(`offer from ${from} not applied: ${String(err)}`);
+      }
     })();
   }
 
@@ -327,6 +333,8 @@ export class CallManager {
     const stream = this.localStream;
     this.peers.set(
       user.id,
+      // Deterministic politeness: the lexicographically smaller id rolls
+      // back on a rejoin glare, the larger keeps its own offer.
       new RtcPeer(stream, servers, {
         onRemoteStream: (s) => {
           this.streams.set(user.id, s);
@@ -338,7 +346,7 @@ export class CallManager {
           this.pushPeers();
         },
         onIceError: (detail) => this.hooks.onLog(`ICE error (${user.name}): ${detail}`),
-      }),
+      }, user.id < this.selfId),
     );
   }
 

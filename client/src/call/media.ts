@@ -41,7 +41,11 @@ let cached: { servers: RTCIceServer[]; expires: number } | null = null;
  * rate limit.
  */
 export async function iceServers(): Promise<RTCIceServer[]> {
-  const host = location.host;
+  // Explicit port on both URLs: without one, browsers fall back to the RFC
+  // defaults (3478 for STUN, 5349 for TURN) — campfire serves both on the
+  // same 443 port as HTTPS/QUIC, and a `location.host` on the default port
+  // carries no port suffix at all.
+  const host = `${location.hostname}:${location.port || 443}`;
   const stun: RTCIceServer = { urls: `stun:${host}` };
   if (cached && Date.now() / 1000 < cached.expires - 60) return cached.servers;
   try {

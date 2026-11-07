@@ -27,6 +27,9 @@ export interface PeerHooks {
 
 export class RtcPeer {
   readonly pc: RTCPeerConnection;
+  /** True while our own offer is in flight (setLocalDescription'd, no
+   *  answer yet) — the glare detector for perfect-negotiation-lite. */
+  private localOfferPending = false;
 
   constructor(
     /** Our local media; its tracks are added to the connection once. */
@@ -34,6 +37,12 @@ export class RtcPeer {
     /** STUN + `turns:` relay servers (README §6.2). */
     servers: RTCIceServer[],
     private hooks: PeerHooks = {},
+    /** Perfect-negotiation-lite for the reconnect glare: when BOTH peers
+     *  rejoin an active call they both offer (README §6.3 rejoin). The
+     *  polite side (deterministically the smaller user id) rolls back its
+     *  own offer and answers the incoming one; the impolite side keeps
+     *  its offer and ignores the incoming one (its answer is in flight). */
+    private polite = false,
   ) {
     this.pc = new RTCPeerConnection({ iceServers: servers });
     for (const track of localStream.getTracks()) this.pc.addTrack(track, localStream);
@@ -92,13 +101,22 @@ export class RtcPeer {
   async createOffer(): Promise<string> {
     const offer = await this.pc.createOffer();
     await this.pc.setLocalDescription(offer);
+    this.localOfferPending = true;
     return offer.sdp ?? "";
   }
 
-  /** Answer side: apply the remote offer (answer is created by the caller
-   *  of `createAnswer`). */
+  /** Answer side: apply the remote offer, rolling back our own pending
+   *  offer when we are the polite side of a glare (both peers offered). */
   async setRemoteOffer(sdp: string): Promise<void> {
+    if (this.localOfferPending) {
+      if (!this.polite) throw new Error("glare: keeping our own offer");
+      // Rollback our local offer, then treat the peer's offer as new.
+      await this.pc.setLocalDescription({
+        type: "rollback",
+      } as unknown as RTCLocalSessionDescriptionInit);
+    }
     await this.pc.setRemoteDescription({ type: "offer", sdp });
+    this.localOfferPending = false;
   }
 
   /** Answer side: create + apply the answer, return the SDP for the wire. */
@@ -111,6 +129,7 @@ export class RtcPeer {
   /** Offer side: apply the remote answer. */
   async setRemoteAnswer(sdp: string): Promise<void> {
     await this.pc.setRemoteDescription({ type: "answer", sdp });
+    this.localOfferPending = false;
   }
 
   /** Apply one relayed candidate (JSON `RTCIceCandidateInit` from the wire). */
