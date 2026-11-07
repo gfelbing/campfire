@@ -45,7 +45,11 @@ pub fn free_local_tcp() -> std::io::Result<SocketAddr> {
 
 /// Start the TLS front on the public TCP port. `turn_internal` is where
 /// TURN's plaintext TCP listener lives (splice target for STUN/TURN).
-pub fn start(cfg: &Config, turn_internal: SocketAddr) -> Result<()> {
+pub fn start(
+    cfg: &Config,
+    turn_internal: SocketAddr,
+    metrics: crate::metrics::Metrics,
+) -> Result<()> {
     let (certs, key) = tls::load_pem(&cfg.cert, &cfg.key)?;
     // Only http/1.1: browsers always offer h2 as well, but the bootstrap
     // answers HTTP/1.1 by hand — selecting h2 would break that.
@@ -74,6 +78,7 @@ pub fn start(cfg: &Config, turn_internal: SocketAddr) -> Result<()> {
             let acceptor = acceptor.clone();
             let turn_internal = turn_internal;
             let alt = alt.clone();
+            let metrics = metrics.clone();
             tokio::spawn(async move {
                 let mut tls = match acceptor.accept(tcp).await {
                     Ok(tls) => tls,
@@ -91,7 +96,9 @@ pub fn start(cfg: &Config, turn_internal: SocketAddr) -> Result<()> {
                     Ok(n) => n,
                 };
                 if n >= 8 && buf[4..8] == STUN_MAGIC {
-                    splice_to_turn(tls, turn_internal, &buf[..n]).await;
+                    metrics.turn_splice_open();
+                    splice_to_turn(tls, turn_internal, &buf[..n], metrics.clone()).await;
+                    metrics.turn_splice_close();
                 } else {
                     let line = buf[..n].iter().position(|&b| b == b'\n').map(|i| &buf[..i]);
                     let wants_alt_marker = line.is_some_and(|l| {
@@ -111,8 +118,12 @@ pub fn start(cfg: &Config, turn_internal: SocketAddr) -> Result<()> {
 /// Splice an established TLS stream (already recognized as STUN/TURN by its
 /// first bytes) to TURN's internal plaintext listener. `first` is the bytes
 /// already consumed from the client side and must be replayed.
-async fn splice_to_turn<S>(tls: S, turn_internal: SocketAddr, first: &[u8])
-where
+async fn splice_to_turn<S>(
+    tls: S,
+    turn_internal: SocketAddr,
+    first: &[u8],
+    metrics: crate::metrics::Metrics,
+) where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
     let turn = match tokio::net::TcpStream::connect(turn_internal).await {
@@ -129,11 +140,36 @@ where
     }
     // Client → TURN runs in its own task; this task drains TURN → client and
     // shuts the client side down when the server goes quiet.
+    let metrics_up = metrics.clone();
     let up = tokio::spawn(async move {
-        let _ = tokio::io::copy(&mut tls_read, &mut turn_write).await;
+        // Copy in chunks to count the relayed bytes (README §11 Phase 8).
+        let mut buf = [0u8; 8192];
+        loop {
+            match tls_read.read(&mut buf).await {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    metrics_up.turn_bytes(n, 0);
+                    if turn_write.write_all(&buf[..n]).await.is_err() {
+                        break;
+                    }
+                }
+            }
+        }
         let _ = turn_write.shutdown().await;
     });
-    let _ = tokio::io::copy(&mut turn_read, &mut tls_write).await;
+    // TURN → client, also chunked for the byte counters.
+    let mut buf = [0u8; 8192];
+    loop {
+        match turn_read.read(&mut buf).await {
+            Ok(0) | Err(_) => break,
+            Ok(n) => {
+                metrics.turn_bytes(0, n);
+                if tls_write.write_all(&buf[..n]).await.is_err() {
+                    break;
+                }
+            }
+        }
+    }
     let _ = tls_write.shutdown().await;
     let _ = up.await;
 }

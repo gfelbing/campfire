@@ -42,7 +42,7 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-uti
 tokio-rustls = "0.26"
 tokio-stream = { version = "0.1", features = ["sync", "time"] }
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 turn-server = { version = "4.1", default-features = false, features = ["tcp", "ssl"] }
 thiserror = "2"
 

@@ -8,6 +8,7 @@ pub mod api;
 pub mod bootstrap;
 pub mod config;
 pub mod demux;
+pub mod metrics;
 pub mod realtime;
 pub mod stun;
 pub mod tls;
@@ -32,6 +33,7 @@ pub async fn run(cfg: &config::Config) -> Result<()> {
     let endpoint = make_endpoint(quinn_conf, socket)?;
     // TURN REST secret: `--turn-secret`, or generated (and logged once) so
     // the app still works without the flag.
+    let metrics = metrics::Metrics::new();
     let turn_secret = match &cfg.turn_secret {
         Some(secret) => secret.clone(),
         None => {
@@ -47,12 +49,12 @@ pub async fn run(cfg: &config::Config) -> Result<()> {
     // splices STUN/TURN (recognized by the STUN magic cookie) to TURN's
     // internal plaintext listener below.
     let turn_internal = bootstrap::free_local_tcp()?;
-    bootstrap::start(cfg, turn_internal)?;
+    bootstrap::start(cfg, turn_internal, metrics.clone())?;
     turn::start(cfg, &turn_secret, turn_internal);
-    let state = api::AppState::new(cfg, turn_secret);
+    let state = api::AppState::with_metrics(cfg, turn_secret, metrics.clone());
     info!(%local, "campfire listening over HTTP/3 (QUIC) + STUN + TURN");
-    let _tick = world::start_ticking(state.world.clone());
-    run_endpoint(endpoint, api::router(state)).await;
+    let _tick = world::start_ticking_with(state.world.clone(), metrics.clone());
+    run_endpoint_with_metrics(endpoint, api::router(state), metrics).await;
     Ok(())
 }
 
@@ -77,6 +79,19 @@ pub fn make_endpoint(
 /// Returns when the Ctrl-C signal arrives; in-flight connections are left to
 /// drain (full graceful shutdown lands in Phase 8).
 pub async fn run_endpoint(endpoint: quinn::Endpoint, app: axum::Router) {
+    run_endpoint_with_metrics(endpoint, app, metrics::Metrics::new()).await;
+}
+
+/// [`run_endpoint`] with connection metrics and a graceful shutdown
+/// (README §11 Phase 8): on Ctrl-C the endpoint stops accepting, every
+/// open connection is closed with a NO_ERROR code (browsers reconnect and
+/// keep their identity via the token), and the loop returns after the
+/// drain window so the tick task and TURN tasks die with the process.
+pub async fn run_endpoint_with_metrics(
+    endpoint: quinn::Endpoint,
+    app: axum::Router,
+    metrics: metrics::Metrics,
+) {
     loop {
         let next = tokio::select! {
             _ = tokio::signal::ctrl_c() => {
@@ -88,12 +103,15 @@ pub async fn run_endpoint(endpoint: quinn::Endpoint, app: axum::Router) {
         let Some(incoming) = next else {
             break; // endpoint closed
         };
+        metrics.conn_open();
+        let metrics = metrics.clone();
         let app = app.clone();
         tokio::spawn(async move {
             let conn = match incoming.await {
                 Ok(conn) => conn,
                 Err(err) => {
                     debug!(%err, "QUIC handshake failed");
+                    metrics.conn_close();
                     return;
                 }
             };
@@ -108,8 +126,14 @@ pub async fn run_endpoint(endpoint: quinn::Endpoint, app: axum::Router) {
             if let Err(err) = serve_http3(app, conn).await {
                 debug!(error = %err, "HTTP/3 connection ended");
             }
+            metrics.conn_close();
         });
     }
+    // Graceful drain: stop accepting and close the open connections with a
+    // well-formed QUIC close (not a process kill). The 1 s window lets the
+    // close frames reach clients before the process exits.
+    endpoint.close(quinn::VarInt::from_u32(0), b"server shutting down");
+    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
 }
 
 /// Drive one QUIC connection as an HTTP/3 connection.

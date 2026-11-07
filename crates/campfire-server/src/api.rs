@@ -57,15 +57,28 @@ pub struct AppState {
     /// the cached pair (many users behind one NAT legitimately share it —
     /// the mint limit is what throttles abuse, not uniqueness).
     pub turn_rate: Arc<std::sync::Mutex<HashMap<std::net::IpAddr, (Instant, TurnCredential)>>>,
+    /// Shared metrics registry (README §11 Phase 8, `/metrics`).
+    pub metrics: crate::metrics::Metrics,
 }
 
 impl AppState {
     pub fn new(cfg: &Config, turn_secret: String) -> Self {
+        Self::with_metrics(cfg, turn_secret, crate::metrics::Metrics::new())
+    }
+
+    /// [`AppState::new`] with a shared metrics registry (the real server
+    /// passes the same one the tick loop and TLS front feed).
+    pub fn with_metrics(
+        cfg: &Config,
+        turn_secret: String,
+        metrics: crate::metrics::Metrics,
+    ) -> Self {
         Self {
             world: World::new(),
             static_dir: cfg.static_dir.clone(),
             turn_secret,
             turn_rate: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            metrics,
         }
     }
 }
@@ -93,6 +106,8 @@ struct MapInfo {
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/healthz", get(healthz))
+        // Prometheus scrape endpoint (README §11 Phase 8).
+        .route("/metrics", get(metrics_endpoint))
         .route("/api/v1/maps", get(list_maps))
         .route("/api/v1/maps/{id}", get(map_by_id))
         .route("/api/v1/rooms", get(list_rooms))
@@ -106,6 +121,19 @@ pub fn router(state: AppState) -> Router {
         // Everything else is a static asset (or a 404).
         .fallback(handle_static)
         .with_state(state)
+}
+
+/// Prometheus text exposition (README §14); the world's gauges are read
+/// here so they are consistent with the moment of the scrape.
+async fn metrics_endpoint(State(state): State<AppState>) -> impl axum::response::IntoResponse {
+    let (users, rooms) = state.world.stats();
+    let calls = state.world.call_count();
+    (
+        [(header::CONTENT_TYPE, "text/plain; version=0.0.4")],
+        state
+            .metrics
+            .render((users as u64, rooms as u64, calls as u64)),
+    )
 }
 
 async fn healthz(State(state): State<AppState>) -> Json<Health> {
@@ -375,6 +403,7 @@ async fn fallback_event(
                     }
                     let mut chat = session.chat.lock().unwrap();
                     if !chat.allow(1, 1) {
+                        state.metrics.rate_limit_hit();
                         return Err(err(ErrorCode::RateLimited));
                     }
                     drop(chat);

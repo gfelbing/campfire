@@ -39,6 +39,11 @@ pub struct Config {
     #[arg(long)]
     pub turn_secret: Option<String>,
 
+    /// Emit structured JSON logs (one object per line) instead of the
+    /// human-readable default — for log shippers (README §11 Phase 8).
+    #[arg(long)]
+    pub log_json: bool,
+
     /// Externally visible address of this server, advertised by the TURN
     /// server for relayed allocations. Defaults to `listen` (correct for
     /// dev; set behind a NAT/firewall).

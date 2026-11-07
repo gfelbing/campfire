@@ -622,17 +622,38 @@ impl World {
         let rooms = self.rooms.lock().unwrap();
         (rooms.values().map(|r| r.users.len()).sum(), rooms.len())
     }
+
+    /// The room with an active bubble in it (README §6.3): one per room at
+    /// most, so the count is the number of live bubbles.
+    pub fn call_count(&self) -> usize {
+        self.rooms
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|r| r.call.is_some())
+            .count()
+    }
 }
 
 /// Spawn the 50 ms tick loop (README §5); returns its handle so the caller
 /// can stop it.
 pub fn start_ticking(world: World) -> tokio::task::JoinHandle<()> {
+    start_ticking_with(world, crate::metrics::Metrics::new())
+}
+
+/// [`start_ticking`], with tick-duration metrics (README §11 Phase 8).
+pub fn start_ticking_with(
+    world: World,
+    metrics: crate::metrics::Metrics,
+) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(TICK);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             tick.tick().await;
+            let start = std::time::Instant::now();
             world.tick();
+            metrics.tick(start.elapsed().as_micros() as u64);
         }
     })
 }

@@ -10,14 +10,19 @@ use clap::Parser;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "campfire_server=info".into()),
-        )
-        .init();
+    let cfg = Config::parse();
+    // Structured JSON logs (README §11 Phase 8) or the human default; the
+    // filter always comes from RUST_LOG (default: info for this crate).
+    let subscriber = tracing_subscriber::fmt().with_env_filter(
+        tracing_subscriber::EnvFilter::try_from_default_env()
+            .unwrap_or_else(|_| "campfire_server=info".into()),
+    );
+    if cfg.log_json {
+        subscriber.json().init();
+    } else {
+        subscriber.init();
+    }
 
     campfire_server::api::mark_start();
-    let cfg = Config::parse();
     campfire_server::run(&cfg).await
 }

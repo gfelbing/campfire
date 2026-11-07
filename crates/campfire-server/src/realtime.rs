@@ -30,6 +30,7 @@ use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
 use crate::api::AppState;
+use crate::metrics::Metrics;
 use crate::world::World;
 
 /// The session's `(room, user id)` once joined, shared between the command
@@ -75,7 +76,12 @@ pub async fn handle_wt(
         Ok(session) => {
             let session_id = session.session_id();
             info!(?session_id, "webtransport session opened");
-            tokio::spawn(session_task(state.world, session, conn));
+            tokio::spawn(session_task(
+                state.world,
+                session,
+                conn,
+                state.metrics.clone(),
+            ));
             StatusCode::OK.into_response()
         }
         Err(err) => {
@@ -122,7 +128,13 @@ impl RateLimit {
 /// keeps the dead connection open and every reconnect attempt opens another
 /// session on it that can never be answered (observed as an endless
 /// "Connection lost" reconnect storm).
-async fn session_task(world: World, session: WebTransportSession, conn: quinn::Connection) {
+async fn session_task(
+    world: World,
+    session: WebTransportSession,
+    conn: quinn::Connection,
+    metrics: Metrics,
+) {
+    metrics.session_open();
     // (room, user id) once joined, so the datagram tasks can attribute
     // inbound movement and nobody can move before joining.
     let who: Who = Arc::new(Mutex::new(None));
@@ -131,8 +143,10 @@ async fn session_task(world: World, session: WebTransportSession, conn: quinn::C
     let mut datagrams = session.datagram_reader();
     let who_in = who.clone();
     let world_in = world.clone();
+    let metrics_in = metrics.clone();
     let datagram_task = tokio::spawn(async move {
         while let Ok(dg) = datagrams.read_datagram().await {
+            metrics_in.datagram_in(dg.payload().len());
             let Ok(batch) =
                 from_line::<MovementBatch>(std::str::from_utf8(dg.payload()).unwrap_or(""))
             else {
@@ -149,8 +163,10 @@ async fn session_task(world: World, session: WebTransportSession, conn: quinn::C
     // queue (README §5).
     let (dtx, mut dtx_rx) = mpsc::unbounded_channel::<Vec<u8>>();
     let mut dtx_sender = session.datagram_sender();
+    let metrics_out = metrics.clone();
     let datagram_sink = tokio::spawn(async move {
         while let Some(chunk) = dtx_rx.recv().await {
+            metrics_out.datagram_out(chunk.len());
             if dtx_sender.send_datagram(Bytes::from(chunk)).is_err() {
                 break; // connection is gone
             }
@@ -189,7 +205,7 @@ async fn session_task(world: World, session: WebTransportSession, conn: quinn::C
             // session's disconnect must not clobber a newer session that
             // already restored the same token.
             let session_id = world.next_session_id();
-            run_command_stream(&world, stream, who, dtx, session_id).await
+            run_command_stream(&world, stream, who, dtx, session_id, metrics.clone()).await
         }
         None => debug!("no command stream"),
     }
@@ -211,6 +227,7 @@ async fn run_command_stream<S>(
     who: Who,
     dtx: mpsc::UnboundedSender<Vec<u8>>,
     session_id: u64,
+    metrics: Metrics,
 ) where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + 'static,
 {
@@ -250,6 +267,7 @@ async fn run_command_stream<S>(
             Ok(Ok(n)) => {
                 first_message = false;
                 if !bytes.allow(n, BYTES_PER_SEC) {
+                    metrics.rate_limit_hit();
                     warn!("session exceeded inbound byte limit");
                     break 'read;
                 }
@@ -263,6 +281,7 @@ async fn run_command_stream<S>(
                     let line: Vec<u8> = buf.drain(..=pos).collect();
                     let line = String::from_utf8_lossy(&line[..line.len() - 1]);
                     if !msgs.allow(1, MSGS_PER_SEC) {
+                        metrics.rate_limit_hit();
                         warn!("session exceeded message rate");
                         break 'read;
                     }
@@ -275,6 +294,7 @@ async fn run_command_stream<S>(
                         &who,
                         &dtx,
                         session_id,
+                        &metrics,
                     ) {
                         break 'read;
                     }
@@ -311,6 +331,7 @@ fn dispatch(
     who: &Who,
     dtx: &mpsc::UnboundedSender<Vec<u8>>,
     session_id: u64,
+    metrics: &Metrics,
 ) -> bool {
     match campfire_protocol::from_line::<ClientMsg>(line) {
         Ok(ClientMsg::Join {
@@ -381,6 +402,7 @@ fn dispatch(
                 return send(tx, ErrorCode::ChatTooLong);
             }
             if !chat_limit.allow(1, CHAT_PER_SEC) {
+                metrics.rate_limit_hit();
                 return send(tx, ErrorCode::RateLimited);
             }
             let msg = ChatMsg {

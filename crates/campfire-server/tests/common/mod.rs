@@ -43,6 +43,7 @@ pub async fn start_server() -> (SocketAddr, CertificateDer<'static>) {
         static_dir: None,
         turn_secret: "test-turn-secret".to_owned(),
         turn_rate: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        metrics: campfire_server::metrics::Metrics::new(),
     };
     let app = campfire_server::api::router(state);
     tokio::spawn(campfire_server::run_endpoint(endpoint, app));

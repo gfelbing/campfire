@@ -381,6 +381,7 @@ One developer, estimates in days. **MVP (walking + presence) = Phases 0–4 (≈
 - Structured logs (tracing, JSON), graceful shutdown, full config via env+clap (`--external-host` for STUN XOR-mapped-address + TURN external announcement — required when the box sits behind NAT/LB).
 - Docker: multi-stage → static image; `EXPOSE 443/udp 443/tcp`; deploy doc with firewall + DNS + TLS instructions ([§15](#15-hosting--operations)).
 - **Done when:** `docker run -p 443:443/udp -p 443:443/tcp … campfire` serves the full MVP from a clean machine.
+- *Delivery note:* all shipped — hand-rolled `/metrics` (no metrics crate; counters behind one `Arc`, world gauges read at scrape time, TURN numbers observed at the TLS front since the embedded relay exposes no stats API), `--log-json` structured logs, graceful shutdown (Ctrl-C stops the accept loop, closes open QUIC connections, 1 s drain), and a multi-stage `Dockerfile` (Vite build + cargo release build → `debian:stable-slim`). Docker `run` itself is unverified locally (no daemon in the dev environment); the deploy doc in [§15](#15-hosting--operations) reflects what is implemented.
 
 ### Phase 9 — Hardening (3.5 d)
 - Load harness (`tools/loadtest`): walking users + call groups over real QUIC, ramped to the targets in [§13](#13-performance-targets); forced-relay variant (UDP blocked) to soak the TURN path; profile the tick loop and relay forwarding.
@@ -424,15 +425,19 @@ Numbers are verified with `tools/loadtest`, not assumed; binary movement encodin
 
 ## 15. Hosting & operations
 
-- **Artifact:** one static binary (+ optionally the Docker image).
+- **Artifact:** one static binary (+ the Docker image, multi-stage build in `Dockerfile`: the client is built with Vite in the build stage so the binary embeds it; the runtime stage is `debian:stable-slim` + the one binary + CA certs).
   ```
   docker run -d \
     -p 443:443/udp -p 443:443/tcp \
     -v /etc/campfire/certs:/certs \
     campfire --listen 0.0.0.0:443 \
              --cert /certs/cert.pem --key /certs/key.pem \
-             --external-host office.example.com
+             --external office.example.com:443
   ```
+  (`--external` is the CLI flag — the public `host:port` STUN/TURN advertise.)
+  Env: `RUST_LOG=info` (or `debug`) controls log level; `--log-json` switches
+  to one JSON object per line. Graceful shutdown: SIGINT/SIGTERM stops the
+  accept loop, closes open QUIC connections cleanly, and drains for 1 s.
 - **Firewall:** allow `443/udp` and `443/tcp` (and nothing else for this service).
 - **DNS:** A/AAAA record for the hostname; the TLS name must match (browsers verify it for both QUIC and `turns:`).
 - **`--external-host`** matters whenever the box sits behind NAT/LB: STUN answers with the public address (XOR-MAPPED-ADDRESS) and TURN announces it to clients.
@@ -440,7 +445,7 @@ Numbers are verified with `tools/loadtest`, not assumed; binary movement encodin
   - Dev: `just certs` (local CA + signed localhost cert) and `just trust` (CA into the NSS store). One caveat, verified in a Brave netlog: **Chromium trusts only its built-in roots for QUIC** — a user-installed CA verifies fine over TCP but always fails the QUIC handshake (`CERTIFICATE_VERIFY_FAILED`), so the dev loop launches the browser with the cert pinned by SPKI: `just brave` (`--origin-to-force-quic-on` + `--ignore-certificate-errors-spki-list`). The dev server binds `[::]:8443` because browsers resolve `localhost` to `::1` first.
   - Prod: Let's Encrypt. Note that **HTTP-01 validation is impossible** — it requires plaintext HTTP over TCP, which this server deliberately does not listen on. Use **DNS-01** (via `acme2-rs` with your DNS provider, or `certbot --manual`/DNS plugin on the host) and mount the PEM. A publicly-trusted cert needs no browser flags for QUIC.
 - **Health check:** `curl --http3 -s https://host/healthz` (or the `/metrics` endpoint for probes).
-- **Monitoring:** Prometheus scrapes `/metrics` over HTTP/3 (Prometheus ≥ 2.45); turn-rs exposes its own metrics (feature-gated); structured JSON logs to stdout.
+- **Monitoring:** Prometheus scrapes `/metrics` over HTTP/3 (Prometheus ≥ 2.45): connections/WebTransport sessions (gauge + total), users/rooms/active bubbles, datagrams in/out with bytes, rate-limit rejections, tick time (`campfire_tick_seconds_total` / `campfire_ticks_total` → mean tick cost), and TURN splice count + relayed bytes as observed at the TLS front (the embedded TURN server exposes no stats API of its own). Structured JSON logs: run with `--log-json` (one object per line on stdout).
 - **Scaling:** v1 is single-instance by design (state is in memory; the TURN relay is stateful). A future multi-node deployment means sharding rooms + instances across nodes + a TURN pool — out of scope, just noted.
 
 ## 16. Risks & mitigations
