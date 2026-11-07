@@ -26,6 +26,11 @@ pub struct Config {
     /// QUIC idle timeout in seconds.
     #[arg(long, default_value_t = 300)]
     pub idle_timeout_secs: u64,
+
+    /// Serve the web client from this directory at runtime instead of the
+    /// compile-time embed (dev loop: `vite build --watch` + server).
+    #[arg(long)]
+    pub static_dir: Option<PathBuf>,
 }
 
 impl Config {

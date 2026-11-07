@@ -1,16 +1,78 @@
 #!/usr/bin/env python3
 """Generate the bundled Campfire maps as Tiled JSON (orthogonal).
 
-Walkability = collision tile layer: GID 0 walkable, non-zero blocked.
-Row-major data: index = y * width + x.
+Layers:
+- ground:     visual layer rendered by the client (tileset `campfire`, 3 tiles:
+              0 water, 1 floor, 2 wall/rock)
+- collision:  walkability layer used by the server (GID 0 walkable, non-zero
+              blocked) — the client ignores it
+
+Row-major data: index = y * width + x. Also writes the 32x96 tiles.png
+tileset image used by the ground layer.
 """
 import json
 import os
+import struct
+import zlib
 
-OUT = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "maps")
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+OUT = os.path.join(ROOT, "maps")
+
+# Tile colors (r, g, b) for the 3-tile tileset.
+WATER = (29, 53, 87)
+FLOOR = (233, 228, 216)
+WALL = (74, 78, 87)
+TILE_SIZE = 32
 
 
-def tiled(w, h, grid, name):
+def write_png(path, width, height, pixels):
+    """Write an 8-bit RGB PNG (pixels: list of rows of (r,g,b))."""
+    def chunk(tag, data):
+        return (
+            struct.pack(">I", len(data))
+            + tag
+            + data
+            + struct.pack(">I", zlib.crc32(tag + data) & 0xFFFFFFFF)
+        )
+
+    raw = b"".join(
+        b"\x00" + b"".join(bytes(px) for px in row) for row in pixels
+    )
+    png = (
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0))
+        + chunk(b"IDAT", zlib.compress(raw))
+        + chunk(b"IEND", b"")
+    )
+    with open(path, "wb") as f:
+        f.write(png)
+
+
+def tile_pixels(base):
+    """One 32x32 tile: flat color with a 1px darker outline so the grid reads."""
+    dark = tuple(max(0, c - 30) for c in base)
+    rows = []
+    for y in range(TILE_SIZE):
+        row = []
+        for x in range(TILE_SIZE):
+            edge = x == 0 or y == 0 or x == TILE_SIZE - 1 or y == TILE_SIZE - 1
+            row.append(dark if edge else base)
+        rows.append(row)
+    return rows
+
+
+def write_tileset():
+    tiles = [WATER, FLOOR, WALL]
+    pixels = []
+    for t in tiles:
+        pixels.extend(tile_pixels(t))
+    path = os.path.join(ROOT, "client", "src", "assets", "tiles.png")
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    write_png(path, TILE_SIZE, TILE_SIZE * len(tiles), pixels)
+    print(path)
+
+
+def tiled(w, h, ground, collision):
     return {
         "type": "map",
         "orientation": "orthogonal",
@@ -18,15 +80,15 @@ def tiled(w, h, grid, name):
         "tversion": 1.10,
         "width": w,
         "height": h,
-        "tilewidth": 32,
-        "tileheight": 32,
+        "tilewidth": TILE_SIZE,
+        "tileheight": TILE_SIZE,
         "infinite": False,
-        "nextlayerid": 2,
+        "nextlayerid": 3,
         "nextobjectid": 1,
         "layers": [
             {
                 "id": 1,
-                "name": name,
+                "name": "ground",
                 "type": "tilelayer",
                 "visible": True,
                 "opacity": 1,
@@ -34,7 +96,32 @@ def tiled(w, h, grid, name):
                 "y": 0,
                 "width": w,
                 "height": h,
-                "data": [c for row in grid for c in row],
+                "data": [c for row in ground for c in row],
+            },
+            {
+                "id": 2,
+                "name": "collision",
+                "type": "tilelayer",
+                "visible": True,
+                "opacity": 1,
+                "x": 0,
+                "y": 0,
+                "width": w,
+                "height": h,
+                "data": [c for row in collision for c in row],
+            },
+        ],
+        "tilesets": [
+            {
+                "firstgid": 1,
+                "name": "campfire",
+                "tilewidth": TILE_SIZE,
+                "tileheight": TILE_SIZE,
+                "columns": 1,
+                "count": 3,
+                "image": "tiles.png",
+                "imageheight": TILE_SIZE * 3,
+                "imagewidth": TILE_SIZE,
             }
         ],
     }
@@ -50,34 +137,52 @@ def save(filename, doc):
 
 # --- office: 40x30, border walls + interior walls with door gaps -----------
 w, h = 40, 30
-office = [[0] * w for _ in range(h)]
+collision = [[0] * w for _ in range(h)]
 for x in range(w):
-    office[0][x] = 1
-    office[h - 1][x] = 1
+    collision[0][x] = 1
+    collision[h - 1][x] = 1
 for y in range(h):
-    office[y][0] = 1
-    office[y][w - 1] = 1
+    collision[y][0] = 1
+    collision[y][w - 1] = 1
 # Vertical wall at x=13 and x=26, with a door gap at y=11..15.
 for x in (13, 26):
     for y in list(range(4, 11)) + list(range(16, 26)):
-        office[y][x] = 1
+        collision[y][x] = 1
 # Horizontal wall at y=14 across the middle, door at x=19.
 for x in range(14, 26):
     if x != 19:
-        office[14][x] = 1
-save("office.json", tiled(w, h, office, "collision"))
+        collision[14][x] = 1
+# Visual: floor everywhere, walls where the collision says so.
+ground = [[2 if collision[y][x] else 1 for x in range(w)] for y in range(h)]
+save("office.json", tiled(w, h, ground, collision))
 
 # --- island: 36x28, water ring + a small rock cluster ----------------------
 w, h = 36, 28
-island = [[0] * w for _ in range(h)]
+collision = [[0] * w for _ in range(h)]
 for x in range(w):
-    island[0][x] = 1
-    island[h - 1][x] = 1
+    collision[0][x] = 1
+    collision[h - 1][x] = 1
 for y in range(h):
-    island[y][0] = 1
-    island[y][w - 1] = 1
+    collision[y][0] = 1
+    collision[y][w - 1] = 1
 # Rocks in the north, far from the center spawn.
 for y in range(4, 7):
     for x in range(16, 19):
-        island[y][x] = 1
-save("island.json", tiled(w, h, island, "collision"))
+        collision[y][x] = 1
+# Visual: water on the ring, floor on land, rocks where the collision says so.
+ground = []
+for y in range(h):
+    row = []
+    for x in range(w):
+        if collision[y][x] == 1 and (
+            x == 0 or x == w - 1 or y == 0 or y == h - 1
+        ):
+            row.append(0)  # water
+        elif collision[y][x] == 1:
+            row.append(2)  # rock
+        else:
+            row.append(1)  # floor
+    ground.append(row)
+save("island.json", tiled(w, h, ground, collision))
+
+write_tileset()

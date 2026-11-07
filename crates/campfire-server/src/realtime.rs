@@ -28,6 +28,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
+use crate::api::AppState;
 use crate::world::World;
 
 /// The session's `(room, user id)` once joined, shared between the command
@@ -47,27 +48,27 @@ const BYTES_PER_SEC: usize = 256 * 1024;
 /// Per-session chat limit (README §14).
 const CHAT_PER_SEC: usize = 1;
 /// A chat line longer than this is refused (README §14).
-const MAX_CHAT_CHARS: usize = 500;
+pub(crate) const MAX_CHAT_CHARS: usize = 500;
 /// Room id: `1..=32` chars of `[a-z0-9_-]` (README §5).
-const MAX_ROOM_CHARS: usize = 32;
+pub(crate) const MAX_ROOM_CHARS: usize = 32;
 /// Name: trimmed, `1..=24` chars (README §14).
-const MAX_NAME_CHARS: usize = 24;
+pub(crate) const MAX_NAME_CHARS: usize = 24;
 /// Avatar color string cap.
-const MAX_AVATAR_CHARS: usize = 16;
+pub(crate) const MAX_AVATAR_CHARS: usize = 16;
 
 /// Handler for `CONNECT /wt`: accept the upgrade and hand the session to a
 /// dedicated task. The handler must call [`WebTransportUpgrade::accept`]
 /// before returning; after a successful claim the response is ignored by the
 /// h3-axum dispatcher (the session owns the connection).
 pub async fn handle_wt(
-    State(world): State<World>,
+    State(state): State<AppState>,
     upgrade: h3_axum::WebTransportUpgrade,
 ) -> Response {
     match upgrade.accept().await {
         Ok(session) => {
             let session_id = session.session_id();
             info!(?session_id, "webtransport session opened");
-            tokio::spawn(session_task(world, session));
+            tokio::spawn(session_task(state.world, session));
             StatusCode::OK.into_response()
         }
         Err(err) => {
@@ -79,20 +80,21 @@ pub async fn handle_wt(
 
 /// Fixed 1-second-window token bucket: `allow(n, max)` admits up to `max`
 /// units of `n` per second. Simple and good enough for per-session limits.
-struct RateLimit {
+#[derive(Clone)]
+pub(crate) struct RateLimit {
     window_start: Instant,
     used: usize,
 }
 
 impl RateLimit {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             window_start: Instant::now(),
             used: 0,
         }
     }
 
-    fn allow(&mut self, n: usize, max: usize) -> bool {
+    pub(crate) fn allow(&mut self, n: usize, max: usize) -> bool {
         let now = Instant::now();
         if now.duration_since(self.window_start) >= Duration::from_secs(1) {
             self.window_start = now;
@@ -331,7 +333,7 @@ fn dispatch(
 }
 
 /// Room ids: `1..=32` chars of `[a-z0-9_-]`.
-fn valid_room(room: &str) -> bool {
+pub(crate) fn valid_room(room: &str) -> bool {
     (1..=MAX_ROOM_CHARS).contains(&room.len())
         && room
             .chars()
@@ -344,7 +346,7 @@ fn send(tx: &mpsc::UnboundedSender<ServerMsg>, code: ErrorCode) -> bool {
 }
 
 /// Seconds since the Unix epoch (0 if the clock is before 1970 — harmless).
-fn unix_ts() -> u64 {
+pub(crate) fn unix_ts() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())

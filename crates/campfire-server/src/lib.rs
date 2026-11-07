@@ -19,10 +19,10 @@ pub async fn run(cfg: &config::Config) -> Result<()> {
     let quinn_conf = tls::server_config_from_files(&cfg.cert, &cfg.key, cfg.idle_timeout())?;
     let endpoint = quinn::Endpoint::server(quinn_conf, cfg.listen)?;
     let local = endpoint.local_addr()?;
-    let world = world::World::new();
+    let state = api::AppState::new(cfg);
     info!(%local, "campfire listening over HTTP/3 (QUIC)");
-    let _tick = world::start_ticking(world.clone());
-    run_endpoint(endpoint, api::router(world)).await;
+    let _tick = world::start_ticking(state.world.clone());
+    run_endpoint(endpoint, api::router(state)).await;
     Ok(())
 }
 

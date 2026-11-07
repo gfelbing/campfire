@@ -344,6 +344,7 @@ dependencies = [
  "campfire-maps",
  "campfire-protocol",
  "clap",
+ "futures-util",
  "h3",
  "h3-axum",
  "h3-quinn",
@@ -358,6 +359,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "tokio-stream",
  "tracing",
  "tracing-subscriber",
  "turn-server",
@@ -2493,6 +2495,7 @@ dependencies = [
  "futures-core",
  "pin-project-lite",
  "tokio",
+ "tokio-util",
 ]
 
 [[package]]

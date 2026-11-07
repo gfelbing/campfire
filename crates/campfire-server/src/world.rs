@@ -134,6 +134,10 @@ impl World {
             return Err(JoinError::RoomFull);
         }
         let now = Instant::now();
+        // If the room already has members, mark the joiner dirty so the next
+        // tick broadcasts the spawn position (an empty room has no one to
+        // tell, and no one will learn the position from a datagram).
+        let dirty = !room_entry.users.is_empty();
         room_entry.users.insert(
             id.clone(),
             Member {
@@ -146,7 +150,7 @@ impl World {
                 last_move_at: now,
                 move_window_start: now,
                 move_window_count: 0,
-                dirty: false,
+                dirty,
                 tx,
                 dtx,
             },
@@ -317,6 +321,21 @@ impl World {
         }
     }
 
+    /// Snapshot of the active rooms for `GET /api/v1/rooms`.
+    pub fn rooms_list(&self) -> Vec<RoomInfo> {
+        let rooms = self.rooms.lock().unwrap();
+        let mut list: Vec<RoomInfo> = rooms
+            .iter()
+            .map(|(id, room)| RoomInfo {
+                room: id.clone(),
+                map: id.clone(),
+                users: room.users.len(),
+            })
+            .collect();
+        list.sort_by(|a, b| a.room.cmp(&b.room));
+        list
+    }
+
     /// Snapshot for `/healthz`.
     pub fn stats(&self) -> (usize, usize) {
         let rooms = self.rooms.lock().unwrap();
@@ -366,6 +385,17 @@ pub struct Joined {
     pub users: Vec<UserState>,
     /// Last chat lines of the room.
     pub chat: Vec<ChatMsg>,
+}
+
+/// One active room, as reported by `GET /api/v1/rooms`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct RoomInfo {
+    /// Room id (== map id in v1).
+    pub room: String,
+    /// The map the room plays on.
+    pub map: String,
+    /// Current member count.
+    pub users: usize,
 }
 
 #[cfg(test)]
@@ -458,6 +488,13 @@ mod tests {
         world.join("office", "bob", None, tx_b, dtx_b).unwrap();
         let (spawn_x, spawn_y) = world.map("office").unwrap().spawn;
 
+        // Bob's join (the room already had Alice) makes him dirty: the first
+        // tick broadcasts his spawn position to everyone. Flush it so the
+        // move-validation assertions below see a clean slate.
+        world.tick();
+        assert!(dgr_a.try_recv().is_ok(), "alice hears bob's spawn");
+        assert!(dgr_b.try_recv().is_ok(), "bob hears his own spawn");
+
         // Too far for the elapsed time: the speed gate rejects it.
         world.apply_movement(
             "office",
@@ -528,6 +565,31 @@ mod tests {
             dgr_a.try_recv().is_err(),
             "a move into a wall must not be accepted"
         );
+    }
+
+    #[test]
+    fn join_becomes_dirty_only_for_nonempty_rooms() {
+        let world = World::new();
+        let (tx_a, _) = channel();
+        let (dtx_a, mut dgr_a) = datagram_channel();
+        world.join("office", "alice", None, tx_a, dtx_a).unwrap();
+        // Joining an empty room has no one to tell: nothing is broadcast.
+        world.tick();
+        assert!(dgr_a.try_recv().is_err(), "empty-room joiner is not dirty");
+
+        let (tx_b, _) = channel();
+        let (dtx_b, mut dgr_b) = datagram_channel();
+        let b = world.join("office", "bob", None, tx_b, dtx_b).unwrap();
+        world.tick();
+        let dg = dgr_a.try_recv().expect("alice hears bob's spawn");
+        let batch: MovementBatch =
+            from_line(std::str::from_utf8(&dg).expect("batch is utf8")).unwrap();
+        assert_eq!(batch.m.len(), 1);
+        assert_eq!(batch.m[0].id, b.you);
+        let (spawn_x, spawn_y) = world.map("office").unwrap().spawn;
+        assert_eq!((batch.m[0].x, batch.m[0].y), (spawn_x, spawn_y));
+        // The server echoes the batch to all members, including bob.
+        assert!(dgr_b.try_recv().is_ok());
     }
 
     #[test]

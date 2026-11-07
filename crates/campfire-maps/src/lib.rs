@@ -41,6 +41,8 @@ pub struct MapData {
     walkable: Vec<bool>,
     /// Spawn point in tile coordinates (tile center).
     pub spawn: (f32, f32),
+    /// Original file contents, served verbatim by `GET /api/v1/maps/{id}`.
+    pub raw: Vec<u8>,
 }
 
 /// Tiled JSON subset actually read by the parser.
@@ -91,6 +93,7 @@ impl MapData {
             height: raw.height,
             walkable,
             spawn,
+            raw: data.to_vec(),
         })
     }
 

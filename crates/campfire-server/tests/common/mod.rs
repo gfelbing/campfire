@@ -35,7 +35,11 @@ pub async fn start_server() -> (SocketAddr, CertificateDer<'static>) {
     let addr = endpoint.local_addr().unwrap();
     let world = campfire_server::world::World::new();
     let _tick = campfire_server::world::start_ticking(world.clone());
-    let app = campfire_server::api::router(world);
+    let state = campfire_server::api::AppState {
+        world,
+        static_dir: None,
+    };
+    let app = campfire_server::api::router(state);
     tokio::spawn(campfire_server::run_endpoint(endpoint, app));
     (addr, root)
 }

@@ -18,7 +18,24 @@ test:
 check: fmt lint test
 	@echo "all checks passed"
 
-build:
+# --- web client (Phase 4) ---------------------------------------------------
+
+# Install client deps + build into client/dist (embedded into the binary).
+client-build:
+	cd client && npm ci
+	cd client && npm run build
+
+# Dev loop (README §8): vite rebuilds the client on change; the server serves
+# client/dist from disk via --static-dir, so the server does not recompile.
+# Ctrl-C stops both.
+dev *args: certs
+	sh -c 'cd client && npx vite build --watch & \
+	  vite_pid=$!; trap "kill $vite_pid" EXIT; \
+	  cargo run -p campfire-server -- \
+	    --listen 127.0.0.1:8443 --cert certs/cert.pem --key certs/key.pem \
+	    --static-dir client/dist {{args}}'
+
+build: client-build
 	cargo build --workspace --release
 
 # Self-signed dev certs for localhost (browser needs a one-time exception).

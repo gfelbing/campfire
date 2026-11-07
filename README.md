@@ -2,7 +2,7 @@
 
 A virtual-office-style virtual office — avatars walking around 2D tile maps **talking and video-calling in real time** — with the entire backend in **Rust**, deployed as **one binary** listening on **one port number (443, UDP + TCP)**.
 
-> **Status: planning.** This document is the implementation plan. Phases in [§11](#11-implementation-plan) are the ordered work items; each phase has an acceptance criterion and ends in a demoable state.
+> **Status: Phase 4 complete (web client MVP).** This document is the implementation plan. Phases in [§11](#11-implementation-plan) are the ordered work items; each phase has an acceptance criterion and ends in a demoable state. Phase progress is tracked in the git history (`git log --oneline`).
 >
 > **Requirement update (2026-11-06):** voice/video calls are the headline feature. Opening 443 **TCP** in addition to 443 **UDP** is accepted; it is used for exactly one thing — the TURN/TLS media relay ([§6.2](#62-nat-traversal-everything-fits-in-443-tcpudp)).
 

@@ -419,6 +419,16 @@ async fn movement_relay_invalid_move_rejected_chat_history() {
         "bob must see the accepted step, never the rejected teleport"
     );
 
+    // Bob became dirty on join (the room already had alice), so the first
+    // tick broadcast his *spawn* position to everyone. Alice has buffered it
+    // since; assert she learned bob's spawn from that broadcast.
+    let (x, y) = recv_movement(&a.conn, &b_id).await;
+    assert_eq!(
+        (x, y),
+        (20.5, 15.5),
+        "alice learns bob's spawn from the dirty-on-join broadcast"
+    );
+
     // Bob walks one tile west; Alice receives his delta (skipping the batches
     // that only carry alice's entries).
     b.conn

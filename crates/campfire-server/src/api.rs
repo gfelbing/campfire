@@ -1,30 +1,64 @@
-//! HTTP/3 API: embedded static client, map list, health, WebTransport.
+//! HTTP/3 API: embedded web client, maps, rooms, health, WebTransport, and
+//! the SSE+POST realtime fallback (README §4, §8).
 //!
-//! Everything is served from the single QUIC socket (README §4). Health
-//! reports live world state (users/rooms) starting with Phase 2.
+//! Everything is served from the single QUIC socket. The web client is
+//! embedded at compile time from `client/dist` (single deploy artifact,
+//! README §3); `--static-dir` overrides the source at runtime for the dev
+//! loop (`just dev`).
 
-use std::sync::OnceLock;
-use std::time::Instant;
+use std::collections::HashMap;
+use std::io::Read;
+use std::path::{Component, Path, PathBuf};
+use std::pin::Pin;
+use std::sync::{Arc, Mutex, OnceLock};
+use std::task::{Context, Poll};
+use std::time::{Duration, Instant};
 
-use axum::extract::State;
+use axum::extract::{Path as UrlPath, Query, State};
 use axum::http::StatusCode;
 use axum::http::Uri;
 use axum::http::header;
-use axum::response::{IntoResponse, Response};
-use axum::routing::{connect, get};
+use axum::response::sse::Event;
+use axum::response::{IntoResponse, Response, Sse};
+use axum::routing::{connect, get, post};
 use axum::{Json, Router};
+use bytes::Bytes;
+use campfire_protocol::{Avatar, ChatMsg, ClientMsg, ErrorCode, ServerMsg, to_line};
+use futures_util::StreamExt;
 use include_dir::{Dir, include_dir};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use tokio::sync::mpsc;
+use tokio_stream::wrappers::{IntervalStream, UnboundedReceiverStream};
+use tokio_stream::{Stream, StreamMap};
 use tracing::debug;
 
-use crate::realtime::handle_wt;
-use crate::world::World;
+use crate::config::Config;
+use crate::realtime::{
+    MAX_AVATAR_CHARS, MAX_CHAT_CHARS, MAX_NAME_CHARS, RateLimit, handle_wt, unix_ts, valid_room,
+};
+use crate::world::{RoomInfo, World};
 
-/// Web client, embedded at compile time (README §3: single deploy artifact).
-/// Phase 1: placeholder page; Phase 4 replaces the embed with `client/dist`.
-static STATIC: Dir<'static> = include_dir!("$CARGO_MANIFEST_DIR/../../static");
+/// Web client, built by Vite and embedded at compile time (README §3).
+static STATIC: Dir<'static> = include_dir!("$CARGO_MANIFEST_DIR/../../client/dist");
 
 static START: OnceLock<Instant> = OnceLock::new();
+
+/// Router state: the world plus the optional runtime static dir.
+#[derive(Clone)]
+pub struct AppState {
+    pub world: World,
+    /// Serve static files from this directory instead of the embed (dev).
+    pub static_dir: Option<PathBuf>,
+}
+
+impl AppState {
+    pub fn new(cfg: &Config) -> Self {
+        Self {
+            world: World::new(),
+            static_dir: cfg.static_dir.clone(),
+        }
+    }
+}
 
 /// Call once at process start (used for the health payload).
 pub fn mark_start() {
@@ -46,19 +80,24 @@ struct MapInfo {
     thumb: Option<String>,
 }
 
-pub fn router(world: World) -> Router {
+pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/healthz", get(healthz))
         .route("/api/v1/maps", get(list_maps))
+        .route("/api/v1/maps/{id}", get(map_by_id))
+        .route("/api/v1/rooms", get(list_rooms))
         // WebTransport realtime session (README §5).
         .route("/wt", connect(handle_wt))
+        // Realtime fallback for browsers without WebTransport (README §8).
+        .route("/rt/sse", get(sse_stream))
+        .route("/rt/event", post(fallback_event))
         // Everything else is a static asset (or a 404).
         .fallback(handle_static)
-        .with_state(world)
+        .with_state(state)
 }
 
-async fn healthz(State(world): State<World>) -> Json<Health> {
-    let (users, rooms) = world.stats();
+async fn healthz(State(state): State<AppState>) -> Json<Health> {
+    let (users, rooms) = state.world.stats();
     let uptime_secs = START.get().map(|s| s.elapsed().as_secs()).unwrap_or(0);
     Json(Health {
         status: "ok",
@@ -82,25 +121,293 @@ async fn list_maps() -> Json<Vec<MapInfo>> {
     Json(maps)
 }
 
-async fn handle_static(uri: Uri) -> Response {
+/// `GET /api/v1/maps/{id}` → the Tiled JSON for one bundled map.
+async fn map_by_id(UrlPath(id): UrlPath<String>) -> Result<impl IntoResponse, StatusCode> {
+    campfire_maps::bundled()
+        .get(&id)
+        .map(|m| {
+            (
+                [(header::CONTENT_TYPE, "application/json")],
+                Bytes::from(m.raw.clone()),
+            )
+        })
+        .ok_or(StatusCode::NOT_FOUND)
+}
+
+/// `GET /api/v1/rooms` → the active rooms with member counts.
+async fn list_rooms(State(state): State<AppState>) -> Json<Vec<RoomInfo>> {
+    Json(state.world.rooms_list())
+}
+
+// ---------------------------------------------------------------------------
+// Realtime fallback: SSE down, POST up (README §8). Same message protocol as
+// the WebTransport stream; movement (datagrams) is the one thing it cannot
+// do, so fallback clients see presence, chat and calls but not movement.
+// ---------------------------------------------------------------------------
+
+/// POST /rt/event body: either a join or one relayed stream message.
+#[derive(Deserialize)]
+#[serde(tag = "type", content = "payload", rename_all = "snake_case")]
+enum FallbackReq {
+    Join {
+        room: String,
+        name: String,
+        #[serde(default)]
+        avatar: Option<Avatar>,
+    },
+    Msg {
+        token: String,
+        msg: ClientMsg,
+    },
+}
+
+/// One fallback (SSE+POST) session, keyed by user id (== token).
+struct FallbackSession {
+    room: String,
+    name: String,
+    user_id: String,
+    /// 1 chat/s, like the WebTransport path.
+    chat: Mutex<RateLimit>,
+    /// The outbound receiver, taken exactly once by the /rt/sse stream.
+    rx: Mutex<Option<mpsc::UnboundedReceiver<ServerMsg>>>,
+}
+
+type FallbackMap = Arc<Mutex<HashMap<String, FallbackSession>>>;
+
+fn fallback_map() -> &'static FallbackMap {
+    static MAP: OnceLock<FallbackMap> = OnceLock::new();
+    MAP.get_or_init(|| Arc::new(Mutex::new(HashMap::new())))
+}
+
+/// `POST /rt/event` — join or relay one stream message.
+async fn fallback_event(
+    State(state): State<AppState>,
+    Json(req): Json<FallbackReq>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let err = |code: ErrorCode| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": code })),
+        )
+    };
+    match req {
+        FallbackReq::Join { room, name, avatar } => {
+            if !valid_room(&room) {
+                return Err(err(ErrorCode::BadMessage));
+            }
+            let name = name.trim();
+            if name.is_empty() || name.len() > MAX_NAME_CHARS {
+                return Err(err(ErrorCode::NameTooLong));
+            }
+            if let Some(avatar) = &avatar
+                && avatar.color.len() > MAX_AVATAR_CHARS
+            {
+                return Err(err(ErrorCode::BadMessage));
+            }
+            let (tx, rx) = mpsc::unbounded_channel::<ServerMsg>();
+            // Keep a clone: world.join stores the original in the member, and
+            // we need a sender to push the hello into the session channel.
+            let hello_tx = tx.clone();
+            // Datagram channel is dropped immediately: the fallback has no
+            // datagram path (movement is the one thing it cannot carry).
+            let (dtx, _dtx_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+            let user_id = match state.world.join(&room, name, avatar, tx, dtx) {
+                Ok(joined) => {
+                    // The unbounded channel buffers the hello until the SSE
+                    // stream claims the receiver.
+                    let _ = hello_tx.send(ServerMsg::Hello {
+                        you: joined.you.clone(),
+                        room: room.clone(),
+                        users: joined.users,
+                        chat: joined.chat,
+                    });
+                    joined.you
+                }
+                Err(e) => {
+                    let code = match e {
+                        crate::world::JoinError::RoomFull => ErrorCode::RoomFull,
+                        crate::world::JoinError::UnknownRoom => ErrorCode::UnknownRoom,
+                    };
+                    return Err(err(code));
+                }
+            };
+            fallback_map().lock().unwrap().insert(
+                user_id.clone(),
+                FallbackSession {
+                    room: room.clone(),
+                    name: name.to_owned(),
+                    user_id: user_id.clone(),
+                    chat: Mutex::new(RateLimit::new()),
+                    rx: Mutex::new(Some(rx)),
+                },
+            );
+
+            // A join that never opens its SSE stream is a dead session.
+            let world = state.world.clone();
+            let map = fallback_map().clone();
+            let user_id_bg = user_id.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_secs(60)).await;
+                let mut guard = map.lock().unwrap();
+                if let Some(s) = guard.get(&user_id_bg)
+                    && s.rx.lock().unwrap().is_some()
+                {
+                    guard.remove(&user_id_bg);
+                    world.leave(&room, &user_id_bg);
+                }
+            });
+
+            Ok(Json(serde_json::json!({ "token": user_id })))
+        }
+        FallbackReq::Msg { token, msg } => {
+            let guard = fallback_map().lock().unwrap();
+            let Some(session) = guard.get(&token) else {
+                return Err(err(ErrorCode::BadMessage));
+            };
+            let (room, name) = (session.room.clone(), session.name.clone());
+            match msg {
+                ClientMsg::Chat { text } => {
+                    if text.chars().count() > MAX_CHAT_CHARS {
+                        return Err(err(ErrorCode::ChatTooLong));
+                    }
+                    let mut chat = session.chat.lock().unwrap();
+                    if !chat.allow(1, 1) {
+                        return Err(err(ErrorCode::RateLimited));
+                    }
+                    drop(chat);
+                    state.world.broadcast_chat(
+                        &room,
+                        ChatMsg {
+                            from: token,
+                            name,
+                            text,
+                            ts: unix_ts(),
+                        },
+                    );
+                }
+                ClientMsg::Typing { on } => {
+                    state.world.broadcast_typing(&room, &token, on);
+                }
+                ClientMsg::Join { .. } => return Err(err(ErrorCode::BadMessage)),
+            }
+            Ok(Json(serde_json::json!({})))
+        }
+    }
+}
+
+/// `?token=…` query for /rt/sse.
+#[derive(Deserialize)]
+struct TokenQuery {
+    token: Option<String>,
+}
+
+/// `GET /rt/sse?token=…` — the reliable downlink for one fallback session.
+async fn sse_stream(
+    State(state): State<AppState>,
+    Query(query): Query<TokenQuery>,
+) -> Result<Sse<impl Stream<Item = Result<Event, std::convert::Infallible>>>, (StatusCode, String)>
+{
+    let Some(token) = query.token else {
+        return Err((StatusCode::BAD_REQUEST, "missing token".into()));
+    };
+    // Take the receiver under the same lock that guards it, so a token can
+    // be claimed by at most one stream.
+    let (room, user_id, rx) = {
+        let guard = fallback_map().lock().unwrap();
+        let session = guard
+            .get(&token)
+            .ok_or_else(|| (StatusCode::NOT_FOUND, format!("unknown token {token}")))?;
+        let rx = session
+            .rx
+            .lock()
+            .unwrap()
+            .take()
+            .ok_or_else(|| (StatusCode::CONFLICT, "token already claimed".into()))?;
+        (session.room.clone(), session.user_id.clone(), rx)
+    };
+
+    let messages = UnboundedReceiverStream::new(rx)
+        .map(|msg| Ok::<_, std::convert::Infallible>(Event::default().data(to_line(&msg))))
+        .boxed();
+    let keep_alive = IntervalStream::new(tokio::time::interval(Duration::from_secs(15)))
+        .map(|_| Ok::<_, std::convert::Infallible>(Event::default().comment("ping")))
+        .boxed();
+
+    let mut interleaved = StreamMap::new();
+    interleaved.insert("msg", messages);
+    interleaved.insert("ping", keep_alive);
+
+    let stream = CleanupOnEnd {
+        inner: interleaved.map(|(_, ev)| ev).fuse(),
+        world: state.world.clone(),
+        room,
+        user_id,
+        cleaned: false,
+    };
+    Ok(Sse::new(stream))
+}
+
+/// Wraps an SSE stream so that when it ends (client disconnect, or the
+/// message channel closing), the user is removed from the world.
+struct CleanupOnEnd<S> {
+    inner: S,
+    world: World,
+    room: String,
+    user_id: String,
+    cleaned: bool,
+}
+
+impl<S: Stream + Unpin> Stream for CleanupOnEnd<S> {
+    type Item = S::Item;
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        match Pin::new(&mut self.inner).poll_next(cx) {
+            Poll::Ready(None) => {
+                if !self.cleaned {
+                    self.cleaned = true;
+                    self.world.leave(&self.room, &self.user_id);
+                    fallback_map().lock().unwrap().remove(&self.user_id);
+                    debug!(user = %self.user_id, room = %self.room, "fallback session ended");
+                }
+                Poll::Ready(None)
+            }
+            other => other,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Static files
+// ---------------------------------------------------------------------------
+
+async fn handle_static(State(state): State<AppState>, uri: Uri) -> Response {
     let path = uri.path().trim_start_matches('/');
     let path = if path.is_empty() { "index.html" } else { path };
-    serve_static(path).unwrap_or_else(|| {
+    serve_static(&state, path).unwrap_or_else(|| {
         debug!(path, "static miss");
         StatusCode::NOT_FOUND.into_response()
     })
 }
 
-fn serve_static(path: &str) -> Option<Response> {
-    let file = STATIC.get_file(path)?;
-    Some(
-        (
-            StatusCode::OK,
-            [(header::CONTENT_TYPE, mime_for(path))],
-            file.contents(),
-        )
-            .into_response(),
-    )
+/// Serve one static file: the runtime dir (dev) when configured, otherwise
+/// the compile-time embed.
+fn serve_static(state: &AppState, path: &str) -> Option<Response> {
+    // No path traversal.
+    if Path::new(path)
+        .components()
+        .any(|c| matches!(c, Component::ParentDir))
+    {
+        return None;
+    }
+    let (bytes, mime) = if let Some(dir) = &state.static_dir {
+        let mut buf = Vec::new();
+        let mut file = std::fs::File::open(dir.join(path)).ok()?;
+        file.read_to_end(&mut buf).ok()?;
+        (buf, mime_for(path))
+    } else {
+        let file = STATIC.get_file(path)?;
+        (file.contents().to_vec(), mime_for(path))
+    };
+    Some((StatusCode::OK, [(header::CONTENT_TYPE, mime)], bytes).into_response())
 }
 
 fn mime_for(path: &str) -> &'static str {
@@ -110,9 +417,13 @@ fn mime_for(path: &str) -> &'static str {
         Some("js") => "text/javascript; charset=utf-8",
         Some("json") => "application/json",
         Some("png") => "image/png",
+        Some("jpg") => "image/jpeg",
         Some("svg") => "image/svg+xml",
         Some("ico") => "image/x-icon",
         Some("txt") => "text/plain; charset=utf-8",
+        Some("map") => "application/json",
+        Some("woff") => "font/woff",
+        Some("woff2") => "font/woff2",
         _ => "application/octet-stream",
     }
 }

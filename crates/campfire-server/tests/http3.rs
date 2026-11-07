@@ -88,3 +88,37 @@ async fn http3_healthz_index_and_maps() {
     let (status, _) = get(addr, &root, "/nope").await;
     assert_eq!(status, 404);
 }
+
+/// Phase 4 (README §11): the map and room endpoints serve the client.
+#[tokio::test]
+async fn api_maps_by_id_and_rooms() {
+    campfire_server::api::mark_start();
+    let (addr, root) = start_server().await;
+
+    // GET /api/v1/maps/office — the raw Tiled JSON for one map.
+    let (status, body) = get(addr, &root, "/api/v1/maps/office").await;
+    assert_eq!(status, 200, "map body: {body}");
+    let map: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(map["width"], 40);
+    assert_eq!(map["height"], 30);
+    let layer_names: Vec<&str> = map["layers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|l| l["name"].as_str().unwrap())
+        .collect();
+    assert!(
+        layer_names.contains(&"ground") && layer_names.contains(&"collision"),
+        "layers: {layer_names:?}"
+    );
+
+    // Unknown map → 404.
+    let (status, _) = get(addr, &root, "/api/v1/maps/nope").await;
+    assert_eq!(status, 404);
+
+    // GET /api/v1/rooms — nobody has joined yet, so no room exists.
+    let (status, body) = get(addr, &root, "/api/v1/rooms").await;
+    assert_eq!(status, 200);
+    let rooms: Vec<serde_json::Value> = serde_json::from_str(&body).unwrap();
+    assert!(rooms.is_empty(), "rooms body: {body}");
+}

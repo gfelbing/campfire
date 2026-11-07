@@ -1,9 +1,10 @@
 # Rust
 /target
 
-# Web client (Phase 4)
+# Web client (Phase 4). node_modules is build input only; client/dist is
+# committed as the bootstrap for `include_dir!` (see the `client-build`
+# justfile task — CI and `just build` rebuild it before cargo runs).
 client/node_modules/
-client/dist/
 
 # Local env / secrets
 .env
