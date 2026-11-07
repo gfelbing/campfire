@@ -1,0 +1,26 @@
+{{/*
+443/tcp through Traefik WITHOUT TLS offload: `tls.passthrough` forwards the
+ClientHello to the pod, which terminates TLS itself. The QUIC socket lives
+in the same process, and WebTransport/WebRTC both need the server's own
+certificate chain for the TLS handshake to bind to the QUIC transport —
+offloading here would break both.
+*/}}
+apiVersion: traefik.io/v1alpha1
+kind: IngressRouteTCP
+metadata:
+  name: {{ include "campfire.fullname" . }}
+  labels:
+    {{- include "campfire.labels" . | nindent 4 }}
+spec:
+  entryPoints:
+    - {{ .Values.traefik.tcp.entrypoint }}
+  routes:
+    - match: HostSNI(`{{ .Values.domain }}`)
+      services:
+        - name: {{ include "campfire.fullname" . }}
+          port: 443
+  tls:
+    passthrough: true
+{{- with .Values.traefik.namespace }}
+  namespace: {{ . }}
+{{- end }}

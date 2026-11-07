@@ -1,0 +1,21 @@
+{{/*
+443/udp (QUIC + STUN + TURN) routed raw to the pod — the UDP datagrams are
+TLS-oblivious, so there is nothing for Traefik to offload; this is a plain
+datagram pass-through.
+*/}}
+apiVersion: traefik.io/v1alpha1
+kind: IngressRouteUDP
+metadata:
+  name: {{ include "campfire.fullname" . }}
+  labels:
+    {{- include "campfire.labels" . | nindent 4 }}
+spec:
+  entryPoints:
+    - {{ .Values.traefik.udp.entrypoint }}
+  routes:
+    - services:
+        - name: {{ include "campfire.fullname" . }}
+          port: 443
+{{- with .Values.traefik.namespace }}
+  namespace: {{ . }}
+{{- end }}

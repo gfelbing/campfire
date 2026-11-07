@@ -1,0 +1,22 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "campfire.fullname" . }}
+  labels:
+    {{- include "campfire.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.service.type }}
+  selector:
+    {{- include "campfire.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: https
+      port: 443
+      targetPort: https
+      protocol: TCP
+      appProtocol: https
+    - name: quic
+      port: 443
+      targetPort: quic
+      protocol: UDP
+      {{- /* appProtocol "kubernetes.io/h3c" = HTTP/3 hint for LBs that support it */}}
+      appProtocol: kubernetes.io/h3c

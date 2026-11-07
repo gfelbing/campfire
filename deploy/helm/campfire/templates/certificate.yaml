@@ -1,0 +1,19 @@
+{{- if .Values.certificate.create }}
+{{/*
+Certificate issued by the pre-existing cert-manager. The secret doubles as
+the pod's TLS material (mounted at /certs) — Traefik never touches it.
+*/}}
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ include "campfire.fullname" . }}
+  labels:
+    {{- include "campfire.labels" . | nindent 4 }}
+spec:
+  secretName: {{ .Values.certificate.secretName }}
+  dnsNames:
+    - {{ .Values.domain | quote }}
+  issuerRef:
+    name: {{ .Values.certificate.issuerRef.name }}
+    kind: {{ .Values.certificate.issuerRef.kind }}
+{{- end }}

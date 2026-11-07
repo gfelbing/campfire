@@ -1,0 +1,27 @@
+Campfire is deploying. One replica, one port (443 TCP + UDP).
+
+1. Certificate: {{ if .Values.certificate.create }}cert-manager is issuing
+   `{{ .Values.certificate.secretName }}` for {{ .Values.domain }} via
+   {{ .Values.certificate.issuerRef.kind }}/{{ .Values.certificate.issuerRef.name }}.
+   Check: `kubectl get certificate -n {{ .Release.Namespace }}`{{ else }}using your
+   pre-existing secret `{{ .Values.certificate.secretName }}`{{ end }}.
+
+2. Traefik routes:
+   - TCP 443 via entrypoint `{{ .Values.traefik.tcp.entrypoint }}` with TLS
+     passthrough (SNI match: {{ .Values.domain }}) — the pod terminates TLS.
+   - UDP 443 via entrypoint `{{ .Values.traefik.udp.entrypoint }}` — raw
+     datagrams to the pod (QUIC, STUN, TURN).
+   Make sure both Traefik entrypoints exist and are published on 443.
+
+3. Pod mount: the certificate secret is mounted read-only at /certs and the
+   server is started with --cert /certs/tls.crt --key /certs/tls.key.
+
+{{- if .Values.external }}
+4. TURN advertises --external {{ .Values.external }}.
+{{- else }}
+4. --external is NOT set: TURN relayed allocations advertise the pod address.
+   Set values.external to your public IP (IP:port) for production ICE.
+{{- end }}
+
+Open https://{{ .Values.domain }}/ once DNS points {{ .Values.domain }} at
+the Traefik entrypoint and the certificate is Ready.

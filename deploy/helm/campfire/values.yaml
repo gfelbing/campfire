@@ -1,0 +1,57 @@
+# Campfire Helm values. Everything the chart touches is configurable here.
+
+# The Docker image to run. `tag` empty = the chart's appVersion.
+image:
+  repository: localhost/campfire
+  tag: ""
+  pullPolicy: IfNotPresent
+
+# The public DNS name of the deployment. Used for:
+#  - the cert-manager Certificate's dnsName
+#  - the TCP ingress route's SNI match (TLS passes through to the pod)
+domain: campfire.example.com
+
+# Public address advertised to peers for TURN relayed allocations
+# (--external, an IP:port — the server requires a literal IP).
+# Should be the public IP of the Traefik/LB entrypoint. Empty = omit the
+# flag (fine when clients can reach the pod network directly, e.g. tests).
+external: ""
+
+replicaCount: 1  # single instance by design (in-memory state + stateful TURN)
+
+certificate:
+  # Create a cert-manager.io/v1 Certificate. Disable to bring your own
+  # secret (must still be a kubernetes.io/tls secret named below).
+  create: true
+  # The secret that receives the issued cert AND what the pod mounts at
+  # /certs (the server serves TLS itself; Traefik must not offload it).
+  secretName: campfire-tls
+  issuerRef:
+    name: my-issuer
+    kind: ClusterIssuer  # or "Issuer"
+
+traefik:
+  tcp:
+    # Traefik TCP entrypoint listening on 443/tcp. TLS stays end-to-end:
+    # the route uses tls.passthrough, so Traefik forwards the ClientHello
+    # untouched and the pod terminates TLS (QUIC/WebTransport need this).
+    entrypoint: websecure
+  udp:
+    # Traefik UDP entrypoint listening on 443/udp (QUIC + STUN + TURN).
+    entrypoint: quic
+  # Optionally match on the CRD namespace of the Traefik installation
+  # (omitted by default).
+  namespace: ""
+
+service:
+  type: ClusterIP
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    memory: 512Mi
+
+# Optional extra args passed to the campfire binary verbatim.
+extraArgs: []
