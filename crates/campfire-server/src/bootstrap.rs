@@ -56,7 +56,12 @@ pub fn start(
     let rustls_conf = tls::rustls_server_config(certs, key, vec![b"http/1.1".to_vec()])?;
     let acceptor = TlsAcceptor::from(Arc::new(rustls_conf));
     let listen = cfg.listen;
-    let alt = format!("h3=\":{}\"; ma=86400", listen.port());
+    // The Alt-Svc must name the port the *client* can reach. Behind a port
+    // mapping (docker/podman `-p 8443:443`) that is the external port, not
+    // the one the socket binds inside the container — reuse `--external`,
+    // which TURN already uses for the same reason (browsers ignore the host
+    // part of an Alt-Svc entry, so the port is what matters).
+    let alt = format!("h3=\":{}\"; ma=86400", cfg.external_addr().port());
 
     tokio::spawn(async move {
         let listener = match tokio::net::TcpListener::bind(listen).await {

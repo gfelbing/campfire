@@ -38,6 +38,12 @@ dev *args: certs
 build: client-build
 	cargo build --workspace --release
 
+# Docker image build. Dockerfile uses cache mounts (cargo registry/target,
+# npm download cache), so repeat builds only recompile what changed.
+# Extra args pass through: just docker -- -t campfire-test
+docker *args:
+	podman build -t campfire "$@" .
+
 # Dev certs: a local CA plus a localhost server cert signed by it.
 #
 # The CA must be trusted by the browser (`just trust`) so the TCP bootstrap
@@ -69,14 +75,23 @@ spki: certs
 	  | openssl pkey -pubin -outform der \
 	  | openssl dgst -sha256 -binary | openssl enc -base64
 
-# Launch Brave speaking HTTP/3 to the dev server. Chromium trusts only its
+# Launch Brave speaking HTTP/3 to the server. Chromium trusts only its
 # built-in roots for QUIC — a user-installed CA (just trust) is accepted for
 # TCP but always fails the QUIC handshake with CERTIFICATE_VERIFY_FAILED —
 # so the dev cert is pinned by SPKI instead. Quit Brave fully first: flags
-# are ignored if an instance is already running.
-brave: spki
-	brave --origin-to-force-quic-on=localhost:8443 \
-	  --ignore-certificate-errors-spki-list="$(just spki)"
+# are ignored if an instance is already running. The port defaults to the
+# dev server's 8443; `just brave 443` targets a Docker server published on
+# the default HTTPS port (`just docker`, `docker run -p 443:443 ...`).
+# Extra args pass through: just brave 443 --incognito
+#
+# IPv4 on purpose: Chrome prefers ::1 for `localhost`, and rootless podman's
+# pasta network stack does not forward IPv6 UDP to the container (TCP only),
+# so QUIC to [::1] dies with ERR_QUIC_PROTOCOL_ERROR while 127.0.0.1 works.
+# The SPKI pin is hostname-independent, so 127.0.0.1 needs nothing extra.
+brave port="443" *args: spki
+	brave --origin-to-force-quic-on=127.0.0.1:{{port}} \
+	  --ignore-certificate-errors-spki-list="$(just spki)" \
+	  "https://127.0.0.1:{{port}}/" {{args}}
 
 # Install the dev CA into the NSS trust store Brave/Chrome/Chromium use
 # (~/.pki/nssdb). This removes the TCP interstitial; it does NOT enable
