@@ -17,6 +17,13 @@ domain: campfire.heimdal.vild.zone
 # flag (fine when clients can reach the pod network directly, e.g. tests).
 external: ""
 
+namespace:
+  # The chart creates and uses its own namespace by default. Set
+  # `create: false` to deploy into the release namespace instead
+  # (`helm install -n ...`).
+  create: true
+  name: campfire
+
 replicaCount: 1  # single instance by design (in-memory state + stateful TURN)
 
 certificate:
@@ -35,7 +42,7 @@ certificate:
   create: true
   secretName: campfire-tls
   issuerRef:  # only used when create: true
-    name: my-issuer
+    name: cloudflare
     kind: ClusterIssuer  # or "Issuer"
 
 traefik:
@@ -47,9 +54,6 @@ traefik:
   udp:
     # Traefik UDP entrypoint listening on 443/udp (QUIC + STUN + TURN).
     entrypoint: quic
-  # Optionally match on the CRD namespace of the Traefik installation
-  # (omitted by default).
-  namespace: ""
 
 service:
   type: ClusterIP

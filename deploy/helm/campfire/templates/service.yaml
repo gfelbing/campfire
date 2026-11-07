@@ -2,6 +2,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: {{ include "campfire.fullname" . }}
+  namespace: {{ include "campfire.namespace" . }}
   labels:
     {{- include "campfire.labels" . | nindent 4 }}
 spec:

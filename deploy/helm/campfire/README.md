@@ -8,6 +8,7 @@ one port: 443 **TCP + UDP**.
 
 | Resource | Purpose |
 |---|---|
+| `Namespace` | created when `namespace.create: true` (default) — every chart resource lands there; `create: false` keeps resources in the release namespace |
 | `Deployment` (Recreate) | one pod: `campfire --listen 0.0.0.0:443 --cert /certs/tls.crt --key /certs/tls.key` |
 | `Service` | port 443 TCP (`appProtocol: https`) + 443 UDP (`appProtocol: kubernetes.io/h3c`) |
 | `Certificate` (cert-manager.io/v1, optional) | `certificate.create: true` issues `secretName` for `values.domain` via your issuer; set `false` to mount an existing `kubernetes.io/tls` secret instead (e.g. a wildcard cert). Either way the secret is mounted read-only at `/certs` in the pod |
@@ -52,6 +53,9 @@ helm install campfire deploy/helm/campfire \
 ## Key values
 
 ```yaml
+namespace:
+  create: true                     # chart creates + uses its own namespace
+  name: campfire
 image:
   repository: localhost/campfire   # Docker image to run
   tag: ""                          # empty = chart appVersion
@@ -67,11 +71,14 @@ certificate:
 traefik:
   tcp: { entrypoint: websecure }
   udp: { entrypoint: quic }
-  namespace: ""                    # set if the CRDs should live in Traefik's namespace
 service: { type: ClusterIP }
 resources: {}
 extraArgs: []                      # extra campfire CLI args, e.g. [--log-json]
 ```
+
+Note: the Traefik CRDs (routes) live in the chart's namespace and reference
+the Service there — make sure Traefik's `kubernetesCRD` provider watches
+that namespace (the official chart watches all namespaces by default).
 
 ## Why no TLS offload
 

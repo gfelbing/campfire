@@ -3,7 +3,7 @@ Campfire is deploying. One replica, one port (443 TCP + UDP).
 1. Certificate: {{ if .Values.certificate.create }}cert-manager is issuing
    `{{ .Values.certificate.secretName }}` for {{ .Values.domain }} via
    {{ .Values.certificate.issuerRef.kind }}/{{ .Values.certificate.issuerRef.name }}.
-   Check: `kubectl get certificate -n {{ .Release.Namespace }}`{{ else }}using your
+   Check: `kubectl get certificate -n {{ include "campfire.namespace" . }}`{{ else }}using your
    pre-existing secret `{{ .Values.certificate.secretName }}`{{ end }}.
 
 2. Traefik routes:

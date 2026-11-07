@@ -31,3 +31,15 @@ helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" | 
 app.kubernetes.io/name: {{ include "campfire.name" . }}
 app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end -}}
+
+{{- /*
+The namespace every chart resource lives in: the one the chart creates
+(namespace.create: true) or the release namespace.
+*/ -}}
+{{- define "campfire.namespace" -}}
+{{- if .Values.namespace.create -}}
+{{- .Values.namespace.name -}}
+{{- else -}}
+{{- .Release.Namespace -}}
+{{- end -}}
+{{- end -}}
