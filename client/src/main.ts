@@ -197,6 +197,9 @@ async function main(): Promise<void> {
   let lastSend = 0;
   let prev = performance.now();
   const tick = (now: number): void => {
+    // Schedule the next frame FIRST: a throw anywhere below (transport,
+    // rendering) must never kill the loop — that once froze the whole game.
+    requestAnimationFrame(tick);
     const dt = Math.min((now - prev) / 1000, 0.1);
     prev = now;
 
@@ -230,7 +233,6 @@ async function main(): Promise<void> {
       lastSend = now;
       conn.sendMove(x, y, dir, moving);
     }
-    requestAnimationFrame(tick);
   };
 
   conn.start();

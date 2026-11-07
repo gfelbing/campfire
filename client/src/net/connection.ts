@@ -283,6 +283,7 @@ class WTConn {
   private reader: ReadableStreamDefaultReader<Uint8Array> | null = null;
   private writer: WritableStreamDefaultWriter<Uint8Array> | null = null;
   private dgReader: ReadableStreamDefaultReader<Uint8Array> | null = null;
+  private dgWriter: WritableStreamDefaultWriter<Uint8Array> | null = null;
   // WebTransport has no readyState (that is WebSocket); track liveness
   // ourselves so datagram sends don't go out on a dead transport.
   private live = false;
@@ -326,6 +327,15 @@ class WTConn {
     } catch {
       // Server did not advertise datagrams: presence/chat still work.
       this.dgReader = null;
+    }
+
+    // Datagram writer (movement batches). Chromium ships only the streams
+    // API — there is no sendDatagram() method.
+    try {
+      this.dgWriter = wt.datagrams.writable.getWriter();
+    } catch {
+      // No datagrams: presence/chat still work.
+      this.dgWriter = null;
     }
 
     void this.readCommandStream();
@@ -373,11 +383,21 @@ class WTConn {
   }
 
   sendMove(id: string, x: number, y: number, d: Dir, moving: boolean, seq: number): void {
-    if (!this.wt || !this.live) return;
+    if (!this.dgWriter || !this.live) return;
     const batch: MovementBatch = {
       m: [{ id, x, y, d, mv: moving ? 1 : 0, s: seq }],
     };
-    this.wt.sendDatagram(encodeLine(batch));
+    // A transport hiccup must never propagate into the render loop (the
+    // tick would die and freeze the game); a lost datagram is harmless.
+    try {
+      void this.dgWriter.write(encodeLine(batch)).catch(() => {
+        this.live = false;
+        this.dgWriter = null;
+      });
+    } catch {
+      this.live = false;
+      this.dgWriter = null;
+    }
   }
 
   close(): void {
