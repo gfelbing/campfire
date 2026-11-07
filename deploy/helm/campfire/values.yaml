@@ -2,14 +2,14 @@
 
 # The Docker image to run. `tag` empty = the chart's appVersion.
 image:
-  repository: localhost/campfire
-  tag: ""
-  pullPolicy: IfNotPresent
+  repository: registry.heimdal.vild.zone/campfire
+  tag: "latest"
+  pullPolicy: Always
 
 # The public DNS name of the deployment. Used for:
 #  - the cert-manager Certificate's dnsName
 #  - the TCP ingress route's SNI match (TLS passes through to the pod)
-domain: campfire.example.com
+domain: campfire.heimdal.vild.zone
 
 # Public address advertised to peers for TURN relayed allocations
 # (--external, an IP:port — the server requires a literal IP).
@@ -20,13 +20,21 @@ external: ""
 replicaCount: 1  # single instance by design (in-memory state + stateful TURN)
 
 certificate:
-  # Create a cert-manager.io/v1 Certificate. Disable to bring your own
-  # secret (must still be a kubernetes.io/tls secret named below).
+  # Two ways to get TLS material into the pod (the secret is mounted
+  # read-only at /certs AND the server serves TLS itself — Traefik must not
+  # offload it, so the cert has to live in the pod either way):
+  #
+  #  1. create: true — chart creates a cert-manager.io/v1 Certificate.
+  #  2. create: false — point secretName at an existing kubernetes.io/tls
+  #     secret, e.g. a wildcard cert you already requested:
+  #       certificate:
+  #         create: false
+  #         secretName: wildcard-example-com-tls
+  #     (`kubectl create secret tls ... --cert=... --key=...` or any
+  #      cert-manager Certificate you manage yourself).
   create: true
-  # The secret that receives the issued cert AND what the pod mounts at
-  # /certs (the server serves TLS itself; Traefik must not offload it).
   secretName: campfire-tls
-  issuerRef:
+  issuerRef:  # only used when create: true
     name: my-issuer
     kind: ClusterIssuer  # or "Issuer"
 

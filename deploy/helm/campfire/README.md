@@ -10,7 +10,7 @@ one port: 443 **TCP + UDP**.
 |---|---|
 | `Deployment` (Recreate) | one pod: `campfire --listen 0.0.0.0:443 --cert /certs/tls.crt --key /certs/tls.key` |
 | `Service` | port 443 TCP (`appProtocol: https`) + 443 UDP (`appProtocol: kubernetes.io/h3c`) |
-| `Certificate` (cert-manager.io/v1) | issues `values.certificate.secretName` for `values.domain` via your existing issuer; the same secret is mounted read-only at `/certs` in the pod |
+| `Certificate` (cert-manager.io/v1, optional) | `certificate.create: true` issues `secretName` for `values.domain` via your issuer; set `false` to mount an existing `kubernetes.io/tls` secret instead (e.g. a wildcard cert). Either way the secret is mounted read-only at `/certs` in the pod |
 | `IngressRouteTCP` (traefik.io/v1alpha1) | routes 443/tcp from the Traefik entrypoint to the service with **`tls.passthrough: true`** and an SNI match on `values.domain` — Traefik never terminates TLS; the pod does (QUIC/WebTransport require the server's own certificate in the handshake) |
 | `IngressRouteUDP` (traefik.io/v1alpha1) | forwards 443/udp datagrams raw to the service (QUIC, STUN, TURN) |
 
@@ -19,9 +19,25 @@ one port: 443 **TCP + UDP**.
 - Traefik v2+ with the CRDs installed and **two entrypoints published on
   port 443**: a TCP one (`traefik.tcp.entrypoint`, default `websecure`) and
   a UDP one (`traefik.udp.entrypoint`, default `quic`).
-- cert-manager with an `Issuer`/`ClusterIssuer` that can issue for
-  `values.domain` (the pod serves TLS, so the cert must be publicly
-  trusted for browser QUIC — see the cert-trust notes in README §6.2/§15).
+- TLS material for the pod: either cert-manager (chart creates the
+  `Certificate`) or an existing `kubernetes.io/tls` secret — e.g. a wildcard
+  cert you already requested (set `certificate.create: false` and
+  `certificate.secretName`). The cert must be publicly trusted for browser
+  QUIC (Chromium trusts only built-in roots for UDP/QUIC — README §6.2/§15).
+  Note the TCP route is TLS **passthrough**, so Traefik's own
+  `certResolver` cannot serve this route: the pod terminates TLS itself.
+
+## Using an existing wildcard certificate
+
+```yaml
+certificate:
+  create: false
+  secretName: wildcard-example-com-tls  # type kubernetes.io/tls
+domain: campfire.example.com           # still the SNI match on the TCP route
+```
+
+The pod serves the wildcard chain for `campfire.example.com`; both the
+TCP front and the QUIC listener use it.
 
 ## Install
 
