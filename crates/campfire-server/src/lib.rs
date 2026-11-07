@@ -99,8 +99,12 @@ pub async fn run_endpoint(endpoint: quinn::Endpoint, app: axum::Router) {
             };
             // h3-axum injects no ConnectInfo, so the per-peer remote
             // address rides in as an extension for rate limiting
-            // (README §6.2: the TURN credential endpoint is per-IP).
-            let app = app.layer(axum::Extension(conn.remote_address()));
+            // (README §6.2: the TURN credential endpoint is per-IP), and the
+            // connection itself rides in so a WebTransport session can close
+            // it when the session ends (its reconnect needs a fresh one).
+            let app = app
+                .layer(axum::Extension(conn.remote_address()))
+                .layer(axum::Extension(conn.clone()));
             if let Err(err) = serve_http3(app, conn).await {
                 debug!(error = %err, "HTTP/3 connection ended");
             }

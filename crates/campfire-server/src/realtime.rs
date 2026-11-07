@@ -15,6 +15,7 @@
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use axum::Extension;
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
@@ -37,8 +38,13 @@ type Who = Arc<Mutex<Option<(String, String)>>>;
 
 /// A JSON line longer than this is refused (README §14: no unbounded reads).
 const MAX_LINE_BYTES: usize = 80 * 1024;
-/// Close a session that sends nothing for this long (README §5 lifecycle).
-const IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+/// Close a session that sends nothing on the command stream for this long
+/// (README §5 lifecycle). Deliberately generous: movement and presence ride
+/// datagrams, so a quiet-but-alive user sends nothing here — the QUIC
+/// connection's own idle timeout (`--idle-timeout-secs`, default 300 s) is
+/// the real liveness check; this only reaps clients that join and then
+/// vanish without closing.
+const IDLE_TIMEOUT: Duration = Duration::from_secs(300);
 /// First message (join) must arrive within this window.
 const JOIN_TIMEOUT: Duration = Duration::from_secs(10);
 /// Per-session stream message limit (README §14).
@@ -62,13 +68,14 @@ pub(crate) const MAX_AVATAR_CHARS: usize = 16;
 /// h3-axum dispatcher (the session owns the connection).
 pub async fn handle_wt(
     State(state): State<AppState>,
+    Extension(conn): Extension<quinn::Connection>,
     upgrade: h3_axum::WebTransportUpgrade,
 ) -> Response {
     match upgrade.accept().await {
         Ok(session) => {
             let session_id = session.session_id();
             info!(?session_id, "webtransport session opened");
-            tokio::spawn(session_task(state.world, session));
+            tokio::spawn(session_task(state.world, session, conn));
             StatusCode::OK.into_response()
         }
         Err(err) => {
@@ -107,7 +114,15 @@ impl RateLimit {
 
 /// One connected session: runs until the command stream (or the QUIC
 /// connection) dies, then removes the user from the world.
-async fn session_task(world: World, session: WebTransportSession) {
+///
+/// `conn` is this session's QUIC connection: a WebTransport session owns the
+/// whole HTTP/3 connection (`h3-axum` hands it over, and nothing accepts
+/// further requests or sessions on it afterwards). When the session ends we
+/// must close the QUIC connection explicitly — without that, the browser
+/// keeps the dead connection open and every reconnect attempt opens another
+/// session on it that can never be answered (observed as an endless
+/// "Connection lost" reconnect storm).
+async fn session_task(world: World, session: WebTransportSession, conn: quinn::Connection) {
     // (room, user id) once joined, so the datagram tasks can attribute
     // inbound movement and nobody can move before joining.
     let who: Who = Arc::new(Mutex::new(None));
@@ -181,6 +196,11 @@ async fn session_task(world: World, session: WebTransportSession) {
 
     datagram_task.abort();
     datagram_sink.abort();
+    // Tell the browser this WebTransport session (and with it the whole
+    // QUIC connection) is finished, so its reconnect opens a fresh
+    // connection instead of sessions no one accepts. Harmless if the
+    // connection is already gone.
+    conn.close(quinn::VarInt::from_u32(0), b"campfire: session ended");
 }
 
 /// Read `join`/`chat`/`typing` lines, enforce limits, and relay through the
