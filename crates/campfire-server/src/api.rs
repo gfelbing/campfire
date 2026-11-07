@@ -218,6 +218,9 @@ enum FallbackReq {
         name: String,
         #[serde(default)]
         avatar: Option<Avatar>,
+        /// Reconnect token from a previous `hello` (README §5).
+        #[serde(default)]
+        token: Option<String>,
     },
     Msg {
         token: String,
@@ -225,11 +228,14 @@ enum FallbackReq {
     },
 }
 
-/// One fallback (SSE+POST) session, keyed by user id (== token).
+/// One fallback (SSE+POST) session, keyed by user id (== relay token).
 struct FallbackSession {
     room: String,
     name: String,
     user_id: String,
+    /// The world session this fallback session restored (guards against a
+    /// stale timeout clobbering a newer session, README §5 reconnect).
+    session_id: u64,
     /// 1 chat/s, like the WebTransport path.
     chat: Mutex<RateLimit>,
     /// The outbound receiver, taken exactly once by the /rt/sse stream.
@@ -255,7 +261,12 @@ async fn fallback_event(
         )
     };
     match req {
-        FallbackReq::Join { room, name, avatar } => {
+        FallbackReq::Join {
+            room,
+            name,
+            avatar,
+            token,
+        } => {
             if !valid_room(&room) {
                 return Err(err(ErrorCode::BadMessage));
             }
@@ -275,32 +286,40 @@ async fn fallback_event(
             // Datagram channel is dropped immediately: the fallback has no
             // datagram path (movement is the one thing it cannot carry).
             let (dtx, _dtx_rx) = mpsc::unbounded_channel::<Vec<u8>>();
-            let user_id = match state.world.join(&room, name, avatar, tx, dtx) {
-                Ok(joined) => {
-                    // The unbounded channel buffers the hello until the SSE
-                    // stream claims the receiver.
-                    let _ = hello_tx.send(ServerMsg::Hello {
-                        you: joined.you.clone(),
-                        room: room.clone(),
-                        users: joined.users,
-                        chat: joined.chat,
-                    });
-                    joined.you
-                }
-                Err(e) => {
-                    let code = match e {
-                        crate::world::JoinError::RoomFull => ErrorCode::RoomFull,
-                        crate::world::JoinError::UnknownRoom => ErrorCode::UnknownRoom,
-                    };
-                    return Err(err(code));
-                }
-            };
+            let session_id = state.world.next_session_id();
+            let user_id =
+                match state
+                    .world
+                    .join(&room, name, avatar, token.as_deref(), session_id, tx, dtx)
+                {
+                    Ok(joined) => {
+                        // The unbounded channel buffers the hello until the SSE
+                        // stream claims the receiver.
+                        let _ = hello_tx.send(ServerMsg::Hello {
+                            you: joined.you.clone(),
+                            token: joined.token,
+                            room: room.clone(),
+                            users: joined.users,
+                            chat: joined.chat,
+                            call: joined.call,
+                        });
+                        joined.you
+                    }
+                    Err(e) => {
+                        let code = match e {
+                            crate::world::JoinError::RoomFull => ErrorCode::RoomFull,
+                            crate::world::JoinError::UnknownRoom => ErrorCode::UnknownRoom,
+                        };
+                        return Err(err(code));
+                    }
+                };
             fallback_map().lock().unwrap().insert(
                 user_id.clone(),
                 FallbackSession {
                     room: room.clone(),
                     name: name.to_owned(),
                     user_id: user_id.clone(),
+                    session_id,
                     chat: Mutex::new(RateLimit::new()),
                     rx: Mutex::new(Some(rx)),
                 },
@@ -310,10 +329,14 @@ async fn fallback_event(
             let world = state.world.clone();
             let map = fallback_map().clone();
             let user_id_bg = user_id.clone();
+            let session_id_bg = session_id;
             tokio::spawn(async move {
                 tokio::time::sleep(Duration::from_secs(60)).await;
                 let mut guard = map.lock().unwrap();
+                // Only this join's session: a rejoin with the same token
+                // replaces the map entry with a newer session id.
                 if let Some(s) = guard.get(&user_id_bg)
+                    && s.session_id == session_id_bg
                     && s.rx.lock().unwrap().is_some()
                 {
                     guard.remove(&user_id_bg);
@@ -381,6 +404,13 @@ async fn fallback_event(
                 ClientMsg::CallLeave => {
                     let _ = state.world.call_leave(&room, &token);
                 }
+                // Intentional leave (room switcher): immediate `Left`, and
+                // the session is gone (the SSE stream ends with the member's
+                // channel).
+                ClientMsg::Leave => {
+                    state.world.leave(&room, &token);
+                    fallback_map().lock().unwrap().remove(&token);
+                }
                 ClientMsg::Join { .. } => return Err(err(ErrorCode::BadMessage)),
             }
             Ok(Json(serde_json::json!({})))
@@ -405,7 +435,7 @@ async fn sse_stream(
     };
     // Take the receiver under the same lock that guards it, so a token can
     // be claimed by at most one stream.
-    let (room, user_id, rx) = {
+    let (room, user_id, rx, session_id) = {
         let guard = fallback_map().lock().unwrap();
         let session = guard
             .get(&token)
@@ -416,7 +446,12 @@ async fn sse_stream(
             .unwrap()
             .take()
             .ok_or_else(|| (StatusCode::CONFLICT, "token already claimed".into()))?;
-        (session.room.clone(), session.user_id.clone(), rx)
+        (
+            session.room.clone(),
+            session.user_id.clone(),
+            rx,
+            session.session_id,
+        )
     };
 
     let messages = UnboundedReceiverStream::new(rx)
@@ -435,18 +470,21 @@ async fn sse_stream(
         world: state.world.clone(),
         room,
         user_id,
+        session_id,
         cleaned: false,
     };
     Ok(Sse::new(stream))
 }
 
 /// Wraps an SSE stream so that when it ends (client disconnect, or the
-/// message channel closing), the user is removed from the world.
+/// message channel closing), the user enters the reconnect window (README
+/// §5) instead of leaving immediately.
 struct CleanupOnEnd<S> {
     inner: S,
     world: World,
     room: String,
     user_id: String,
+    session_id: u64,
     cleaned: bool,
 }
 
@@ -457,7 +495,8 @@ impl<S: Stream + Unpin> Stream for CleanupOnEnd<S> {
             Poll::Ready(None) => {
                 if !self.cleaned {
                     self.cleaned = true;
-                    self.world.leave(&self.room, &self.user_id);
+                    self.world
+                        .discard(&self.room, &self.user_id, self.session_id);
                     fallback_map().lock().unwrap().remove(&self.user_id);
                     debug!(user = %self.user_id, room = %self.room, "fallback session ended");
                 }

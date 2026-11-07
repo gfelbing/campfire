@@ -273,9 +273,62 @@ export class CallManager {
     this.reset(`call ended (${reason})`);
   }
 
+  /** Reconnect-with-token (README §5): the `hello` after a dropped
+   *  connection says the room's call survived and we are still in it. The
+   *  old peers' network paths are dead, so close them all and re-establish
+   *  from scratch: we act as the fresh joiner and offer every existing
+   *  member a direct connection (they answer; their stale peers are
+   *  replaced by `onCallOffer`). */
+  async rejoinCall(participants: UserBrief[]): Promise<void> {
+    if (!this.localStream) {
+      // Media was released while we were away (e.g. the tab slept): we
+      // cannot rejoin without a fresh mic prompt (explicit join, README
+      // §6.3) — the user can "Join call" from the status panel.
+      this.hooks.onLog("call ended while you were disconnected");
+      this.reset();
+      return;
+    }
+    for (const p of this.peers.values()) p.close();
+    this.peers.clear();
+    this.streams.clear();
+    this.presence.clear();
+    this.connState.clear();
+    this.roster = participants;
+    this.servers = await iceServers();
+    const others = participants.filter((u) => u.id !== this.selfId);
+    for (const u of others) {
+      this.ensurePeer(u);
+      void this.offerTo(u);
+    }
+    this.awaitingStart = null;
+    this.setPhase({
+      p: "in-call",
+      kind: others.length > 1 ? "huddle" : "1:1",
+      participants: others,
+    });
+    this.maybeAutoVoiceOnly();
+    this.pushPeers();
+    this.hooks.onLog("rejoined the call");
+  }
+
+  /** A relayed offer from a call participant.
+   *
+   *  The peer is reused only while it is fresh (`new`/`connecting` — a
+   *  huddle joiner that just opened it, or our own 1:1 in flight). Anything
+   *  else (no peer, or a peer whose network path died during a connection
+   *  drop) is closed and rebuilt from the roster: a rejoiner after a drop
+   *  offers us a *fresh* connection (README §5 reconnect). */
   onCallOffer(from: string, sdp: string): void {
+    const existing = this.peers.get(from);
+    const st = this.connState.get(from)?.state ?? "new";
+    if (existing && st !== "new" && st !== "connecting") {
+      existing.close();
+      this.peers.delete(from);
+      const u = this.roster.find((r) => r.id === from);
+      if (u) this.ensurePeer(u);
+    }
     const peer = this.peers.get(from);
-    if (!peer) return; // not our peer: 1:1 caller (we are the offerer) etc.
+    if (!peer) return;
     void (async () => {
       await peer.setRemoteOffer(sdp);
       const answer = await peer.createAnswer();
@@ -303,15 +356,6 @@ export class CallManager {
     if (code !== "call_not_allowed") return;
     if (this.awaitingStart !== null || this.phase.p === "outgoing") {
       this.hooks.onLog("call refused by the server");
-      this.reset();
-    }
-  }
-
-  /** The realtime connection dropped: the server dropped us from the call
-   *  and we cannot hear `call_end`, so tear down locally. */
-  onConnectionDown(): void {
-    if (this.phase.p !== "idle") {
-      this.hooks.onLog("connection lost — call ended");
       this.reset();
     }
   }

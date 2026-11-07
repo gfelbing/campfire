@@ -8,6 +8,7 @@ import { Connection } from "./net/connection";
 import type { ChatMsg, Dir, MovementBatch, UserBrief } from "./net/types";
 import { boot } from "./ui/boot";
 import { createChat, type ChatUI } from "./ui/chat";
+import { createPresence, type PresenceUI } from "./ui/presence";
 import { createStatus } from "./ui/status";
 import { isWalkablePoint, parseMap, type MapData } from "./world/mapdata";
 import { createWorld, followCamera } from "./world/render";
@@ -44,6 +45,7 @@ async function main(): Promise<void> {
   let moving = false;
   let myId = "";
   let chat: ChatUI | null = null;
+  let presence: PresenceUI;
 
   // Room roster (id → brief): drives the call-target picker (README §6.3).
   const roster = new Map<string, UserBrief>();
@@ -62,6 +64,7 @@ async function main(): Promise<void> {
     }
     world.local.setInCall(inCall.has(myId));
     status.setCallState(inCall.size > 0, inCall.has(myId));
+    presence.setInCall(inCall);
   };
 
   const conn = new Connection(opts.room, opts.name, opts.color, {
@@ -81,6 +84,17 @@ async function main(): Promise<void> {
       status.setUsers(h.users.length);
       manager.setSelfId(h.you);
       updateCallTargets();
+      presence.setUsers(h.users, new Set(h.call.map((u) => u.id)));
+      // Reconnect-with-token (README §5): `hello.call` is the authoritative
+      // call roster. If the call survived our drop and we are in it,
+      // re-establish the media; if it died while we were away, tear down.
+      inCall.clear();
+      for (const u of h.call) inCall.add(u.id);
+      if (inCall.has(myId)) {
+        void manager.rejoinCall(h.call);
+      } else if (manager.inCall()) {
+        manager.onCallEnd("ended while you were disconnected");
+      }
       // A mid-call room joiner may already have received the room-wide
       // `call_start` catch-up before this `hello`; now that the roster is
       // known, light up the in-call badges (README §6.3).
@@ -90,12 +104,14 @@ async function main(): Promise<void> {
       world.manager.joined(u);
       roster.set(u.id, u);
       status.bumpUsers(1);
+      presence.addUser(u);
       updateCallTargets();
     },
     onLeft: (id) => {
       world.manager.left(id);
       roster.delete(id);
       status.bumpUsers(-1);
+      presence.removeUser(id);
       updateCallTargets();
     },
     onChat: (c: ChatMsg) => chat?.add(c, myId),
@@ -135,13 +151,14 @@ async function main(): Promise<void> {
     },
     onStatus: (s) => {
       status.setConn(s);
-      // The server drops us from the call when the session ends; we cannot
-      // hear `call_end` over a dead link, so tear down locally (README §6.3).
-      if (s !== "connected") manager.onConnectionDown();
+      // A dropped connection must NOT tear down the call locally: the
+      // server keeps our call membership through the reconnect window, and
+      // the next `hello.call` roster is the truth (README §5).
     },
   });
 
   const ui = document.getElementById("ui")!;
+  presence = createPresence(ui);
   chat = createChat(ui, (t) => conn.sendChat(t), (on) => conn.sendTyping(on));
   const callUI = createCallUI(ui, {
     onAccept: () => void manager.accept(),
@@ -161,6 +178,18 @@ async function main(): Promise<void> {
     ui,
     (u) => void manager.ring(u),
     () => void manager.joinHuddle(),
+    (room) => {
+      // Room switch (README §11 Phase 7): leave this room immediately
+      // (the server broadcasts `left` and tears the session down), then
+      // reload into the target room with the same name + color.
+      conn.sendLeave();
+      window.setTimeout(() => {
+        window.location.href =
+          `/?room=${encodeURIComponent(room)}` +
+          `&name=${encodeURIComponent(opts.name)}` +
+          `&color=${encodeURIComponent(opts.color)}`;
+      }, 150);
+    },
   );
   status.setRoom(opts.room);
 

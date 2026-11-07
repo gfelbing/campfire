@@ -25,6 +25,9 @@ const CHAT_HISTORY: usize = 100;
 const ROOM_CAP: usize = 2048;
 /// Server tick: one movement batch per room every 50 ms (README §5).
 pub const TICK: Duration = Duration::from_millis(50);
+/// How long a disconnected user keeps their identity (README §5 reconnect):
+/// position, call membership and the token all survive a drop for this long.
+pub const RECONNECT_WINDOW: Duration = Duration::from_secs(30);
 /// Largest movement datagram; bigger batches are split in halves (README §5).
 const MAX_DATAGRAM_BYTES: usize = 1200;
 /// Movement entries per user per second (README §5: client sends ≤15 Hz).
@@ -56,6 +59,14 @@ struct Member {
     tx: tokio::sync::mpsc::UnboundedSender<ServerMsg>,
     /// Outbound datagram queue for this session (movement batches).
     dtx: tokio::sync::mpsc::UnboundedSender<Vec<u8>>,
+    /// The session that currently owns this member (guards against a stale
+    /// session's disconnect clobbering a newer one, README §5 reconnect).
+    session: u64,
+    /// Reconnect token (README §5): echoed in `hello`, matched in `join`.
+    token: String,
+    /// When the owning session died; swept by the tick into a real leave
+    /// once the reconnect window has elapsed (README §5).
+    gone_at: Option<Instant>,
 }
 
 /// One room (one map): presence + chat history + the in-flight call, if any.
@@ -95,6 +106,11 @@ pub struct World {
     rooms: Arc<Mutex<HashMap<String, Room>>>,
     id_counter: Arc<AtomicU64>,
     nonce: Arc<Mutex<[u8; 4]>>,
+    /// One per connected session; lets a stale session's disconnect lose to
+    /// a newer session that already restored the same token (README §5).
+    session_counter: Arc<AtomicU64>,
+    /// How long a disconnected user keeps their identity (README §5).
+    reconnect_window: Duration,
 }
 
 impl Default for World {
@@ -113,7 +129,20 @@ impl World {
             rooms: Arc::default(),
             id_counter: Arc::new(AtomicU64::new(0)),
             nonce: Arc::new(Mutex::new(nonce)),
+            session_counter: Arc::new(AtomicU64::new(0)),
+            reconnect_window: RECONNECT_WINDOW,
         }
+    }
+
+    /// Override the reconnect window (tests use a short one).
+    pub fn with_reconnect_window(mut self, window: Duration) -> Self {
+        self.reconnect_window = window;
+        self
+    }
+
+    /// Next session id (monotonic; guards discard/leave races, README §5).
+    pub fn next_session_id(&self) -> u64 {
+        self.session_counter.fetch_add(1, Ordering::Relaxed)
     }
 
     /// The map a room id names, if it is a known map.
@@ -129,27 +158,77 @@ impl World {
         format!("u_{key:08x}")
     }
 
-    /// Join a room. On success the caller gets its own id, the room snapshot,
-    /// and everyone already in the room is told about the newcomer.
+    /// Generate a fresh reconnect token: 32 random hex chars (README §5).
+    fn next_token(&self) -> String {
+        let mut bytes = [0u8; 16];
+        rand::thread_rng().fill_bytes(&mut bytes);
+        bytes.iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    /// Join a room (README §5). Two paths:
     ///
-    /// The room id must name a known map; the joiner spawns at the map's
+    /// * **Reconnect**: `token` matches an existing member (gone, or still
+    ///   alive — the old session may not have been detected as dead yet) →
+    ///   that member is restored: the new session takes over the member's
+    ///   channels, the user id, position and call membership survive, and
+    ///   the room hears no `left`/`joined` (no flicker).
+    /// * **Fresh**: a new id + token is generated and everyone in the room
+    ///   hears `joined`.
+    ///
+    /// The room id must name a known map; a fresh joiner spawns at the map's
     /// spawn point.
+    // Eight flat parameters on purpose: four are the join *request* (room,
+    // name, avatar, token), three describe the *connecting session*
+    // (session_id, tx, dtx). A struct would churn every call site for no gain.
+    #[allow(clippy::too_many_arguments)]
     pub fn join(
         &self,
         room: &str,
         name: &str,
         avatar: Option<Avatar>,
+        token: Option<&str>,
+        session_id: u64,
         tx: tokio::sync::mpsc::UnboundedSender<ServerMsg>,
         dtx: tokio::sync::mpsc::UnboundedSender<Vec<u8>>,
     ) -> Result<Joined, JoinError> {
         let map = self.maps.get(room).ok_or(JoinError::UnknownRoom)?;
-        let id = self.next_user_id();
         let mut rooms = self.rooms.lock().unwrap();
         let room_entry = rooms.entry(room.to_owned()).or_default();
+
+        // Reconnect (README §5): the token names an existing member. The
+        // identity (id, name, position, token, call membership) survives;
+        // only the session channels change hands.
+        if let Some(tok) = token.filter(|t| !t.is_empty())
+            && let Some(id) = room_entry
+                .users
+                .iter()
+                .find(|(_, m)| m.token == tok)
+                .map(|(id, _)| id.clone())
+        {
+            let member = room_entry.users.get_mut(&id).unwrap();
+            member.session = session_id;
+            member.tx = tx;
+            member.dtx = dtx;
+            member.gone_at = None;
+            let joined = Joined {
+                you: id,
+                token: member.token.clone(),
+                users: user_snapshot(room_entry),
+                chat: room_entry.chat.iter().cloned().collect(),
+                call: room_entry
+                    .call
+                    .as_ref()
+                    .map(|c| c.participant_list())
+                    .unwrap_or_default(),
+            };
+            return Ok(joined);
+        }
 
         if room_entry.users.len() >= ROOM_CAP {
             return Err(JoinError::RoomFull);
         }
+        let id = self.next_user_id();
+        let token = self.next_token();
         let now = Instant::now();
         // If the room already has members, mark the joiner dirty so the next
         // tick broadcasts the spawn position (an empty room has no one to
@@ -170,23 +249,22 @@ impl World {
                 dirty,
                 tx,
                 dtx,
+                session: session_id,
+                token: token.clone(),
+                gone_at: None,
             },
         );
 
         let joined = Joined {
             you: id.clone(),
-            users: room_entry
-                .users
-                .iter()
-                .map(|(uid, m)| UserState {
-                    id: uid.clone(),
-                    name: m.name.clone(),
-                    x: m.pos.0,
-                    y: m.pos.1,
-                    d: m.dir,
-                })
-                .collect(),
+            token,
+            users: user_snapshot(room_entry),
             chat: room_entry.chat.iter().cloned().collect(),
+            call: room_entry
+                .call
+                .as_ref()
+                .map(|c| c.participant_list())
+                .unwrap_or_default(),
         };
 
         let brief = UserBrief {
@@ -215,23 +293,34 @@ impl World {
         Ok(joined)
     }
 
+    /// A session died (README §5 reconnect): the member keeps their
+    /// identity — room, position, call membership, token — for the
+    /// reconnect window. Nobody is notified; to the room the user is just
+    /// still there. The tick turns this into a real [`World::leave`] once
+    /// the window has elapsed.
+    ///
+    /// Guarded by session id: a stale session's disconnect must not mark a
+    /// member gone when a newer session has already restored the token.
+    pub fn discard(&self, room: &str, id: &str, session_id: u64) {
+        let mut rooms = self.rooms.lock().unwrap();
+        let Some(entry) = rooms.get_mut(room) else {
+            return;
+        };
+        if let Some(member) = entry.users.get_mut(id)
+            && member.session == session_id
+            && member.gone_at.is_none()
+        {
+            member.gone_at = Some(Instant::now());
+            member.dirty = false;
+        }
+    }
+
     /// Remove a user from their room and tell everyone left inside. A call
     /// involving the leaver drops (README §6.3): the leaver is not notified,
     /// they are gone.
     pub fn leave(&self, room: &str, id: &str) {
         let mut rooms = self.rooms.lock().unwrap();
-        let Some(entry) = rooms.get_mut(room) else {
-            return;
-        };
-        if entry.users.remove(id).is_some() {
-            leave_call(entry, id);
-            for m in entry.users.values() {
-                let _ = m.tx.send(ServerMsg::Left { id: id.to_owned() });
-            }
-        }
-        if entry.users.is_empty() {
-            rooms.remove(room);
-        }
+        remove_from_room(&mut rooms, room, id);
     }
 
     /// Validate and apply one user's movement batch (README §5 "Movement
@@ -284,10 +373,26 @@ impl World {
         }
     }
 
-    /// One 50 ms tick (README §5): for every room, batch the dirty members
-    /// into datagram-sized movement JSON and fan it out to all members.
+    /// One 50 ms tick (README §5): first expire gone members whose
+    /// reconnect window has elapsed (a real leave, with notification), then
+    /// for every room batch the dirty members into datagram-sized movement
+    /// JSON and fan it out to all members.
     pub fn tick(&self) {
         let mut rooms = self.rooms.lock().unwrap();
+        let window = self.reconnect_window;
+        let expired: Vec<(String, String)> = rooms
+            .iter()
+            .flat_map(|(room, entry)| {
+                entry
+                    .users
+                    .iter()
+                    .filter(|(_, m)| m.gone_at.is_some_and(|t| t.elapsed() >= window))
+                    .map(|(id, _)| (room.clone(), id.clone()))
+            })
+            .collect();
+        for (room, id) in &expired {
+            remove_from_room(&mut rooms, room, id);
+        }
         for room_entry in rooms.values_mut() {
             if !room_entry.users.values().any(|m| m.dirty) {
                 continue;
@@ -818,6 +923,40 @@ fn leave_call(entry: &mut Room, id: &str) {
     }
 }
 
+/// Remove `id` from `room` — call membership included (see
+/// [`leave_call`]) — broadcast `Left` to everyone left, and drop the room
+/// when it becomes empty. The caller owns the `rooms` lock.
+fn remove_from_room(rooms: &mut HashMap<String, Room>, room: &str, id: &str) {
+    let Some(entry) = rooms.get_mut(room) else {
+        return;
+    };
+    if entry.users.remove(id).is_some() {
+        leave_call(entry, id);
+        for m in entry.users.values() {
+            let _ = m.tx.send(ServerMsg::Left { id: id.to_owned() });
+        }
+    }
+    if entry.users.is_empty() {
+        rooms.remove(room);
+    }
+}
+
+/// The room's full user snapshot for a `hello` (gone members included —
+/// they are still in the room until the reconnect window elapses).
+fn user_snapshot(entry: &Room) -> Vec<UserState> {
+    entry
+        .users
+        .iter()
+        .map(|(uid, m)| UserState {
+            id: uid.clone(),
+            name: m.name.clone(),
+            x: m.pos.0,
+            y: m.pos.1,
+            d: m.dir,
+        })
+        .collect()
+}
+
 /// Split a room's dirty entries into datagram-sized JSON batches: encode all
 /// at once, and when the batch would exceed the datagram cap split the entry
 /// list in halves and recurse (README §5 overflow rule).
@@ -843,10 +982,14 @@ fn encode_batches(entries: &[MovementEntry]) -> Vec<Vec<u8>> {
 pub struct Joined {
     /// The joining user's own id.
     pub you: String,
+    /// The user's reconnect token (README §5), echoed in `hello`.
+    pub token: String,
     /// Everyone in the room, including the joiner.
     pub users: Vec<UserState>,
     /// Last chat lines of the room.
     pub chat: Vec<ChatMsg>,
+    /// The room's current call participants (empty when no call is running).
+    pub call: Vec<UserBrief>,
 }
 
 /// One active room, as reported by `GET /api/v1/rooms`.
@@ -898,8 +1041,28 @@ mod tests {
         let (tx_b, mut rx_b) = channel();
         let (dtx_b, _) = datagram_channel();
 
-        let a = world.join("office", "alice", None, tx_a, dtx_a).unwrap();
-        let b = world.join("office", "bob", None, tx_b, dtx_b).unwrap();
+        let a = world
+            .join(
+                "office",
+                "alice",
+                None,
+                None,
+                world.next_session_id(),
+                tx_a,
+                dtx_a,
+            )
+            .unwrap();
+        let b = world
+            .join(
+                "office",
+                "bob",
+                None,
+                None,
+                world.next_session_id(),
+                tx_b,
+                dtx_b,
+            )
+            .unwrap();
         assert_ne!(a.you, b.you);
         assert_eq!(a.users.len(), 1);
         assert_eq!(b.users.len(), 2);
@@ -922,7 +1085,15 @@ mod tests {
         let (tx, _) = channel();
         let (dtx, _) = datagram_channel();
         assert_eq!(
-            world.join("nope", "alice", None, tx, dtx),
+            world.join(
+                "nope",
+                "alice",
+                None,
+                None,
+                world.next_session_id(),
+                tx,
+                dtx
+            ),
             Err(JoinError::UnknownRoom)
         );
         // And nothing was created in the world.
@@ -934,7 +1105,17 @@ mod tests {
         let world = World::new();
         let (tx, _) = channel();
         let (dtx, _) = datagram_channel();
-        let joined = world.join("office", "alice", None, tx, dtx).unwrap();
+        let joined = world
+            .join(
+                "office",
+                "alice",
+                None,
+                None,
+                world.next_session_id(),
+                tx,
+                dtx,
+            )
+            .unwrap();
         let (spawn_x, spawn_y) = world.map("office").unwrap().spawn;
         assert_eq!((joined.users[0].x, joined.users[0].y), (spawn_x, spawn_y));
     }
@@ -946,8 +1127,28 @@ mod tests {
         let (dtx_a, mut dgr_a) = datagram_channel();
         let (tx_b, _) = channel();
         let (dtx_b, mut dgr_b) = datagram_channel();
-        let a = world.join("office", "alice", None, tx_a, dtx_a).unwrap();
-        world.join("office", "bob", None, tx_b, dtx_b).unwrap();
+        let a = world
+            .join(
+                "office",
+                "alice",
+                None,
+                None,
+                world.next_session_id(),
+                tx_a,
+                dtx_a,
+            )
+            .unwrap();
+        world
+            .join(
+                "office",
+                "bob",
+                None,
+                None,
+                world.next_session_id(),
+                tx_b,
+                dtx_b,
+            )
+            .unwrap();
         let (spawn_x, spawn_y) = world.map("office").unwrap().spawn;
 
         // Bob's join (the room already had Alice) makes him dirty: the first
@@ -1010,7 +1211,17 @@ mod tests {
         let world = World::new();
         let (tx_a, _) = channel();
         let (dtx_a, mut dgr_a) = datagram_channel();
-        let a = world.join("office", "alice", None, tx_a, dtx_a).unwrap();
+        let a = world
+            .join(
+                "office",
+                "alice",
+                None,
+                None,
+                world.next_session_id(),
+                tx_a,
+                dtx_a,
+            )
+            .unwrap();
         let map = world.map("office").unwrap();
         let (spawn_x, spawn_y) = map.spawn;
         // One tile north of the spawn is a wall in the office map.
@@ -1034,14 +1245,34 @@ mod tests {
         let world = World::new();
         let (tx_a, _) = channel();
         let (dtx_a, mut dgr_a) = datagram_channel();
-        world.join("office", "alice", None, tx_a, dtx_a).unwrap();
+        world
+            .join(
+                "office",
+                "alice",
+                None,
+                None,
+                world.next_session_id(),
+                tx_a,
+                dtx_a,
+            )
+            .unwrap();
         // Joining an empty room has no one to tell: nothing is broadcast.
         world.tick();
         assert!(dgr_a.try_recv().is_err(), "empty-room joiner is not dirty");
 
         let (tx_b, _) = channel();
         let (dtx_b, mut dgr_b) = datagram_channel();
-        let b = world.join("office", "bob", None, tx_b, dtx_b).unwrap();
+        let b = world
+            .join(
+                "office",
+                "bob",
+                None,
+                None,
+                world.next_session_id(),
+                tx_b,
+                dtx_b,
+            )
+            .unwrap();
         world.tick();
         let dg = dgr_a.try_recv().expect("alice hears bob's spawn");
         let batch: MovementBatch =
@@ -1061,8 +1292,28 @@ mod tests {
         let (dtx_a, _) = datagram_channel();
         let (tx_b, mut rx_b) = channel();
         let (dtx_b, _) = datagram_channel();
-        let a = world.join("office", "a", None, tx_a, dtx_a).unwrap();
-        world.join("office", "b", None, tx_b, dtx_b).unwrap();
+        let a = world
+            .join(
+                "office",
+                "a",
+                None,
+                None,
+                world.next_session_id(),
+                tx_a,
+                dtx_a,
+            )
+            .unwrap();
+        world
+            .join(
+                "office",
+                "b",
+                None,
+                None,
+                world.next_session_id(),
+                tx_b,
+                dtx_b,
+            )
+            .unwrap();
         rx_a.try_recv().unwrap(); // drain the `joined` broadcast for b
 
         world.broadcast_chat(
@@ -1091,8 +1342,28 @@ mod tests {
         let (dtx_a, _) = datagram_channel();
         let (tx_b, mut rx_b) = channel();
         let (dtx_b, _) = datagram_channel();
-        let a = world.join("office", "a", None, tx_a, dtx_a).unwrap();
-        world.join("office", "b", None, tx_b, dtx_b).unwrap();
+        let a = world
+            .join(
+                "office",
+                "a",
+                None,
+                None,
+                world.next_session_id(),
+                tx_a,
+                dtx_a,
+            )
+            .unwrap();
+        world
+            .join(
+                "office",
+                "b",
+                None,
+                None,
+                world.next_session_id(),
+                tx_b,
+                dtx_b,
+            )
+            .unwrap();
         rx_a.try_recv().unwrap(); // drain the `joined` broadcast for b
 
         world.broadcast_typing("office", &a.you, true);
@@ -1114,7 +1385,9 @@ mod tests {
     fn join_user(world: &World, room: &str, name: &str) -> TestUser {
         let (tx, rx) = channel();
         let (dtx, _dgr) = datagram_channel();
-        let joined = world.join(room, name, None, tx, dtx).unwrap();
+        let joined = world
+            .join(room, name, None, None, world.next_session_id(), tx, dtx)
+            .unwrap();
         TestUser { id: joined.you, rx }
     }
 
@@ -1458,5 +1731,186 @@ mod tests {
             a.rx.try_recv().unwrap(),
             ServerMsg::CallStart { .. }
         ));
+    }
+
+    // -- reconnect with token (README §5, Phase 7) -----------------------
+
+    /// Join with an optional reconnect token, keeping the outbound stream
+    /// receiver, the token, and the session id this join ran under.
+    fn join_token(
+        world: &World,
+        room: &str,
+        name: &str,
+        token: Option<&str>,
+    ) -> (TestUser, String, u64) {
+        let (tx, rx) = channel();
+        let (dtx, _dgr) = datagram_channel();
+        let session = world.next_session_id();
+        let joined = world
+            .join(room, name, None, token, session, tx, dtx)
+            .unwrap();
+        (TestUser { id: joined.you, rx }, joined.token, session)
+    }
+
+    #[test]
+    fn reconnect_restores_identity_without_flicker() {
+        let world = World::new();
+        let (mut a, a_token, a_session) = join_token(&world, "office", "alice", None);
+        let (mut b, _, _) = join_token(&world, "office", "bob", None);
+        a.rx.try_recv().unwrap(); // alice hears bob join
+
+        // Alice's session dies: the room hears nothing (no leave).
+        world.discard("office", &a.id, a_session);
+        assert!(b.rx.try_recv().is_err(), "a drop is not a leave");
+
+        // Rejoin with the token: same id, same token, no joined broadcast.
+        let (a2, a_token2, _) = join_token(&world, "office", "alice", Some(&a_token));
+        assert_eq!(a2.id, a.id, "the identity must survive");
+        assert_eq!(a_token2, a_token, "the token must survive");
+        assert!(
+            b.rx.try_recv().is_err(),
+            "no joined broadcast for a restore"
+        );
+    }
+
+    #[test]
+    fn reconnect_while_alive_switches_the_session() {
+        let world = World::new();
+        let (mut a_old, a_token, _) = join_token(&world, "office", "alice", None);
+        let (b, _, _) = join_token(&world, "office", "bob", None);
+        a_old.rx.try_recv().unwrap(); // alice hears bob join
+
+        // A second session presents the token before the first is detected
+        // as dead: the member's channels change hands to the new session.
+        let (mut a_new, _, _) = join_token(&world, "office", "alice", Some(&a_token));
+        assert_eq!(a_new.id, a_old.id);
+
+        // The old channel is dead; the new one is live.
+        world.broadcast_typing("office", &b.id, true);
+        assert!(a_old.rx.try_recv().is_err(), "the old session is cut over");
+        assert!(
+            matches!(a_new.rx.try_recv().unwrap(), ServerMsg::Typing { .. }),
+            "the new session is live"
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_discard_is_a_noop() {
+        let world = World::new().with_reconnect_window(Duration::from_millis(80));
+        let (mut a_old, a_token, a_session1) = join_token(&world, "office", "alice", None);
+        let (mut b, _, _) = join_token(&world, "office", "bob", None);
+        a_old.rx.try_recv().unwrap();
+
+        // Restore first...
+        let (a_new, _, _) = join_token(&world, "office", "alice", Some(&a_token));
+        assert_eq!(a_new.id, a_old.id);
+        // ...then the old session's disconnect lands late. The session-id
+        // guard makes it a no-op: even past the window the user survives.
+        world.discard("office", &a_old.id, a_session1);
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        world.tick();
+        assert!(
+            b.rx.try_recv().is_err(),
+            "stale discard must not expire the user"
+        );
+    }
+
+    #[tokio::test]
+    async fn gone_member_expires_into_a_real_leave() {
+        let world = World::new().with_reconnect_window(Duration::from_millis(80));
+        let (mut a, a_token, a_session) = join_token(&world, "office", "alice", None);
+        let (mut b, _, _) = join_token(&world, "office", "bob", None);
+        a.rx.try_recv().unwrap();
+
+        world.discard("office", &a.id, a_session);
+        assert!(b.rx.try_recv().is_err(), "silent inside the window");
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        world.tick();
+        assert!(
+            matches!(b.rx.try_recv().unwrap(), ServerMsg::Left { ref id } if id == &a.id),
+            "the tick turns the expiry into a real leave"
+        );
+        assert_eq!(world.stats(), (1, 1));
+
+        // Her token died with her: a late reconnect is a fresh user.
+        let (late, _, _) = join_token(&world, "office", "alice", Some(&a_token));
+        assert_ne!(late.id, a.id, "an expired token cannot restore");
+        assert!(
+            matches!(b.rx.try_recv().unwrap(), ServerMsg::Joined { .. }),
+            "the room hears the fresh join"
+        );
+    }
+
+    #[tokio::test]
+    async fn gone_member_in_a_call_drops_the_call_on_expiry() {
+        let world = World::new().with_reconnect_window(Duration::from_millis(80));
+        let (mut a, _, a_session) = join_token(&world, "office", "alice", None);
+        let (mut b, _, _) = join_token(&world, "office", "bob", None);
+        start_call(&world, &mut a, &mut b);
+
+        world.discard("office", &a.id, a_session);
+        assert!(b.rx.try_recv().is_err(), "silent inside the window");
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        world.tick();
+        // The 1:1 drops for the room, then the leave.
+        assert!(
+            matches!(
+                b.rx.try_recv().unwrap(),
+                ServerMsg::CallEnd { ref reason } if reason == "last_left"
+            ),
+            "the call drops when the gone member expires"
+        );
+        assert!(matches!(b.rx.try_recv().unwrap(), ServerMsg::Left { .. }));
+    }
+
+    #[test]
+    fn token_mismatch_is_a_fresh_user() {
+        let world = World::new();
+        let (mut a, a_token, _) = join_token(&world, "office", "alice", None);
+        let (mut b, _, _) = join_token(&world, "office", "bob", None);
+        a.rx.try_recv().unwrap();
+
+        // A stranger token: a brand-new user (the room hears about it).
+        let (a3, a3_token, _) = join_token(&world, "office", "alice2", Some("bogus"));
+        assert_ne!(a3.id, a.id);
+        assert_ne!(a3_token, a_token);
+        assert!(
+            matches!(b.rx.try_recv().unwrap(), ServerMsg::Joined { ref user } if user.id == a3.id),
+            "the room hears the fresh join"
+        );
+
+        // The real token wins even under a different display name: identity
+        // is keyed by the token, and the original name is kept.
+        let (tx, _rx) = channel();
+        let (dtx, _) = datagram_channel();
+        let session = world.next_session_id();
+        let joined = world
+            .join("office", "ALICE-2", None, Some(&a_token), session, tx, dtx)
+            .unwrap();
+        assert_eq!(joined.you, a.id);
+        let me = joined
+            .users
+            .iter()
+            .find(|u| u.id == a.id)
+            .expect("restored alice in her own snapshot");
+        assert_eq!(
+            me.name, "alice",
+            "the token, not the name, identifies the user"
+        );
+        assert!(b.rx.try_recv().is_err(), "no flicker for the restore");
+    }
+
+    #[test]
+    fn explicit_leave_beats_the_reconnect_window() {
+        let world = World::new();
+        let (mut a, a_token, _) = join_token(&world, "office", "alice", None);
+        let (mut b, _, _) = join_token(&world, "office", "bob", None);
+        a.rx.try_recv().unwrap();
+
+        world.leave("office", &a.id);
+        assert!(matches!(b.rx.try_recv().unwrap(), ServerMsg::Left { .. }));
+        // Her token dies with her: no restore.
+        let (a2, _, _) = join_token(&world, "office", "alice", Some(&a_token));
+        assert_ne!(a2.id, a.id, "an explicit leave forfeits the token");
     }
 }

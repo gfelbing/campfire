@@ -14,9 +14,27 @@ interface MapInfo {
 const NAME_KEY = "campfire.name";
 const COLORS = ["#e05f38", "#4a90d9", "#58a858", "#9b59b6", "#d4a017", "#16a2a2"];
 
-/** Show the boot overlay and resolve with the user's choices. */
+/** Show the boot overlay and resolve with the user's choices.
+ *
+ *  Room switching (README §11 Phase 7) reloads the page with the choices in
+ *  the URL (`/?room=…&name=…&color=…`): when all three are present the form
+ *  is skipped entirely and the values are returned as-is. */
 export function boot(): Promise<BootOptions> {
   const root = document.getElementById("boot")!;
+
+  const params = new URLSearchParams(window.location.search);
+  const urlRoom = params.get("room");
+  const urlName = params.get("name")?.trim();
+  const urlColor = params.get("color");
+  if (urlRoom && urlName && urlColor) {
+    root.style.display = "none";
+    return Promise.resolve({
+      room: urlRoom,
+      name: urlName.slice(0, 24),
+      color: urlColor,
+    });
+  }
+
   root.style.display = "grid";
   root.innerHTML = `
     <main>

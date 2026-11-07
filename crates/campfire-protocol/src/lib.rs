@@ -108,6 +108,11 @@ pub enum ClientMsg {
         name: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         avatar: Option<Avatar>,
+        /// Reconnect token from a previous `hello` (README §5): restores the
+        /// old identity within the server's reconnect window instead of
+        /// creating a new user.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        token: Option<String>,
     },
     Chat {
         text: String,
@@ -115,6 +120,10 @@ pub enum ClientMsg {
     Typing {
         on: bool,
     },
+    /// Leave the current room immediately (no reconnect grace period). The
+    /// server tears the session down; the client reconnects elsewhere if it
+    /// wants to be somewhere (room switcher).
+    Leave,
     /// 1:1: start ringing `to` (must be in the same room). Phase 5.
     CallRing {
         to: String,
@@ -165,8 +174,15 @@ pub enum ServerMsg {
     Hello {
         you: String,
         room: String,
+        /// This session's reconnect token: send it back in `join` after a
+        /// dropped connection to restore this identity (README §5).
+        token: String,
         users: Vec<UserState>,
         chat: Vec<ChatMsg>,
+        /// The room's current call participants (empty when no call is
+        /// running): the authoritative catch-up for badges and mid-call
+        /// rejoin (README §6.3).
+        call: Vec<UserBrief>,
     },
     Joined {
         user: UserBrief,
@@ -283,6 +299,7 @@ mod tests {
             avatar: Some(Avatar {
                 color: "#e05f38".into(),
             }),
+            token: None,
         };
         let line = to_line(&msg);
         assert!(line.starts_with(r#"{"t":"join""#));
@@ -295,6 +312,7 @@ mod tests {
         let msg = ServerMsg::Hello {
             you: "u_1f3a9c02".into(),
             room: "office-1".into(),
+            token: "9f3ab1c2".into(),
             users: vec![UserState {
                 id: "u_77ab".into(),
                 name: "jules".into(),
@@ -307,6 +325,10 @@ mod tests {
                 name: "jules".into(),
                 text: "welcome!".into(),
                 ts: 1_762_410_000,
+            }],
+            call: vec![UserBrief {
+                id: "u_77ab".into(),
+                name: "jules".into(),
             }],
         };
         assert_eq!(from_line::<ServerMsg>(&to_line(&msg)).unwrap(), msg);
@@ -340,6 +362,7 @@ mod tests {
             room: "r".into(),
             name: "n".into(),
             avatar: None,
+            token: None,
         };
         assert_eq!(
             from_line::<ClientMsg>(&to_line(&no_avatar)).unwrap(),

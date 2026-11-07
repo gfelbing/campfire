@@ -169,7 +169,13 @@ async fn session_task(world: World, session: WebTransportSession) {
     };
 
     match command {
-        Some(stream) => run_command_stream(&world, stream, who, dtx).await,
+        Some(stream) => {
+            // One session id per connection (README §5 reconnect): a stale
+            // session's disconnect must not clobber a newer session that
+            // already restored the same token.
+            let session_id = world.next_session_id();
+            run_command_stream(&world, stream, who, dtx, session_id).await
+        }
         None => debug!("no command stream"),
     }
 
@@ -184,6 +190,7 @@ async fn run_command_stream<S>(
     stream: S,
     who: Who,
     dtx: mpsc::UnboundedSender<Vec<u8>>,
+    session_id: u64,
 ) where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + 'static,
 {
@@ -239,7 +246,16 @@ async fn run_command_stream<S>(
                         warn!("session exceeded message rate");
                         break 'read;
                     }
-                    if !dispatch(world, &line, &tx, &mut session, &mut chat, &who, &dtx) {
+                    if !dispatch(
+                        world,
+                        &line,
+                        &tx,
+                        &mut session,
+                        &mut chat,
+                        &who,
+                        &dtx,
+                        session_id,
+                    ) {
                         break 'read;
                     }
                 }
@@ -249,9 +265,12 @@ async fn run_command_stream<S>(
     }
 
     if let Some((room, id, _)) = &session {
-        world.leave(room, id);
+        // The session is gone (README §5 reconnect): the user keeps their
+        // identity for the reconnect window; the tick turns it into a real
+        // leave if no rejoin with the token shows up in time.
+        world.discard(room, id, session_id);
         *who.lock().unwrap() = None; // no more movement for this session
-        info!(user = %id, room = %room, "user left");
+        info!(user = %id, room = %room, "session ended; reconnect window starts");
     }
     drop(tx); // writer task finishes and shuts the stream down
     let _ = writer.await;
@@ -259,6 +278,10 @@ async fn run_command_stream<S>(
 
 /// Handle one command line. Returns `false` when the session must be torn
 /// down (rate-limit break, or the send channel closed).
+// Eight flat parameters on purpose: the world, the line, the session's two
+// send channels + id, and the per-stream mutable state (current join, chat
+// rate limit). Bundling them into structs would obscure what each arm reads.
+#[allow(clippy::too_many_arguments)]
 fn dispatch(
     world: &World,
     line: &str,
@@ -267,9 +290,15 @@ fn dispatch(
     chat_limit: &mut RateLimit,
     who: &Who,
     dtx: &mpsc::UnboundedSender<Vec<u8>>,
+    session_id: u64,
 ) -> bool {
     match campfire_protocol::from_line::<ClientMsg>(line) {
-        Ok(ClientMsg::Join { room, name, avatar }) => {
+        Ok(ClientMsg::Join {
+            room,
+            name,
+            avatar,
+            token,
+        }) => {
             if session.is_some() {
                 return send(tx, ErrorCode::BadMessage);
             }
@@ -285,22 +314,44 @@ fn dispatch(
             {
                 return send(tx, ErrorCode::BadMessage);
             }
-            match world.join(&room, name, avatar.clone(), tx.clone(), dtx.clone()) {
+            match world.join(
+                &room,
+                name,
+                avatar.clone(),
+                token.as_deref(),
+                session_id,
+                tx.clone(),
+                dtx.clone(),
+            ) {
                 Ok(joined) => {
                     let you = joined.you;
                     *session = Some((room.clone(), you.clone(), name.to_owned()));
                     *who.lock().unwrap() = Some((room.clone(), you.clone()));
                     let msg = ServerMsg::Hello {
                         you,
+                        token: joined.token,
                         room,
                         users: joined.users,
                         chat: joined.chat,
+                        call: joined.call,
                     };
                     tx.send(msg).is_ok()
                 }
                 Err(crate::world::JoinError::RoomFull) => send(tx, ErrorCode::RoomFull),
                 Err(crate::world::JoinError::UnknownRoom) => send(tx, ErrorCode::UnknownRoom),
             }
+        }
+        Ok(ClientMsg::Leave) => {
+            let Some((room, id, _)) = session.clone() else {
+                return send(tx, ErrorCode::BadMessage);
+            };
+            // Intentional leave: immediate `Left` broadcast (room switcher),
+            // no reconnect grace period. The session is torn down.
+            world.leave(&room, &id);
+            *who.lock().unwrap() = None;
+            *session = None;
+            info!(user = %id, room = %room, "user left");
+            false
         }
         Ok(ClientMsg::Chat { text }) => {
             let Some((room, id, name)) = session.clone() else {

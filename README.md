@@ -82,7 +82,7 @@ Because of the HTTP/3-only data path:
 1. Browser does `GET https://office.example.com/` → the binary serves `index.html` + assets over HTTP/3 (all embedded, no filesystem at runtime).
 2. Browser does `GET /api/v1/maps` → picks a world, loads the Tiled JSON from `GET /api/v1/maps/{id}`.
 3. Browser opens `new WebTransport("https://office.example.com/wt")` → extended CONNECT over the *same* port → session established.
-4. Browser sends `{"t":"join","room":"office-1","name":"georg"}` on a reliable stream → server answers with `{"t":"hello","you":…,"users":[…],"chat":[…]}` (current room state + chat history).
+4. Browser sends `{"t":"join","room":"office-1","name":"georg"}` on a reliable stream → server answers with `{"t":"hello","you":…,"token":…,"users":[…],"chat":[…],"call":[…]}` (current room state + chat history + the user's reconnect token + the current call roster).
 5. Client moves at up to 15 Hz; server runs a 50 ms tick; each tick, per room, one batched datagram (≤ 1200 B) containing all users' deltas is sent to every member of the room.
 6. Chat and call signaling go over the reliable stream: ordered, lossless.
 7. A call: signaling (SDP offers/answers, ICE candidates) is relayed over the same stream; **media flows browser-to-browser** — P2P over the users' own UDP where possible, via the 443/TCP TURN relay otherwise. The server never touches media content.
@@ -125,6 +125,8 @@ Because of the HTTP/3-only data path:
 ```jsonc
 // reliable stream
 {"t":"join",   "room":"office-1", "name":"georg", "avatar":{"color":"#e05f38"}}
+              // …plus "token":"…" on a reconnect (restores the previous identity)
+{"t":"leave"}                          // leave the room immediately (no reconnect grace)
 {"t":"chat",   "text":"hi all"}
 {"t":"typing", "on":true}
 // datagram (compact; fields may go binary in a later protocol version)
@@ -136,8 +138,10 @@ Because of the HTTP/3-only data path:
 ```jsonc
 // reliable stream
 {"t":"hello",  "you":"u_1f3a9c02", "room":"office-1",
+ "token":"9f3ab1c2…",
  "users":[{"id":"u_77ab…","name":"jules","x":40.0,"y":12.0,"d":"s"}],
- "chat":[{"from":"u_77ab…","name":"jules","text":"welcome!","ts":1762410000}]}
+ "chat":[{"from":"u_77ab…","name":"jules","text":"welcome!","ts":1762410000}],
+ "call":[{"id":"u_77ab…","name":"jules"}]}   // current call roster (empty when no call)
 {"t":"joined", "user":{"id":"u_…","name":"jules"}}
 {"t":"left",   "id":"u_…"}
 {"t":"chat",   "from":"u_…", "name":"jules", "text":"welcome!", "ts":1762410000}
@@ -178,7 +182,7 @@ Because of the HTTP/3-only data path:
 
 **Datagram budgeting:** movement entries are ~15–20 B each → ~50–70 deltas per 1200 B datagram. If a room tick exceeds one datagram, the remainder goes on the reliable stream (rare, large rooms only).
 
-**Reconnect:** the server keeps a disconnected user's identity for 30 s (last token, room, position, call membership). The client retries the join with that token; on expiry it is a fresh user. Mid-call reconnect rejoins the call with a fresh offer ([§6.3](#63-call-model--ux)).
+**Reconnect:** the server keeps a disconnected user's identity for 30 s (token, room, position, call membership) and notifies nobody — to the room the user is just still there (no leave/join flicker). The client retries the join with the token from the last `hello`; on expiry the user becomes a fresh one. The `hello`'s `call` roster is the authoritative catch-up: a mid-call reconnect reads it and rejoins the call with a fresh direct offer to every existing participant ([§6.3](#63-call-model--ux)). An explicit `leave` skips the grace period entirely (used for room switching).
 
 ## 6. Voice & video calls
 
@@ -370,6 +374,7 @@ One developer, estimates in days. **MVP (walking + presence) = Phases 0–4 (≈
 - Chat UI (input, bubbles, typing indicator, history on join), room list + room switcher UI, presence panel (who's here, who's in a call).
 - Reconnect-with-token (30 s window) per §5.
 - **Done when:** chat is reliable under 5 % simulated packet loss (streams); a dropped connection rejoins without a leave/join flicker.
+- *Delivery note:* reconnect-with-token is implemented end-to-end — `join` carries an optional `token`, `hello` returns the token plus the current `call` roster, a dropped session marks the member *gone* (not removed) for a 30 s window with no `left` broadcast, and a `tick` after the window turns it into a real leave. A new `ClientMsg::leave` skips the window (room switching). The `reconnect` integration test (real QUIC) proves the drop → rejoin keeps id/token/position/call-membership with zero `left`/`joined` seen by room-mates, and the same suite drives chat + a full 1:1 ring→accept→start through a local UDP relay dropping 1 in 20 datagrams each direction. The browser half (mid-call reconnect re-offers every participant, the presence panel's 🎧 badge, the room switcher) is manual for now; headless E2E lands in Phase 9 (§12).
 
 ### Phase 8 — Ops (2.5 d)
 - Prometheus `/metrics` (connections, users/room, tick duration, datagrams in/out, rate-limit hits, call count, TURN allocations/relay bytes).

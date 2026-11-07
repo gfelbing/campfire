@@ -84,6 +84,7 @@ async fn join(addr: SocketAddr, room: &str, name: &str) -> (TestClient, String) 
         room: room.into(),
         name: name.into(),
         avatar: None,
+        token: None,
     })
     .await;
     let ServerMsg::Hello { you, .. } = c.recv().await else {
@@ -133,6 +134,7 @@ async fn join_hello_presence_chat_typing_leave() {
         room: "office".into(),
         name: "alice".into(),
         avatar: None,
+        token: None,
     })
     .await;
     let ServerMsg::Hello {
@@ -140,6 +142,7 @@ async fn join_hello_presence_chat_typing_leave() {
         room,
         users,
         chat,
+        ..
     } = a.recv().await
     else {
         panic!("expected hello for alice");
@@ -156,6 +159,7 @@ async fn join_hello_presence_chat_typing_leave() {
         room: "office".into(),
         name: "bob".into(),
         avatar: None,
+        token: None,
     })
     .await;
     let ServerMsg::Hello {
@@ -200,10 +204,12 @@ async fn join_hello_presence_chat_typing_leave() {
     assert_eq!(id, a_id);
     assert!(on);
 
-    // Alice disconnects; bob sees the leave.
-    drop(a);
+    // Alice leaves explicitly (README §5 `leave`): bob sees the leave right
+    // away. (A dropped connection no longer leaves immediately — it starts
+    // the 30 s reconnect window; that path is covered by the `reconnect` test.)
+    a.send(&ClientMsg::Leave).await;
     let ServerMsg::Left { id } = b.recv().await else {
-        panic!("expected left event after alice disconnected");
+        panic!("expected left event after alice left");
     };
     assert_eq!(id, a_id);
 }
@@ -250,6 +256,7 @@ async fn validation_errors_are_reported() {
         room: "Office".into(),
         name: "alice".into(),
         avatar: None,
+        token: None,
     })
     .await;
     assert!(matches!(
@@ -264,6 +271,7 @@ async fn validation_errors_are_reported() {
         room: "nowhere".into(),
         name: "alice".into(),
         avatar: None,
+        token: None,
     })
     .await;
     assert!(matches!(
@@ -278,6 +286,7 @@ async fn validation_errors_are_reported() {
         room: "island".into(),
         name: "   ".into(),
         avatar: None,
+        token: None,
     })
     .await;
     assert!(matches!(
@@ -292,6 +301,7 @@ async fn validation_errors_are_reported() {
         room: "island".into(),
         name: "x".repeat(25),
         avatar: None,
+        token: None,
     })
     .await;
     assert!(matches!(
@@ -327,6 +337,7 @@ async fn validation_errors_are_reported() {
         room: "island".into(),
         name: "alice".into(),
         avatar: None,
+        token: None,
     })
     .await;
     assert!(matches!(c.recv().await, ServerMsg::Hello { .. }));
@@ -466,6 +477,7 @@ async fn movement_relay_invalid_move_rejected_chat_history() {
         room: "office".into(),
         name: "carol".into(),
         avatar: None,
+        token: None,
     })
     .await;
     let ServerMsg::Hello { users, chat, .. } = c.recv().await else {

@@ -17,7 +17,14 @@ import { encodeLine } from "./types";
  * datagram movement (README §8).
  */
 export interface ConnHandlers {
-  onHello: (h: { you: string; room: string; users: UserState[]; chat: ChatMsg[] }) => void;
+  onHello: (h: {
+    you: string;
+    room: string;
+    token: string;
+    users: UserState[];
+    chat: ChatMsg[];
+    call: UserBrief[];
+  }) => void;
   onJoined: (u: UserBrief) => void;
   onLeft: (id: string) => void;
   onChat: (c: ChatMsg) => void;
@@ -52,6 +59,9 @@ export class Connection {
   private moveSeq = 0;
   /** Our own user id from the last hello ("" until joined). */
   private selfId = "";
+  /** Our reconnect token from the last hello ("" until joined). Sent back in
+   *  every join so a dropped connection restores this identity (README §5). */
+  private token = "";
 
   constructor(
     private room: string,
@@ -126,6 +136,12 @@ export class Connection {
     this.transport?.sendMsg({ t: "call_leave" });
   }
 
+  /** Leave the room immediately (README §5): the server tears the session
+   *  down with no reconnect grace — used right before a room switch. */
+  sendLeave(): void {
+    this.transport?.sendMsg({ t: "leave" });
+  }
+
   private resetMoveSeq(): void {
     // New session: the server tracks per-member sequence numbers, so a
     // reconnected user starts at 0 again (server seq for this member resets
@@ -167,6 +183,7 @@ export class Connection {
     switch (msg.t) {
       case "hello":
         this.selfId = msg.you;
+        this.token = msg.token;
         this.handlers.onHello(msg);
         break;
       case "joined":
@@ -215,13 +232,16 @@ export class Connection {
     }
   }
 
-  /** Inner join payload (`room`, `name`, `avatar`) — what the SSE fallback
-   *  POSTs, and what `joinMsg` wraps into a tagged stream message. */
-  joinPayload(): { room: string; name: string; avatar?: { color: string } } {
+  /** Inner join payload (`room`, `name`, `avatar`, `token`) — what the SSE
+   *  fallback POSTs, and what `joinMsg` wraps into a tagged stream message.
+   *  The token (when we have one) makes a reconnect restore our identity
+   *  instead of creating a fresh user (README §5). */
+  joinPayload(): { room: string; name: string; avatar?: { color: string }; token?: string } {
     return {
       room: this.room,
       name: this.name,
       avatar: { color: this.avatarColor },
+      ...(this.token ? { token: this.token } : {}),
     };
   }
 

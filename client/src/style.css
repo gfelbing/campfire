@@ -267,6 +267,11 @@ body {
 
 /* --- status panel: call button + target picker (README §6.3) ------------- */
 
+.status-call-row {
+  display: flex;
+  gap: 0.3rem;
+}
+
 .status-call-btn {
   pointer-events: auto;
   font: inherit;
@@ -329,6 +334,99 @@ body {
   color: var(--muted);
   font-style: italic;
   padding: 0.2rem 0.3rem;
+}
+
+/* --- status panel: room switcher (README §11 Phase 7) --------------------- */
+
+.status-rooms-btn {
+  pointer-events: auto;
+  font: inherit;
+  font-size: 0.85rem;
+  background: #1a1d22;
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 0.2rem 0.5rem;
+  cursor: pointer;
+}
+
+.status-rooms-btn:hover {
+  border-color: var(--accent);
+}
+
+.status-room-list {
+  pointer-events: auto;
+  position: absolute;
+  top: 100%;
+  right: 0;
+  margin-top: 4px;
+  min-width: 160px;
+  max-height: 220px;
+  overflow-y: auto;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 0.3rem;
+  display: grid;
+  gap: 0.2rem;
+  z-index: 5;
+}
+
+.status-room-item {
+  font: inherit;
+  font-size: 0.8rem;
+  text-align: left;
+  color: var(--text);
+  background: #1a1d22;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  padding: 0.35rem 0.55rem;
+  cursor: pointer;
+}
+
+.status-room-item:hover {
+  border-color: var(--accent);
+}
+
+.status-room-item.current {
+  color: var(--muted);
+  cursor: default;
+}
+
+/* --- presence roster (README §8 Phase 7) --------------------------------- */
+
+.presence {
+  position: absolute;
+  top: 12px;
+  left: 12px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 0.5rem 0.8rem;
+  font-size: 0.8rem;
+  max-height: 40vh;
+  overflow-y: auto;
+  pointer-events: none;
+}
+
+.presence-title {
+  color: var(--muted);
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-bottom: 0.25rem;
+}
+
+.presence-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 0.15rem;
+}
+
+.presence-call {
+  margin-left: 0.4em;
 }
 
 /* --- call UI (README §6.3) ------------------------------------------------ */

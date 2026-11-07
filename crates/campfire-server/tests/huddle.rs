@@ -86,19 +86,48 @@ impl TestClient {
     }
 }
 
-/// Connect + join in one step, returning (client, own id).
-async fn join(addr: SocketAddr, room: &str, name: &str) -> (TestClient, String) {
+/// Connect + join in one step, returning (client, own id, reconnect token).
+async fn join(addr: SocketAddr, room: &str, name: &str) -> (TestClient, String, String) {
     let mut c = TestClient::connect(addr).await;
     c.send(&ClientMsg::Join {
         room: room.into(),
         name: name.into(),
         avatar: None,
+        token: None,
+    })
+    .await;
+    let ServerMsg::Hello { you, token, .. } = c.recv().await else {
+        panic!("expected hello after join");
+    };
+    (c, you, token)
+}
+
+/// Reconnect with a token (README §5): restores the previous identity
+/// within the reconnect window. Returns (client, own id).
+async fn reconnect(addr: SocketAddr, room: &str, name: &str, token: &str) -> (TestClient, String) {
+    let mut c = TestClient::connect(addr).await;
+    c.send(&ClientMsg::Join {
+        room: room.into(),
+        name: name.into(),
+        avatar: None,
+        token: Some(token.to_owned()),
     })
     .await;
     let ServerMsg::Hello { you, .. } = c.recv().await else {
-        panic!("expected hello after join");
+        panic!("expected hello after reconnect");
     };
     (c, you)
+}
+
+/// Assert that no server message arrives within `window` (the anti-flicker
+/// proof: a dropped member must not produce a `call_leave`/`left`).
+async fn assert_quiet(c: &mut TestClient, window: Duration, what: &str) {
+    let mut byte = [0u8; 1];
+    match tokio::time::timeout(window, c.recv.read_exact(&mut byte)).await {
+        Err(_) => {} // silence: exactly what we wanted
+        Ok(Ok(_)) => panic!("expected silence ({what}), but a message arrived"),
+        Ok(Err(err)) => panic!("expected silence ({what}), but the stream errored: {err}"),
+    }
 }
 
 // --- one-message-per-variant extractors (assert + unwrap the payload) -----
@@ -199,25 +228,25 @@ async fn huddle_six_members_mid_call_join_and_drop() {
     let (addr, _root) = start_server().await;
 
     // Six future huddle members + one spectator (g) who will join mid-call.
-    let (mut a, a_id) = join(addr, "office", "alice").await;
-    let (mut b, b_id) = join(addr, "office", "bob").await;
+    let (mut a, a_id, _a_token) = join(addr, "office", "alice").await;
+    let (mut b, b_id, b_token) = join(addr, "office", "bob").await;
     assert_eq!(as_joined(&mut a).await.id, b_id);
-    let (mut c, c_id) = join(addr, "office", "carol").await;
+    let (mut c, c_id, _c_token) = join(addr, "office", "carol").await;
     assert_eq!(as_joined(&mut a).await.id, c_id);
     assert_eq!(as_joined(&mut b).await.id, c_id);
-    let (mut d, d_id) = join(addr, "office", "dave").await;
+    let (mut d, d_id, _d_token) = join(addr, "office", "dave").await;
     for u in [&mut a, &mut b, &mut c] {
         assert_eq!(as_joined(u).await.id, d_id);
     }
-    let (mut e, e_id) = join(addr, "office", "erin").await;
+    let (mut e, e_id, _e_token) = join(addr, "office", "erin").await;
     for u in [&mut a, &mut b, &mut c, &mut d] {
         assert_eq!(as_joined(u).await.id, e_id);
     }
-    let (mut f, _f_id) = join(addr, "office", "frank").await;
+    let (mut f, _f_id, _f_token) = join(addr, "office", "frank").await;
     for u in [&mut a, &mut b, &mut c, &mut d, &mut e] {
         assert_eq!(as_joined(u).await.id, _f_id);
     }
-    let (mut g, _g_id) = join(addr, "office", "grace").await;
+    let (mut g, _g_id, _g_token) = join(addr, "office", "grace").await;
     for u in [&mut a, &mut b, &mut c, &mut d, &mut e, &mut f] {
         assert_eq!(as_joined(u).await.id, _g_id);
     }
@@ -321,10 +350,27 @@ async fn huddle_six_members_mid_call_join_and_drop() {
     // Grace (a spectator) receives nothing here: if the mute had leaked to
     // the room, it would surface as her next message in the steps below.
 
-    // --- mid-call drop: bob's connection dies. The server drops him from
-    //     the room and the call; the room hears call_leave + left.
+    // --- mid-call drop: bob's connection dies. In Phase 7 (README §5) the
+    //     server no longer kicks him out at once: he keeps his seat (room +
+    //     call) for the 30 s reconnect window, and the room hears nothing —
+    //     no call_leave, no left (no flicker).
     b.close();
     drop(b);
+    for u in [&mut a, &mut c, &mut d, &mut e, &mut f, &mut g] {
+        assert_quiet(
+            u,
+            Duration::from_millis(300),
+            "no call_leave/left on a mid-call drop",
+        )
+        .await;
+    }
+
+    // --- bob reconnects within the window (same identity via his token),
+    //     then leaves the room explicitly: now the room does hear
+    //     call_leave + left, and the huddle shrinks to alice + carol.
+    let (mut b2, b_id2) = reconnect(addr, "office", "bob", &b_token).await;
+    assert_eq!(b_id2, b_id, "reconnect keeps the same identity");
+    b2.send(&ClientMsg::Leave).await;
     assert_eq!(as_call_leave(&mut a).await, b_id.clone());
     assert_eq!(as_left(&mut a).await, b_id.clone());
     assert_eq!(as_call_leave(&mut g).await, b_id.clone());

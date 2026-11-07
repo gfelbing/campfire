@@ -44,7 +44,20 @@ export type ErrorCode =
 // --- server → client -------------------------------------------------------
 
 export type ServerMsg =
-  | { t: "hello"; you: string; room: string; users: UserState[]; chat: ChatMsg[] }
+  | {
+      t: "hello";
+      you: string;
+      room: string;
+      /** Reconnect token (README §5): resend it in `join` to restore this
+       *  identity after a dropped connection. */
+      token: string;
+      users: UserState[];
+      chat: ChatMsg[];
+      /** The room's current call participants (empty when no call) — the
+       *  authoritative catch-up so a reconnected client knows whether the
+       *  call survived the drop. */
+      call: UserBrief[];
+    }
   | { t: "joined"; user: UserBrief }
   | { t: "left"; id: string }
   | { t: "chat"; from: string; name: string; text: string; ts: number }
@@ -63,9 +76,19 @@ export type ServerMsg =
 // --- client → server -------------------------------------------------------
 
 export type ClientMsg =
-  | { t: "join"; room: string; name: string; avatar?: { color: string } }
+  | {
+      t: "join";
+      room: string;
+      name: string;
+      avatar?: { color: string };
+      /** Reconnect token (README §5): restore the previous identity. */
+      token?: string;
+    }
   | { t: "chat"; text: string }
   | { t: "typing"; on: boolean }
+  /** Leave the room immediately (README §5): used for room switching, the
+   *  server tears the session down right away. */
+  | { t: "leave" }
   | { t: "call_ring"; to: string }
   | { t: "call_ring_stop"; to: string }
   | { t: "call_accept"; to: string }
