@@ -14,7 +14,7 @@ import { isWalkablePoint, parseMap, type MapData } from "./world/mapdata";
 import { createWorld, followCamera } from "./world/render";
 
 /// Local position sends: 10 Hz while moving, 2 Hz while idle (README §5).
-const SEND_EVERY_MS = 100;
+const SEND_EVERY_MS = 66; // 15 Hz — the README §5 per-user cap (was 10 Hz)
 const IDLE_EVERY_MS = 500;
 /// Avatar radius in tiles for local collision checks.
 const AVATAR_R = 0.3;
