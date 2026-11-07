@@ -256,22 +256,24 @@ async fn reconnect_within_window_keeps_identity_no_flicker() {
     a._conn
         .send_datagram(Bytes::from(serde_json::to_vec(&batch).unwrap()))
         .unwrap();
+    // Let the tick accept the move (datagrams are unreliable; give the
+    // server a moment before the connection drop below).
+    tokio::time::sleep(Duration::from_millis(250)).await;
 
-    // Alice creates the huddle; Bob joins it. Call state is room-wide:
-    // bob hears alice's creation as a call_start before his own roster.
-    a.send(&ClientMsg::CallOffer {
-        to: "room".into(),
-        sdp: "v=0 alice-offer".into(),
-    })
-    .await;
-    assert!(matches!(a.recv().await, ServerMsg::CallStart { .. }));
-    assert!(matches!(b.recv().await, ServerMsg::CallStart { .. }));
-    b.send(&ClientMsg::CallOffer {
-        to: "room".into(),
-        sdp: "v=0 bob-offer".into(),
-    })
-    .await;
-    assert!(matches!(a.recv().await, ServerMsg::CallJoin { .. }));
+    // Alice walked within the join radius (2 tiles < 3.5): the tick forms
+    // the proximity bubble on its own — no ring, no accept (README §6.3).
+    // Call state is room-wide: both hear the roster.
+    match a.recv().await {
+        ServerMsg::CallStart {
+            participants,
+            you_offer,
+            ..
+        } => {
+            assert_eq!(participants.len(), 2, "alice's roster lists both");
+            assert_eq!(you_offer, a_id < b_id, "the smaller id offers");
+        }
+        m => panic!("expected call_start for alice, got {m:?}"),
+    }
     match b.recv().await {
         ServerMsg::CallStart { participants, .. } => {
             assert_eq!(participants.len(), 2, "bob's roster lists both");
@@ -355,7 +357,7 @@ async fn chat_and_signaling_survive_5_percent_packet_loss() {
     // One datagram in 20 (5 %) dropped in each direction.
     let relay = LossyRelay::start(addr, 20).await;
 
-    let (mut a, a_id, _) = join(relay.client_addr, "office", "alice").await;
+    let (mut a, _a_id, _) = join(relay.client_addr, "office", "alice").await;
     let (mut b, b_id, _) = join(relay.client_addr, "office", "bob").await;
     // Alice hears bob join (drain).
     assert!(matches!(a.recv().await, ServerMsg::Joined { .. }));
@@ -366,6 +368,7 @@ async fn chat_and_signaling_survive_5_percent_packet_loss() {
         b.send(&ClientMsg::Typing { on: i % 2 == 0 }).await;
     }
     let mut got = 0;
+    let (mut a_saw, mut b_saw) = (false, false);
     while got < 20 {
         // Typing is relayed to the other members only: alice receives all 20.
         match a.recv().await {
@@ -373,6 +376,9 @@ async fn chat_and_signaling_survive_5_percent_packet_loss() {
                 assert_eq!(id, b_id, "typing must come from bob");
                 got += 1;
             }
+            // The proximity bubble forms on its own (both sit at spawn);
+            // its room-wide call_start may interleave anywhere.
+            ServerMsg::CallStart { .. } => a_saw = true,
             m => panic!("expected typing at alice (#{got}), got {m:?}"),
         }
     }
@@ -382,30 +388,37 @@ async fn chat_and_signaling_survive_5_percent_packet_loss() {
         text: "hello over the lossy link".into(),
     })
     .await;
-    for c in [&mut a, &mut b] {
+    for (c, which) in [(&mut a, 0), (&mut b, 1)] {
         match c.recv().await {
             ServerMsg::Chat { from, text, .. } => {
                 assert_eq!(from, b_id);
                 assert_eq!(text, "hello over the lossy link");
             }
+            ServerMsg::CallStart { .. } => {
+                if which == 0 {
+                    a_saw = true
+                } else {
+                    b_saw = true
+                }
+            }
             m => panic!("expected chat echo, got {m:?}"),
         }
     }
-
-    // Call signaling (also a stream) completes through the loss: ring →
-    // accept → both get the started call.
-    a.send(&ClientMsg::CallRing { to: b_id.clone() }).await;
-    match b.recv().await {
-        ServerMsg::CallRing { from, .. } => assert_eq!(from, a_id),
-        m => panic!("expected call_ring at bob, got {m:?}"),
-    }
-    b.send(&ClientMsg::CallAccept { to: a_id.clone() }).await;
-    for c in [&mut a, &mut b] {
-        match c.recv().await {
-            ServerMsg::CallStart { participants, .. } => {
-                assert_eq!(participants.len(), 2, "the 1:1 started for both");
+    // Alice and bob sit at spawn: the proximity bubble forms on its own
+    // and its room-wide call_start arrives through the lossy link for
+    // both (whichever side has not seen it yet waits for it now).
+    for (c, saw) in [(&mut a, a_saw), (&mut b, b_saw)] {
+        if saw {
+            continue;
+        }
+        loop {
+            match c.recv().await {
+                ServerMsg::CallStart { participants, .. } => {
+                    assert_eq!(participants.len(), 2, "the bubble started for both");
+                    break;
+                }
+                _ => continue,
             }
-            m => panic!("expected call_start, got {m:?}"),
         }
     }
 }

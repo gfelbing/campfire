@@ -47,16 +47,11 @@ async function main(): Promise<void> {
   let chat: ChatUI | null = null;
   let presence: PresenceUI;
 
-  // Room roster (id → brief): drives the call-target picker (README §6.3).
+  // Room roster (id → brief).
   const roster = new Map<string, UserBrief>();
-  const updateCallTargets = (): void => {
-    status.setCallTargets(
-      [...roster.values()].filter((u) => u.id !== myId),
-    );
-  };
 
-  // Who is in the room's call (room-wide call state, README §5): powers
-  // the avatars' headphone badge and the status button's "Join call".
+  // Who is in the room's bubble (room-wide call state, README §6.3): powers
+  // the avatars' headphone badge.
   const inCall = new Set<string>();
   const refreshCallUi = (): void => {
     for (const id of roster.keys()) {
@@ -83,7 +78,6 @@ async function main(): Promise<void> {
       chat?.history(h.chat, h.you);
       status.setUsers(h.users.length);
       manager.setSelfId(h.you);
-      updateCallTargets();
       presence.setUsers(h.users, new Set(h.call.map((u) => u.id)));
       // Reconnect-with-token (README §5): `hello.call` is the authoritative
       // call roster. If the call survived our drop and we are in it,
@@ -105,31 +99,23 @@ async function main(): Promise<void> {
       roster.set(u.id, u);
       status.bumpUsers(1);
       presence.addUser(u);
-      updateCallTargets();
     },
     onLeft: (id) => {
       world.manager.left(id);
       roster.delete(id);
       status.bumpUsers(-1);
       presence.removeUser(id);
-      updateCallTargets();
     },
     onChat: (c: ChatMsg) => chat?.add(c, myId),
     onTyping: (id, on) => chat?.typing(id, on),
     onMovement: (batch: MovementBatch) => world.manager.movement(batch.m),
-    // Call signaling (README §5/§6): the manager owns the state machine;
-    // the room-wide call *state* also drives the badges + status button.
-    onCallRing: (from, name) => manager.onCallRing(from, name),
-    onCallStart: (ps) => {
+    // Bubble state (README §6.3): the manager owns the state machine;
+    // the room-wide call *state* also drives the headphone badges.
+    onCallStart: (ps, youOffer) => {
       inCall.clear();
       for (const p of ps) inCall.add(p.id);
       refreshCallUi();
-      manager.onCallStart(ps);
-    },
-    onCallJoin: (u) => {
-      inCall.add(u.id);
-      refreshCallUi();
-      manager.onCallJoin(u);
+      manager.onCallStart(ps, youOffer);
     },
     onCallLeave: (id) => {
       inCall.delete(id);
@@ -161,8 +147,6 @@ async function main(): Promise<void> {
   presence = createPresence(ui);
   chat = createChat(ui, (t) => conn.sendChat(t), (on) => conn.sendTyping(on));
   const callUI = createCallUI(ui, {
-    onAccept: () => void manager.accept(),
-    onDecline: () => manager.decline(),
     onHangup: () => manager.hangup(),
     onToggleMute: () => manager.toggleMute(),
     onToggleCamera: () => manager.toggleCamera(),
@@ -176,8 +160,7 @@ async function main(): Promise<void> {
   });
   const status = createStatus(
     ui,
-    (u) => void manager.ring(u),
-    () => void manager.joinHuddle(),
+    (off) => manager.setBubble(off),
     (room) => {
       // Room switch (README §11 Phase 7): leave this room immediately
       // (the server broadcasts `left` and tears the session down), then

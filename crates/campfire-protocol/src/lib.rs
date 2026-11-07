@@ -23,8 +23,6 @@ pub const WIRE_ENCODING: &str = "ndjson";
 pub const MAX_SDP_BYTES: usize = 64 * 1024;
 /// Relay cap for one ICE candidate (README §5: a few hundred bytes).
 pub const MAX_CANDIDATE_BYTES: usize = 1024;
-/// `call_offer.to` value that means "join the room huddle" (Phase 6).
-pub const ROOM_TARGET: &str = "room";
 
 /// Direction an avatar faces.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -124,24 +122,13 @@ pub enum ClientMsg {
     /// server tears the session down; the client reconnects elsewhere if it
     /// wants to be somewhere (room switcher).
     Leave,
-    /// 1:1: start ringing `to` (must be in the same room). Phase 5.
-    CallRing {
-        to: String,
+    /// Presence toggle for proximity calls (README §6.3): `off` disables
+    /// auto-joining (and leaves the current call). Bubbles are computed by
+    /// the server from positions; this only opts in or out.
+    Bubble {
+        off: bool,
     },
-    /// 1:1: cancel a ringing call to `to` before it is answered.
-    CallRingStop {
-        to: String,
-    },
-    /// Callee accepts the ring from `to`; the caller then creates the offer.
-    CallAccept {
-        to: String,
-    },
-    /// Callee declines the ring from `to`.
-    CallDecline {
-        to: String,
-    },
-    /// Relay one SDP offer. `to` is a user id, or `"room"` to join a room
-    /// huddle (Phase 6).
+    /// Relay one SDP offer to a call participant.
     CallOffer {
         to: String,
         sdp: String,
@@ -200,26 +187,23 @@ pub enum ServerMsg {
         id: String,
         on: bool,
     },
-    /// 1:1: `from` is ringing you.
-    CallRing {
-        from: String,
-        name: String,
-    },
-    /// A call just started: everyone in it gets the full participant list.
+    /// A call (re)started or someone joined: everyone in the room gets the
+    /// full participant list. `you_offer` marks the recipient as the one
+    /// who must send SDP offers to the others (a fresh joiner — README
+    /// §6.3: the joiner offers, existing members never renegotiate). Only
+    /// `false` on the wire when unset.
     CallStart {
         room: String,
         participants: Vec<UserBrief>,
-    },
-    /// Someone joined an ongoing call (huddle; Phase 6).
-    CallJoin {
-        user: UserBrief,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        you_offer: bool,
     },
     /// A participant left an ongoing call.
     CallLeave {
         id: String,
     },
-    /// The call is over. `reason` is one of `last_left`, `canceled`,
-    /// `declined`, `hangup` (README §5).
+    /// The call is over (no participants left). `reason` is `last_left`
+    /// (README §5).
     CallEnd {
         reason: String,
     },

@@ -5,10 +5,6 @@
 
 export type Dir = "n" | "s" | "e" | "w";
 
-/// `call_offer.to` value that means "create/join the room huddle"
-/// (README §5; mirrors `ROOM_TARGET` on the server).
-export const ROOM_TARGET = "room";
-
 export interface UserState {
   id: string;
   name: string;
@@ -62,9 +58,7 @@ export type ServerMsg =
   | { t: "left"; id: string }
   | { t: "chat"; from: string; name: string; text: string; ts: number }
   | { t: "typing"; id: string; on: boolean }
-  | { t: "call_ring"; from: string; name: string }
-  | { t: "call_start"; room: string; participants: UserBrief[] }
-  | { t: "call_join"; user: UserBrief }
+  | { t: "call_start"; room: string; participants: UserBrief[]; you_offer: boolean }
   | { t: "call_leave"; id: string }
   | { t: "call_end"; reason: string }
   | { t: "call_offer"; from: string; sdp: string }
@@ -89,10 +83,9 @@ export type ClientMsg =
   /** Leave the room immediately (README §5): used for room switching, the
    *  server tears the session down right away. */
   | { t: "leave" }
-  | { t: "call_ring"; to: string }
-  | { t: "call_ring_stop"; to: string }
-  | { t: "call_accept"; to: string }
-  | { t: "call_decline"; to: string }
+  /** Opt out of proximity bubbles (README §6.3): leaves the current bubble
+   *  at once and prevents joining; `off: false` opts back in. */
+  | { t: "bubble"; off: boolean }
   | { t: "call_offer"; to: string; sdp: string }
   | { t: "call_answer"; to: string; sdp: string }
   | { t: "call_ice"; to: string; candidate: string }

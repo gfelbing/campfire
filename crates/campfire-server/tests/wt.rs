@@ -59,21 +59,29 @@ impl TestClient {
         self.send.flush().await.unwrap();
     }
 
-    /// Read exactly one NDJSON line and decode it.
+    /// Read exactly one NDJSON line and decode it. Skips room-wide
+    /// `call_start` broadcasts: users sharing the spawn tile are pulled
+    /// into a proximity bubble by the tick (README §6.3), and that badge
+    /// may interleave anywhere. No wt.rs test asserts on call state.
     async fn recv(&mut self) -> ServerMsg {
-        let mut buf = Vec::new();
-        let mut byte = [0u8; 1];
         loop {
-            tokio::time::timeout(RECV_TIMEOUT, self.recv.read_exact(&mut byte))
-                .await
-                .expect("timed out waiting for a server message")
-                .unwrap();
-            if byte[0] == b'\n' {
-                break;
+            let mut buf = Vec::new();
+            let mut byte = [0u8; 1];
+            loop {
+                tokio::time::timeout(RECV_TIMEOUT, self.recv.read_exact(&mut byte))
+                    .await
+                    .expect("timed out waiting for a server message")
+                    .unwrap();
+                if byte[0] == b'\n' {
+                    break;
+                }
+                buf.push(byte[0]);
             }
-            buf.push(byte[0]);
+            match from_line(std::str::from_utf8(&buf).unwrap()).unwrap() {
+                ServerMsg::CallStart { .. } | ServerMsg::CallEnd { .. } => continue,
+                msg => return msg,
+            }
         }
-        from_line(std::str::from_utf8(&buf).unwrap()).unwrap()
     }
 }
 

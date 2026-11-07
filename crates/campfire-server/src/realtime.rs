@@ -401,29 +401,11 @@ fn dispatch(
         }
         // Call signaling (README §5): the world validates (same room, sender
         // involved, size caps); errors go back as `error` messages.
-        Ok(ClientMsg::CallRing { to }) => {
+        Ok(ClientMsg::Bubble { off }) => {
             let Some((room, id, _)) = session.clone() else {
                 return send(tx, ErrorCode::BadMessage);
             };
-            call_result(world.call_ring(&room, &id, &to), tx)
-        }
-        Ok(ClientMsg::CallRingStop { to }) => {
-            let Some((room, id, _)) = session.clone() else {
-                return send(tx, ErrorCode::BadMessage);
-            };
-            call_result(world.call_ring_stop(&room, &id, &to), tx)
-        }
-        Ok(ClientMsg::CallAccept { to }) => {
-            let Some((room, id, _)) = session.clone() else {
-                return send(tx, ErrorCode::BadMessage);
-            };
-            call_result(world.call_accept(&room, &id, &to), tx)
-        }
-        Ok(ClientMsg::CallDecline { to }) => {
-            let Some((room, id, _)) = session.clone() else {
-                return send(tx, ErrorCode::BadMessage);
-            };
-            call_result(world.call_decline(&room, &id, &to), tx)
+            call_result(world.set_bubble(&room, &id, off), tx)
         }
         Ok(ClientMsg::CallOffer { to, sdp }) => {
             let Some((room, id, _)) = session.clone() else {

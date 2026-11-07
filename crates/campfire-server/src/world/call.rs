@@ -1,29 +1,20 @@
-//! Per-room call state (README §6/§7).
+//! Per-room call state (README §6/§7): proximity bubbles.
 //!
-//! Deliberately trivial: one `Option<Call>` per room — a participant set
-//! plus per-participant audio/video flags, and (for 1:1) the in-flight
-//! ring. Every transition is driven by a signaling message and validated
-//! in [`crate::world::World::call_*`]: same room, sender involved, size
-//! caps on SDP/ICE. The server never touches media; it relays.
+//! One `Option<Call>` per room. There is no ring/accept flow any more: the
+//! server *computes* the call from avatar positions in the 50 ms tick
+//! ([`crate::world::World::tick`]) — walking within the join radius of a
+//! participant pulls you in, walking (or toggling) out drops you after a
+//! grace delay. The server still never touches media: it relays SDP/ICE
+//! between participants (README §6.1) and tracks who is in which bubble.
 //!
-//! 1:1 calls start with a ring (`ringing`); room huddles are created or
-//! joined via `call_offer` with `to: "room"` — the joiner is always the
-//! offerer, so existing members never renegotiate (README §6.3).
+//! Call *state* is room-wide (it powers the avatars' headphone badge);
+//! call *signaling* (offer/answer/ice/mute) is participant-scoped.
 
 use std::collections::HashMap;
 
 use campfire_protocol::UserBrief;
 
 use crate::world::UserId;
-
-/// The shape of a call.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CallKind {
-    /// One-on-one call: exactly two participants.
-    OneToOne,
-    /// Room huddle: any number of participants (Phase 6).
-    Huddle,
-}
 
 /// Per-participant presence flags (README §6.3: `call_mute` is presence
 /// only — the client flips `track.enabled`, no renegotiation).
@@ -35,44 +26,35 @@ pub struct ParticipantFlags {
     pub video: bool,
 }
 
-/// An in-flight call in one room.
-#[derive(Debug, Clone)]
+/// An in-flight proximity call in one room.
+#[derive(Debug, Clone, Default)]
 pub struct Call {
-    pub kind: CallKind,
     /// Participants: id → (name, flags).
     pub participants: HashMap<UserId, (String, ParticipantFlags)>,
-    /// A 1:1 ring not yet accepted or canceled: `(caller, callee)`.
-    /// `None` once the call has started (or for huddles).
-    pub ringing: Option<(UserId, UserId)>,
+    /// Participants currently outside the leave radius (or opted out):
+    /// first-seen instant, for the leave grace delay.
+    pub leaving: HashMap<UserId, std::time::Instant>,
 }
 
 impl Call {
-    pub fn new_one_to_one(caller: UserId, callee: UserId) -> Self {
-        Self {
-            kind: CallKind::OneToOne,
-            participants: HashMap::new(),
-            ringing: Some((caller, callee)),
+    /// A bubble with its first participants (id → name); they do *not*
+    /// offer each other — the server designates one offerer per recipient
+    /// in `CallStart.you_offer` (the smaller id offers on creation).
+    pub fn new(entries: impl Iterator<Item = (UserId, String)>) -> Self {
+        let mut call = Self::default();
+        for (id, name) in entries {
+            call.participants.insert(
+                id,
+                (
+                    name,
+                    ParticipantFlags {
+                        audio: true,
+                        video: true,
+                    },
+                ),
+            );
         }
-    }
-
-    /// A room huddle with its first participant (the creator).
-    pub fn new_huddle(creator: UserId, name: String) -> Self {
-        let mut participants = HashMap::new();
-        participants.insert(
-            creator,
-            (
-                name,
-                ParticipantFlags {
-                    audio: true,
-                    video: true,
-                },
-            ),
-        );
-        Self {
-            kind: CallKind::Huddle,
-            participants,
-            ringing: None,
-        }
+        call
     }
 
     /// Whether `id` is a participant of this call.
@@ -94,8 +76,10 @@ impl Call {
         out
     }
 
-    /// Remove a participant; `true` when the call is now empty.
+    /// Remove a participant (and any leave timer); `true` when the call is
+    /// now empty.
     pub fn remove(&mut self, id: &str) -> bool {
+        self.leaving.remove(id);
         self.participants.remove(id).is_some() && self.participants.is_empty()
     }
 }
@@ -105,35 +89,20 @@ mod tests {
     use super::*;
 
     fn sample_call() -> Call {
-        let mut call = Call::new_one_to_one("u_aaa".into(), "u_bbb".into());
-        call.participants.insert(
-            "u_aaa".into(),
-            (
-                "alice".into(),
-                ParticipantFlags {
-                    audio: true,
-                    video: true,
-                },
-            ),
-        );
-        call.participants.insert(
-            "u_bbb".into(),
-            (
-                "bob".into(),
-                ParticipantFlags {
-                    audio: true,
-                    video: false,
-                },
-            ),
-        );
-        call
+        Call::new(
+            [
+                ("u_aaa".to_owned(), "alice".to_owned()),
+                ("u_bbb".to_owned(), "bob".to_owned()),
+            ]
+            .into_iter(),
+        )
     }
 
     #[test]
     fn participant_list_is_sorted_and_complete() {
-        let list = sample_call().participant_list();
+        let call = sample_call();
         assert_eq!(
-            list,
+            call.participant_list(),
             vec![
                 UserBrief {
                     id: "u_aaa".into(),

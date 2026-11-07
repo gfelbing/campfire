@@ -1,15 +1,16 @@
-//! Phase 6 acceptance test (README §11): room huddles.
+//! Phase 6 acceptance test (README §11): proximity bubbles.
 //!
-//! > **Done when:** 6-participant huddle; a mid-call join plus a
-//! > mid-call drop/reconnect; no leaked peer connections; auto voice-only
-//! > engages at 10 participants.
+//! > **Done when:** 6-participant call; a mid-call join plus a mid-call
+//! > drop/reconnect; no leaked peer connections; auto voice-only engages
+//! > at 10 participants.
 //!
-//! Everything the *server* does for huddles runs here over **real HTTP/3
-//! on QUIC**: create/join via `call_offer{to:"room"}`, newcomer re-ICE
-//! (the joiner offers every existing member), room-wide call state
-//! (headphone badge), mute presence, mid-call join, mid-call drop,
-//! leave, last-leave ending the call, and a fresh huddle on the cleared
-//! room (no leaked call state).
+//! Everything the *server* does for the call runs here over **real
+//! HTTP/3 on QUIC**: the bubble forms by itself from avatar positions
+//! (no ring/accept), grows one joiner per tick, is room-wide state
+//! (headphone badge), relays the joiner's offers to every existing
+//! member, keeps a dropped member's seat through the reconnect window,
+//! drops a member who walks out of the leave radius, and ends with
+//! `call_end(last_left)` — leaving no leaked call state.
 //!
 //! The WebRTC side (N-1 `RTCPeerConnection`s per member, zero leaked
 //! peer connections, auto voice-only at 9+) is browser-only: it is
@@ -19,7 +20,10 @@
 use std::net::SocketAddr;
 use std::time::Duration;
 
-use campfire_protocol::{ClientMsg, ServerMsg, UserBrief, to_line};
+use bytes::Bytes;
+use campfire_protocol::{
+    ClientMsg, Dir, MovementBatch, MovementEntry, ServerMsg, UserBrief, to_line,
+};
 use tokio::io::AsyncWriteExt;
 use wtransport::Connection;
 
@@ -27,12 +31,12 @@ mod common;
 use common::start_server;
 
 const RECV_TIMEOUT: Duration = Duration::from_secs(5);
+/// Spawn of the office map (README §5 tests walk relative to it).
+const SPAWN: (f32, f32) = (20.5, 15.5);
 
-/// A connected WebTransport client with its command stream open (same
-/// shape as `tests/call.rs` — each test binary is standalone).
+/// A connected WebTransport client with its command stream open.
 struct TestClient {
-    /// Held so the QUIC connection stays open (no datagrams in this test).
-    _conn: Connection,
+    conn: Connection,
     send: wtransport::SendStream,
     recv: wtransport::RecvStream,
 }
@@ -49,16 +53,29 @@ impl TestClient {
             .await
             .unwrap();
         let (send, recv) = conn.open_bi().await.unwrap().await.unwrap();
-        Self {
-            _conn: conn,
-            send,
-            recv,
-        }
+        Self { conn, send, recv }
     }
 
     async fn send(&mut self, msg: &ClientMsg) {
         self.send.write_all(to_line(msg).as_bytes()).await.unwrap();
         self.send.flush().await.unwrap();
+    }
+
+    /// Send one movement entry as a datagram (README §5 wire shape).
+    fn move_to(&self, id: &str, x: f32, y: f32, seq: u64) {
+        let batch = MovementBatch {
+            m: vec![MovementEntry {
+                id: id.to_owned(),
+                x,
+                y,
+                d: Dir::East,
+                moving: 1,
+                seq,
+            }],
+        };
+        self.conn
+            .send_datagram(Bytes::from(serde_json::to_vec(&batch).unwrap()))
+            .unwrap();
     }
 
     /// Read exactly one NDJSON line and decode it.
@@ -79,9 +96,23 @@ impl TestClient {
         campfire_protocol::from_line(line).unwrap()
     }
 
+    /// Next `CallStart`, skipping presence noise (`Joined`, …).
+    async fn next_call_start(&mut self) -> (Vec<UserBrief>, bool) {
+        loop {
+            match self.recv().await {
+                ServerMsg::CallStart {
+                    participants,
+                    you_offer,
+                    ..
+                } => return (participants, you_offer),
+                _ => continue,
+            }
+        }
+    }
+
     /// Kill the QUIC connection (simulates a mid-call network drop).
     fn close(&self) {
-        self._conn
+        self.conn
             .close(wtransport::VarInt::from_u32(0), b"connection closed");
     }
 }
@@ -96,15 +127,25 @@ async fn join(addr: SocketAddr, room: &str, name: &str) -> (TestClient, String, 
         token: None,
     })
     .await;
-    let ServerMsg::Hello { you, token, .. } = c.recv().await else {
-        panic!("expected hello after join");
+    // A tick between the join and the Hello flush can prepend call state
+    // (the roster broadcast); skip anything until the Hello.
+    let (you, token) = loop {
+        match c.recv().await {
+            ServerMsg::Hello { you, token, .. } => break (you, token),
+            _ => continue,
+        }
     };
     (c, you, token)
 }
 
 /// Reconnect with a token (README §5): restores the previous identity
-/// within the reconnect window. Returns (client, own id).
-async fn reconnect(addr: SocketAddr, room: &str, name: &str, token: &str) -> (TestClient, String) {
+/// within the reconnect window. Returns (client, own id, call roster).
+async fn reconnect(
+    addr: SocketAddr,
+    room: &str,
+    name: &str,
+    token: &str,
+) -> (TestClient, String, Vec<UserBrief>) {
     let mut c = TestClient::connect(addr).await;
     c.send(&ClientMsg::Join {
         room: room.into(),
@@ -113,10 +154,13 @@ async fn reconnect(addr: SocketAddr, room: &str, name: &str, token: &str) -> (Te
         token: Some(token.to_owned()),
     })
     .await;
-    let ServerMsg::Hello { you, .. } = c.recv().await else {
-        panic!("expected hello after reconnect");
+    let (you, call) = loop {
+        match c.recv().await {
+            ServerMsg::Hello { you, call, .. } => break (you, call),
+            _ => continue,
+        }
     };
-    (c, you)
+    (c, you, call)
 }
 
 /// Assert that no server message arrives within `window` (the anti-flicker
@@ -125,38 +169,20 @@ async fn assert_quiet(c: &mut TestClient, window: Duration, what: &str) {
     let mut byte = [0u8; 1];
     match tokio::time::timeout(window, c.recv.read_exact(&mut byte)).await {
         Err(_) => {} // silence: exactly what we wanted
-        Ok(Ok(_)) => panic!("expected silence ({what}), but a message arrived"),
+        Ok(Ok(())) => {
+            // Drain the rest of the line for the diagnostic.
+            let mut line = vec![byte[0]];
+            let mut b1 = [0u8; 1];
+            while let Ok(Some(n)) = c.recv.read(&mut b1).await {
+                if n == 0 || b1[0] == b'\n' {
+                    break;
+                }
+                line.push(b1[0]);
+            }
+            let msg = std::str::from_utf8(&line).unwrap_or("<binary>");
+            panic!("expected silence ({what}), but a message arrived: {msg}");
+        }
         Ok(Err(err)) => panic!("expected silence ({what}), but the stream errored: {err}"),
-    }
-}
-
-// --- one-message-per-variant extractors (assert + unwrap the payload) -----
-
-async fn as_joined(c: &mut TestClient) -> UserBrief {
-    match c.recv().await {
-        ServerMsg::Joined { user } => user,
-        m => panic!("expected joined, got {m:?}"),
-    }
-}
-
-async fn as_left(c: &mut TestClient) -> String {
-    match c.recv().await {
-        ServerMsg::Left { id } => id,
-        m => panic!("expected left, got {m:?}"),
-    }
-}
-
-async fn as_call_start(c: &mut TestClient) -> Vec<UserBrief> {
-    match c.recv().await {
-        ServerMsg::CallStart { participants, .. } => participants,
-        m => panic!("expected call_start, got {m:?}"),
-    }
-}
-
-async fn as_call_join(c: &mut TestClient) -> UserBrief {
-    match c.recv().await {
-        ServerMsg::CallJoin { user } => user,
-        m => panic!("expected call_join, got {m:?}"),
     }
 }
 
@@ -214,101 +240,78 @@ fn expect_ids(participants: &[UserBrief], expected: &[&str]) {
     assert_eq!(ids(participants), want, "participant roster mismatch");
 }
 
-/// `call_offer { to: "room" }` — create or join the room huddle.
-async fn join_huddle(c: &mut TestClient) {
-    c.send(&ClientMsg::CallOffer {
-        to: "room".into(),
-        sdp: String::new(),
-    })
-    .await;
+/// Walk `c` from spawn eastwards, one step per datagram, respecting the
+/// server's speed gate (≤ 8 tiles/s). `tiles` must be reachable.
+async fn walk_out(c: &TestClient, id: &str, tiles: f32) {
+    let steps = (tiles / 0.4).ceil() as u32;
+    for i in 1..=steps {
+        c.move_to(id, SPAWN.0 + 0.4 * i as f32, SPAWN.1, i as u64);
+        tokio::time::sleep(Duration::from_millis(60)).await;
+    }
 }
 
 #[tokio::test]
-async fn huddle_six_members_mid_call_join_and_drop() {
+async fn bubble_six_members_join_drop_and_walk_away() {
     let (addr, _root) = start_server().await;
 
-    // Six future huddle members + one spectator (g) who will join mid-call.
-    let (mut a, a_id, _a_token) = join(addr, "office", "alice").await;
-    let (mut b, b_id, b_token) = join(addr, "office", "bob").await;
-    assert_eq!(as_joined(&mut a).await.id, b_id);
-    let (mut c, c_id, _c_token) = join(addr, "office", "carol").await;
-    assert_eq!(as_joined(&mut a).await.id, c_id);
-    assert_eq!(as_joined(&mut b).await.id, c_id);
-    let (mut d, d_id, _d_token) = join(addr, "office", "dave").await;
-    for u in [&mut a, &mut b, &mut c] {
-        assert_eq!(as_joined(u).await.id, d_id);
-    }
-    let (mut e, e_id, _e_token) = join(addr, "office", "erin").await;
-    for u in [&mut a, &mut b, &mut c, &mut d] {
-        assert_eq!(as_joined(u).await.id, e_id);
-    }
-    let (mut f, _f_id, _f_token) = join(addr, "office", "frank").await;
-    for u in [&mut a, &mut b, &mut c, &mut d, &mut e] {
-        assert_eq!(as_joined(u).await.id, _f_id);
-    }
+    // Grace opts out FIRST, before anyone can bubble with her: she stays a
+    // spectator who only ever hears the room-wide badge (README §6.3).
     let (mut g, _g_id, _g_token) = join(addr, "office", "grace").await;
-    for u in [&mut a, &mut b, &mut c, &mut d, &mut e, &mut f] {
-        assert_eq!(as_joined(u).await.id, _g_id);
+    g.send(&ClientMsg::Bubble { off: true }).await;
+
+    // Six future participants join one at a time; the spacing (> 1 tick)
+    // makes each newcomer the only join candidate, so the roster growth is
+    // deterministic: 2, 3, 4, 5, 6.
+    let (mut a, a_id, _at) = join(addr, "office", "alice").await;
+    let (mut b, b_id, b_token) = join(addr, "office", "bob").await;
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    // The first tick after {alice, bob} forms the bubble.
+    for u in [&mut a, &mut b, &mut g] {
+        let (p, _you) = u.next_call_start().await;
+        expect_ids(&p, &[&a_id, &b_id]);
     }
 
-    // --- create: alice starts the huddle; the whole room hears call_start.
-    join_huddle(&mut a).await;
+    // Carol, dave, erin, frank join one per tick (spacing > 1 tick keeps
+    // each newcomer the only candidate): the roster grows by one each
+    // time, and the joiner is the designated offerer (`you_offer`).
+    let (mut c, c_id, _ct) = join(addr, "office", "carol").await;
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    for (u, you) in [
+        (&mut a, false),
+        (&mut b, false),
+        (&mut c, true),
+        (&mut g, false),
+    ] {
+        let (p, got) = u.next_call_start().await;
+        expect_ids(&p, &[&a_id, &b_id, &c_id]);
+        assert_eq!(got, you, "the joiner offers");
+    }
+
+    let (mut d, d_id, _dt) = join(addr, "office", "dave").await;
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    for u in [&mut a, &mut b, &mut c, &mut d, &mut g] {
+        let (p, _) = u.next_call_start().await;
+        expect_ids(&p, &[&a_id, &b_id, &c_id, &d_id]);
+    }
+
+    let (mut e, e_id, _et) = join(addr, "office", "erin").await;
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    for u in [&mut a, &mut b, &mut c, &mut d, &mut e, &mut g] {
+        let (p, _) = u.next_call_start().await;
+        expect_ids(&p, &[&a_id, &b_id, &c_id, &d_id, &e_id]);
+    }
+
+    let (mut f, f_id, _ft) = join(addr, "office", "frank").await;
+    tokio::time::sleep(Duration::from_millis(150)).await;
     for u in [&mut a, &mut b, &mut c, &mut d, &mut e, &mut f, &mut g] {
-        expect_ids(&as_call_start(u).await, &[&a_id]);
+        let (p, _) = u.next_call_start().await;
+        expect_ids(&p, &[&a_id, &b_id, &c_id, &d_id, &e_id, &f_id]);
     }
+    // Done-when: a 6-participant call.
+    let _ = f_id;
 
-    // --- bob joins: everyone else hears call_join (badge + panel), bob
-    //     gets the full roster to offer every existing member.
-    join_huddle(&mut b).await;
-    for u in [&mut a, &mut c, &mut d, &mut e, &mut f, &mut g] {
-        assert_eq!(as_call_join(u).await.id, b_id);
-    }
-    expect_ids(&as_call_start(&mut b).await, &[&a_id, &b_id]);
-
-    // Bob is the offerer (newcomer re-ICE): one offer to alice, who
-    // answers; ICE flows both ways. Existing members never renegotiate.
-    b.send(&ClientMsg::CallOffer {
-        to: a_id.clone(),
-        sdp: "v=0 bob-offer".into(),
-    })
-    .await;
-    let (from, sdp) = as_call_offer(&mut a).await;
-    assert_eq!((from, sdp), (b_id.clone(), "v=0 bob-offer".to_owned()));
-    a.send(&ClientMsg::CallAnswer {
-        to: b_id.clone(),
-        sdp: "v=0 alice-answer".into(),
-    })
-    .await;
-    let (from, sdp) = as_call_answer(&mut b).await;
-    assert_eq!((from, sdp), (a_id.clone(), "v=0 alice-answer".to_owned()));
-    b.send(&ClientMsg::CallIce {
-        to: a_id.clone(),
-        candidate: r#"{"candidate":"b-cand"}"#.into(),
-    })
-    .await;
-    let (from, cand) = as_call_ice(&mut a).await;
-    assert_eq!(
-        (from, cand),
-        (b_id.clone(), r#"{"candidate":"b-cand"}"#.to_owned())
-    );
-    a.send(&ClientMsg::CallIce {
-        to: b_id.clone(),
-        candidate: r#"{"candidate":"a-cand"}"#.into(),
-    })
-    .await;
-    let (from, cand) = as_call_ice(&mut b).await;
-    assert_eq!(
-        (from, cand),
-        (a_id.clone(), r#"{"candidate":"a-cand"}"#.to_owned())
-    );
-
-    // --- carol joins mid-call: she offers every existing member (alice
-    //     and bob); they answer; existing members do not renegotiate.
-    join_huddle(&mut c).await;
-    for u in [&mut a, &mut b, &mut d, &mut e, &mut f, &mut g] {
-        assert_eq!(as_call_join(u).await.id, c_id);
-    }
-    expect_ids(&as_call_start(&mut c).await, &[&a_id, &b_id, &c_id]);
+    // Newcomer re-ICE: carol offers alice and bob; they answer; ICE flows
+    // both ways; existing members never renegotiate (README §6.3).
     c.send(&ClientMsg::CallOffer {
         to: a_id.clone(),
         sdp: "v=0 c-offer-a".into(),
@@ -335,9 +338,19 @@ async fn huddle_six_members_mid_call_join_and_drop() {
     .await;
     assert_eq!(as_call_answer(&mut c).await.0, a_id);
     assert_eq!(as_call_answer(&mut c).await.0, b_id);
+    c.send(&ClientMsg::CallIce {
+        to: a_id.clone(),
+        candidate: r#"{"candidate":"c-cand"}"#.into(),
+    })
+    .await;
+    let (from, cand) = as_call_ice(&mut a).await;
+    assert_eq!(
+        (from, cand),
+        (c_id.clone(), r#"{"candidate":"c-cand"}"#.to_owned())
+    );
 
-    // --- mute presence: call-scoped (not room-wide). Alice mutes; only
-    //     the other participants (bob, carol) hear it — not the room.
+    // Mute is presence: call-scoped (not room-wide). Alice mutes; only
+    // the other participants hear it — not grace.
     a.send(&ClientMsg::CallMute {
         audio: false,
         video: true,
@@ -347,13 +360,13 @@ async fn huddle_six_members_mid_call_join_and_drop() {
     assert_eq!((id, audio, video), (a_id.clone(), false, true));
     let (id, audio, video) = as_call_mute(&mut c).await;
     assert_eq!((id, audio, video), (a_id.clone(), false, true));
-    // Grace (a spectator) receives nothing here: if the mute had leaked to
-    // the room, it would surface as her next message in the steps below.
+    for u in [&mut d, &mut e, &mut f] {
+        let (id, _, _) = as_call_mute(u).await;
+        assert_eq!(id, a_id, "every other participant hears the mute");
+    }
 
-    // --- mid-call drop: bob's connection dies. In Phase 7 (README §5) the
-    //     server no longer kicks him out at once: he keeps his seat (room +
-    //     call) for the 30 s reconnect window, and the room hears nothing —
-    //     no call_leave, no left (no flicker).
+    // Mid-call drop: bob's connection dies. The server keeps his seat
+    // (room + call) for the reconnect window; nobody hears a leave.
     b.close();
     drop(b);
     for u in [&mut a, &mut c, &mut d, &mut e, &mut f, &mut g] {
@@ -365,80 +378,76 @@ async fn huddle_six_members_mid_call_join_and_drop() {
         .await;
     }
 
-    // --- bob reconnects within the window (same identity via his token),
-    //     then leaves the room explicitly: now the room does hear
-    //     call_leave + left, and the huddle shrinks to alice + carol.
-    let (mut b2, b_id2) = reconnect(addr, "office", "bob", &b_token).await;
+    // Bob reconnects within the window (same identity via his token): the
+    // hello's call roster still has all six — membership survived.
+    let (mut b2, b_id2, call) = reconnect(addr, "office", "bob", &b_token).await;
     assert_eq!(b_id2, b_id, "reconnect keeps the same identity");
+    assert_eq!(call.len(), 6, "the bubble kept every seat");
     b2.send(&ClientMsg::Leave).await;
-    assert_eq!(as_call_leave(&mut a).await, b_id.clone());
-    assert_eq!(as_left(&mut a).await, b_id.clone());
-    assert_eq!(as_call_leave(&mut g).await, b_id.clone());
-    assert_eq!(as_left(&mut g).await, b_id.clone());
-    for u in [&mut c, &mut d, &mut e, &mut f] {
-        assert_eq!(as_call_leave(u).await, b_id.clone());
-        assert_eq!(as_left(u).await, b_id.clone());
+    for (name, u) in [
+        ("a", &mut a),
+        ("c", &mut c),
+        ("d", &mut d),
+        ("e", &mut e),
+        ("f", &mut f),
+        ("g", &mut g),
+    ] {
+        match u.recv().await {
+            ServerMsg::CallLeave { id } => assert_eq!(id, b_id, "call_leave for {name}"),
+            m => panic!("expected call_leave at {name}, got {m:?}"),
+        }
+    }
+    for (name, u) in [
+        ("a", &mut a),
+        ("c", &mut c),
+        ("d", &mut d),
+        ("e", &mut e),
+        ("f", &mut f),
+        ("g", &mut g),
+    ] {
+        match u.recv().await {
+            ServerMsg::Left { id } => assert_eq!(id, b_id, "left for {name}"),
+            m => panic!("expected left at {name}, got {m:?}"),
+        }
     }
 
-    // --- grace (spectator all along) joins the call mid-way: call_join
-    //     for the room, full roster for her, then she offers the two
-    //     remaining members.
-    join_huddle(&mut g).await;
+    // Walk-away: dave walks out of the leave radius (5.5 tiles east).
+    // Nothing at once (2 s grace), then the room hears call_leave.
+    walk_out(&d, &d_id, 5.5).await;
     for u in [&mut a, &mut c, &mut d, &mut e, &mut f] {
-        assert_eq!(as_call_join(u).await.id, _g_id);
+        assert_quiet(
+            u,
+            Duration::from_millis(300),
+            "grace delay before the leave",
+        )
+        .await;
     }
-    expect_ids(&as_call_start(&mut g).await, &[&a_id, &c_id, &_g_id]);
-    g.send(&ClientMsg::CallOffer {
-        to: a_id.clone(),
-        sdp: "v=0 g-offer-a".into(),
-    })
-    .await;
-    g.send(&ClientMsg::CallOffer {
-        to: c_id.clone(),
-        sdp: "v=0 g-offer-c".into(),
-    })
-    .await;
-    let (from, sdp) = as_call_offer(&mut a).await;
-    assert_eq!((from, sdp), (_g_id.clone(), "v=0 g-offer-a".to_owned()));
-    let (from, sdp) = as_call_offer(&mut c).await;
-    assert_eq!((from, sdp), (_g_id.clone(), "v=0 g-offer-c".to_owned()));
-    a.send(&ClientMsg::CallAnswer {
-        to: _g_id.clone(),
-        sdp: "v=0 a-answer-g".into(),
-    })
-    .await;
-    c.send(&ClientMsg::CallAnswer {
-        to: _g_id.clone(),
-        sdp: "v=0 c-answer-g".into(),
-    })
-    .await;
-    assert_eq!(as_call_answer(&mut g).await.0, a_id);
-    assert_eq!(as_call_answer(&mut g).await.0, c_id);
+    for u in [&mut a, &mut c, &mut d, &mut e, &mut f, &mut g] {
+        assert_eq!(as_call_leave(u).await, d_id.clone());
+    }
 
-    // --- leaves: alice and carol hang up (huddle continues each time,
-    //     room-wide call_leave), then grace is the last one out, ending
-    //     the call for the room.
+    // Final leaves: erin and frank hang up, then alice leaves carol alone;
+    // the last leave ends the call for the whole room.
+    f.send(&ClientMsg::CallLeave).await;
+    for u in [&mut a, &mut c, &mut e, &mut f, &mut g] {
+        assert_eq!(as_call_leave(u).await, f_id.clone());
+    }
+    e.send(&ClientMsg::CallLeave).await;
+    for u in [&mut a, &mut c, &mut e, &mut g] {
+        assert_eq!(as_call_leave(u).await, e_id.clone());
+    }
     a.send(&ClientMsg::CallLeave).await;
-    for u in [&mut a, &mut c, &mut d, &mut e, &mut f, &mut g] {
-        assert_eq!(as_call_leave(u).await, a_id.clone());
-    }
-    c.send(&ClientMsg::CallLeave).await;
-    for u in [&mut a, &mut c, &mut d, &mut e, &mut f, &mut g] {
-        assert_eq!(as_call_leave(u).await, c_id.clone());
-    }
-    g.send(&ClientMsg::CallLeave).await;
-    for u in [&mut a, &mut c, &mut d, &mut e, &mut f, &mut g] {
+    for u in [&mut a, &mut c, &mut g] {
         assert_eq!(as_call_end(u).await, "last_left");
     }
 
-    // --- no leaked call state: the room's call slot is cleared, so a
-    //     fresh huddle starts cleanly (the client-side half of "no leaked
-    //     peer connections" — N-1 RTCPeerConnection teardown — is browser
-    //     only and checked manually per README §11).
-    join_huddle(&mut a).await;
-    expect_ids(&as_call_start(&mut a).await, &[&a_id]);
-    expect_ids(&as_call_start(&mut c).await, &[&a_id]);
-    a.send(&ClientMsg::CallLeave).await;
-    assert_eq!(as_call_end(&mut a).await, "last_left");
-    assert_eq!(as_call_end(&mut c).await, "last_left");
+    // No leaked call state: a fresh bubble reforms cleanly. Which pair the
+    // tick picks first is nondeterministic (several users sit at spawn and
+    // ids are not join-ordered), so only assert that a bubble exists again.
+    c.move_to(&c_id, SPAWN.0 + 0.5, SPAWN.1, 1);
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    let (p, _) = a.next_call_start().await;
+    assert!(p.len() >= 2, "a fresh bubble reformed");
+    let (p, _) = c.next_call_start().await;
+    assert!(p.len() >= 2, "a fresh bubble reformed");
 }

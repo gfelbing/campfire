@@ -1,18 +1,18 @@
-//! Call state machine: 1:1 calls + room huddles (README §5/§6.3).
+//! Proximity-call state machine — "bubbles" (README §6.3).
 //!
 //! One `RTCPeerConnection` per remote participant (mesh, README §6.1).
-//! In a 1:1 the caller (the one who rang) is always the offerer; in a
-//! huddle the *joiner* is always the offerer — each newcomer offers every
-//! existing member, who never renegotiate (README §6.3).
+//! The *joiner* is always the offerer — each newcomer offers every
+//! existing member, who never renegotiate (README §6.3). On bubble
+//! creation the server designates the smaller id.
 //!
-//! Call *state* (`call_start` / `call_join` / `call_leave` / `call_end`) is
-//! room-wide: it powers the avatars' headphone badge, so a bystander hears
-//! it too. Call *signaling* (offer/answer/ice/mute) is call-scoped.
+//! Call *state* (`call_start` / `call_leave` / `call_end`) is room-wide: it
+//! powers the avatars' headphone badge, so a bystander hears it too. Call
+//! *signaling* (offer/answer/ice/mute) is call-scoped.
 //!
-//! Explicit join (README §6.3): `getUserMedia` is only requested inside
-//! `ring()`, `accept()` and `joinHuddle()` — on the user's own action.
-
-import { ROOM_TARGET } from "../net/types";
+//! Joining is automatic: the server pulls nearby avatars into a bubble and
+//! the client asks for the mic (`getUserMedia`) on the first auto-join —
+//! walking close is the user's intent. A user can opt out entirely with
+//! the bubble toggle (`sendBubble`).
 import type { UserBrief } from "../net/types";
 import { getLocalMedia, iceServers } from "./media";
 import { RtcPeer, type PeerState } from "./peer";
@@ -24,10 +24,9 @@ const VOICE_ONLY_AT = 9;
 
 export type CallPhase =
   | { p: "idle" }
-  | { p: "outgoing"; peer: string; name: string }
-  | { p: "incoming"; from: string; name: string }
+  /** Media is being acquired for an auto-join. */
   | { p: "joining" }
-  | { p: "in-call"; kind: "1:1" | "huddle"; participants: UserBrief[] };
+  | { p: "in-call"; participants: UserBrief[] };
 
 /** One remote participant as the UI needs it (grid tile). */
 export interface PeerView {
@@ -56,11 +55,8 @@ export interface CallUiHooks {
 
 /** The signaling surface the manager needs (implemented by `Connection`). */
 export interface CallSignaling {
-  sendCallRing(to: string): void;
-  sendCallRingStop(to: string): void;
-  sendCallAccept(to: string): void;
-  sendCallDecline(to: string): void;
-  /** `to` is a user id, or `ROOM_TARGET` ("room") to create/join a huddle. */
+  /** Opt out of bubbles (or back in with false). */
+  sendBubble(off: boolean): void;
   sendCallOffer(to: string, sdp: string): void;
   sendCallAnswer(to: string, sdp: string): void;
   sendCallIce(to: string, candidate: string): void;
@@ -88,8 +84,6 @@ export class CallManager {
   private localStream: MediaStream | null = null;
   /** ICE servers for the current call (fetched with the local media). */
   private servers: RTCIceServer[] | null = null;
-  /** A call we joined is not confirmed yet (`call_start` pending). */
-  private awaitingStart: "huddle" | "1:1" | null = null;
 
   constructor(
     private send: CallSignaling,
@@ -112,73 +106,16 @@ export class CallManager {
 
   // --- user actions ---------------------------------------------------------
 
-  /** Ring `user` (1:1). Explicit join: the mic prompt happens here. */
-  async ring(user: UserBrief): Promise<void> {
-    if (this.phase.p !== "idle" || user.id === this.selfId) return;
-    const stream = await this.acquireMedia();
-    if (!stream) return;
-    this.setPhase({ p: "outgoing", peer: user.id, name: user.name });
-    this.send.sendCallRing(user.id);
+  /** Opt out of proximity bubbles (README §6.3): the server drops us from
+   *  the current bubble at once and never pulls us back in. */
+  setBubble(off: boolean): void {
+    this.send.sendBubble(off);
   }
 
-  /** Create or join the room's huddle. Explicit join: mic prompt here.
-   *  The joiner is the offerer to every existing member (README §6.3). */
-  async joinHuddle(): Promise<void> {
-    if (this.phase.p !== "idle") return;
-    const stream = await this.acquireMedia();
-    if (!stream) return;
-    this.setPhase({ p: "joining" });
-    this.awaitingStart = "huddle";
-    this.send.sendCallOffer(ROOM_TARGET, "");
-  }
-
-  /** Cancel an outgoing ring, decline an incoming one, hang up a call, or
-   *  bail on an in-flight huddle join. */
+  /** Hang up: leave the current bubble (the server dissolves it when ≤ 1
+   *  participant remains). */
   hangup(): void {
-    switch (this.phase.p) {
-      case "outgoing":
-        this.send.sendCallRingStop(this.phase.peer);
-        this.reset();
-        break;
-      case "incoming":
-        this.send.sendCallDecline(this.phase.from);
-        this.reset();
-        break;
-      case "joining":
-        // The join may already be registered server-side; `call_leave` is a
-        // no-op there if it is not (README §5: server validates).
-        this.send.sendCallLeave();
-        this.reset();
-        break;
-      case "in-call":
-        this.send.sendCallLeave();
-        this.reset();
-        break;
-      default:
-        break;
-    }
-  }
-
-  /** Accept an incoming 1:1 ring. Explicit join: the mic prompt here. */
-  async accept(): Promise<void> {
-    if (this.phase.p !== "incoming") return;
-    const from = this.phase.from;
-    const stream = await this.acquireMedia();
-    if (!stream) {
-      this.send.sendCallDecline(from);
-      this.reset();
-      return;
-    }
-    // `call_start` (with us in the roster) follows; we wait for the
-    // caller's offer — the caller is always the offerer in a 1:1.
-    this.setPhase({ p: "joining" });
-    this.awaitingStart = "1:1";
-    this.send.sendCallAccept(from);
-  }
-
-  decline(): void {
-    if (this.phase.p !== "incoming") return;
-    this.send.sendCallDecline(this.phase.from);
+    this.send.sendCallLeave();
     this.reset();
   }
 
@@ -201,53 +138,51 @@ export class CallManager {
 
   // --- server messages (README §5) ------------------------------------------
 
-  onCallRing(from: string, name: string): void {
-    if (this.phase.p !== "idle") return; // server enforces one call per room
-    this.setPhase({ p: "incoming", from, name });
-  }
-
   /** Room-wide (headphone badge) and, when we are in the roster, our
-   *  authoritative call state: 1:1 accepted, huddle created or joined, or
-   *  catch-up for a mid-call *room* joiner (badge only in that case). */
-  onCallStart(participants: UserBrief[]): void {
+   *  authoritative bubble state: created or joined (auto-join on approach,
+   *  README §6.3), or a roster re-sync while we are already in.
+   *
+   *  `youOffer` marks us as the designated offerer: a fresh joiner offers
+   *  every existing member; on a join catch-up after a reconnect our old
+   *  peer connections are dead, so we re-offer. */
+  onCallStart(participants: UserBrief[], youOffer: boolean): void {
     const selfIn = participants.some((u) => u.id === this.selfId);
-    switch (this.phase.p) {
-      case "outgoing": {
-        // The callee accepted our 1:1 ring: we rang, so we are the offerer.
-        if (!selfIn) return;
-        this.enterCall(participants, true, "1:1");
-        break;
-      }
-      case "joining": {
-        // Huddle create/join (we offer: the joiner is the offerer) or 1:1
-        // accept (the caller offers; we wait).
-        if (!selfIn) return; // server rejected; an error message follows
-        const huddle = this.awaitingStart === "huddle";
-        this.enterCall(participants, huddle, huddle ? "huddle" : "1:1");
-        break;
-      }
-      case "in-call": {
-        // Re-synchronise the roster (defensive; state is incremental).
-        this.roster = participants;
-        this.pushPeers();
-        break;
-      }
-      default:
-        // Bystander or mid-call room joiner: badge only (main.ts).
-        break;
+    if (!selfIn) {
+      // Bystander: badge only (the avatar layer reads the roster from
+      // main.ts's `onCallStart`); nothing to do here.
+      return;
     }
-  }
-
-  /** A participant joined the room's call (room-wide). If we are in the
-   *  call, the newcomer opens N-1 fresh connections and offers each of us
-   *  — we just wait for their offer (README §6.3). */
-  onCallJoin(user: UserBrief): void {
-    if (this.phase.p !== "in-call") return; // badge only (main.ts)
-    if (this.roster.some((u) => u.id === user.id)) return;
-    this.roster = [...this.roster, user];
-    this.ensurePeer(user);
-    this.maybeAutoVoiceOnly();
-    this.pushPeers();
+    if (this.phase.p === "in-call") {
+      // Re-sync: a newcomer joined (they offer, we wait) — open a peer for
+      // anyone we do not have one to. When `youOffer` (reconnect catch-up:
+      // our old paths are dead) re-offer to the ones missing a peer.
+      this.roster = participants;
+      for (const u of participants) {
+        if (u.id === this.selfId) continue;
+        if (!this.peers.has(u.id)) {
+          this.ensurePeer(u);
+          if (youOffer) void this.offerTo(u);
+        }
+      }
+      this.maybeAutoVoiceOnly();
+      this.pushPeers();
+      return;
+    }
+    if (this.phase.p !== "idle") return;
+    // Auto-join: the server pulled us into a bubble. `getUserMedia` here —
+    // walking close is the user's intent (README §6.3 relaxed prompt).
+    this.setPhase({ p: "joining" });
+    void (async () => {
+      const stream = await this.acquireMedia();
+      if (!stream) {
+        // No media, no call: leave so the server does not keep our seat
+        // open with a silent ghost (README §6.3).
+        this.send.sendCallLeave();
+        this.reset();
+        return;
+      }
+      this.enterCall(participants, youOffer);
+    })();
   }
 
   /** A participant left (room-wide; includes us, for our own badge). */
@@ -300,12 +235,7 @@ export class CallManager {
       this.ensurePeer(u);
       void this.offerTo(u);
     }
-    this.awaitingStart = null;
-    this.setPhase({
-      p: "in-call",
-      kind: others.length > 1 ? "huddle" : "1:1",
-      participants: others,
-    });
+    this.setPhase({ p: "in-call", participants: others });
     this.maybeAutoVoiceOnly();
     this.pushPeers();
     this.hooks.onLog("rejoined the call");
@@ -351,10 +281,10 @@ export class CallManager {
     this.pushPeers();
   }
 
-  /** A validation error: an in-flight join or ring was refused. */
+  /** A validation error: a signaling message was refused. */
   onError(code: string): void {
     if (code !== "call_not_allowed") return;
-    if (this.awaitingStart !== null || this.phase.p === "outgoing") {
+    if (this.phase.p === "joining") {
       this.hooks.onLog("call refused by the server");
       this.reset();
     }
@@ -375,17 +305,17 @@ export class CallManager {
     return this.localStream;
   }
 
-  /** We are in the call with `participants` (including us): open a peer to
-   *  every other member, and (when `offer`) send each of them our offer. */
-  private enterCall(participants: UserBrief[], offer: boolean, kind: "1:1" | "huddle"): void {
+  /** We are in the bubble with `participants` (including us): open a peer
+   *  to every other member, and (when `offer`) send each of them our
+   *  offer (the joiner offers, README §6.3). */
+  private enterCall(participants: UserBrief[], offer: boolean): void {
     this.roster = participants;
     const others = participants.filter((u) => u.id !== this.selfId);
     for (const u of others) {
       this.ensurePeer(u);
       if (offer) void this.offerTo(u);
     }
-    this.awaitingStart = null;
-    this.setPhase({ p: "in-call", kind, participants: others });
+    this.setPhase({ p: "in-call", participants: others });
     this.maybeAutoVoiceOnly();
     this.pushPeers();
   }
@@ -473,7 +403,6 @@ export class CallManager {
     this.presence.clear();
     this.connState.clear();
     this.roster = [];
-    this.awaitingStart = null;
     this.localStream?.getTracks().forEach((t) => t.stop());
     this.localStream = null;
     this.servers = null;

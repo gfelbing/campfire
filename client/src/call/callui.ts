@@ -1,14 +1,13 @@
-//! Call UI (README §6.3): incoming/outgoing overlays and the active-call
-//! panel with a video grid (one tile per remote participant + local PiP),
-//! per-tile connection state / mute / camera / active-speaker indicators,
-//! and the mute/camera/hang-up bar.
+//! Call UI (README §6.3): the active-bubble panel with a video grid (one
+//! tile per remote participant + local PiP), per-tile connection state /
+//! mute / camera / active-speaker indicators, and the mute/camera/hang-up
+//! bar. Joining is automatic (proximity), so there are no ring/accept
+//! overlays — walking away is how you leave.
 
 import type { CallPhase, PeerView } from "./manager";
 import type { PeerState } from "./peer";
 
 export interface CallUiActions {
-  onAccept(): void;
-  onDecline(): void;
   onHangup(): void;
   onToggleMute(): void;
   onToggleCamera(): void;
@@ -54,21 +53,6 @@ export function createCallUI(container: HTMLElement, actions: CallUiActions): Ca
   const root = document.createElement("div");
   root.className = "call";
   root.innerHTML = `
-    <div class="call-incoming hidden">
-      <div class="call-incoming-card">
-        <div class="call-incoming-icon">📞</div>
-        <div class="call-incoming-name"></div>
-        <div class="call-incoming-sub">incoming call</div>
-        <div class="call-incoming-actions">
-          <button class="call-accept">Accept</button>
-          <button class="call-decline">Decline</button>
-        </div>
-      </div>
-    </div>
-    <div class="call-outgoing hidden">
-      <span class="call-outgoing-text"></span>
-      <button class="call-cancel">Cancel</button>
-    </div>
     <div class="call-panel hidden">
       <div class="call-panel-header">
         <span class="call-peer-name"></span>
@@ -79,15 +63,11 @@ export function createCallUI(container: HTMLElement, actions: CallUiActions): Ca
       <div class="call-controls">
         <button class="call-btn call-mute" title="mute / unmute (🎤)">🎤</button>
         <button class="call-btn call-camera" title="camera on / off (📷)">📷</button>
-        <button class="call-btn call-hangup" title="hang up">📞</button>
+        <button class="call-btn call-hangup" title="leave the call">📞</button>
       </div>
     </div>`;
   container.appendChild(root);
 
-  const incoming = root.querySelector<HTMLElement>(".call-incoming")!;
-  const incomingName = root.querySelector<HTMLElement>(".call-incoming-name")!;
-  const outgoing = root.querySelector<HTMLElement>(".call-outgoing")!;
-  const outgoingText = root.querySelector<HTMLElement>(".call-outgoing-text")!;
   const panel = root.querySelector<HTMLElement>(".call-panel")!;
   const peerName = root.querySelector<HTMLElement>(".call-peer-name")!;
   const peerState = root.querySelector<HTMLElement>(".call-peer-state")!;
@@ -96,15 +76,6 @@ export function createCallUI(container: HTMLElement, actions: CallUiActions): Ca
   const muteBtn = root.querySelector<HTMLButtonElement>(".call-mute")!;
   const camBtn = root.querySelector<HTMLButtonElement>(".call-camera")!;
 
-  root.querySelector<HTMLButtonElement>(".call-accept")!.addEventListener("click", () => {
-    actions.onAccept();
-  });
-  root.querySelector<HTMLButtonElement>(".call-decline")!.addEventListener("click", () => {
-    actions.onDecline();
-  });
-  root.querySelector<HTMLButtonElement>(".call-cancel")!.addEventListener("click", () => {
-    actions.onHangup();
-  });
   muteBtn.addEventListener("click", () => actions.onToggleMute());
   camBtn.addEventListener("click", () => actions.onToggleCamera());
   root.querySelector<HTMLButtonElement>(".call-hangup")!.addEventListener("click", () => {
@@ -221,16 +192,9 @@ export function createCallUI(container: HTMLElement, actions: CallUiActions): Ca
 
   return {
     setPhase(phase) {
-      incoming.classList.toggle("hidden", phase.p !== "incoming");
-      outgoing.classList.toggle("hidden", phase.p !== "outgoing");
       panel.classList.toggle("hidden", phase.p !== "in-call" && phase.p !== "joining");
-      if (phase.p === "incoming") incomingName.textContent = phase.name;
-      if (phase.p === "outgoing") outgoingText.textContent = `Calling ${phase.name}…`;
       if (phase.p === "in-call") {
-        peerName.textContent =
-          phase.kind === "huddle"
-            ? `Room huddle · ${phase.participants.length + 1} in call`
-            : `Call with ${phase.participants[0]?.name ?? ""}`;
+        peerName.textContent = `Proximity call · ${phase.participants.length + 1}`;
       }
       if (phase.p === "joining") {
         peerName.textContent = "Joining call…";

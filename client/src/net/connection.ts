@@ -30,15 +30,12 @@ export interface ConnHandlers {
   onChat: (c: ChatMsg) => void;
   onTyping: (id: string, on: boolean) => void;
   onMovement: (batch: MovementBatch) => void;
-  /** `from` is ringing us (README §5 `call_ring`). */
-  onCallRing: (from: string, name: string) => void;
-  /** A call started; `participants` is the full list. */
-  onCallStart: (participants: UserBrief[]) => void;
-  /** A participant joined an ongoing call (huddles, Phase 6). */
-  onCallJoin: (u: UserBrief) => void;
-  /** A participant left an ongoing call (huddles, Phase 6). */
+  /** A bubble started or grew; `participants` is the full list and
+   *  `youOffer` marks us as the designated offerer (README §6.3). */
+  onCallStart: (participants: UserBrief[], youOffer: boolean) => void;
+  /** A participant left the ongoing bubble (huddles, Phase 6). */
   onCallLeave: (id: string) => void;
-  /** The call is over: `last_left`, `canceled`, `declined`, `hangup`. */
+  /** The bubble is over (`last_left`). */
   onCallEnd: (reason: string) => void;
   onCallOffer: (from: string, sdp: string) => void;
   onCallAnswer: (from: string, sdp: string) => void;
@@ -99,20 +96,9 @@ export class Connection {
   // --- call signaling (README §5/§6): plain stream messages, the server
   // --- relays between same-room participants and never sees media.
 
-  sendCallRing(to: string): void {
-    this.transport?.sendMsg({ t: "call_ring", to });
-  }
-
-  sendCallRingStop(to: string): void {
-    this.transport?.sendMsg({ t: "call_ring_stop", to });
-  }
-
-  sendCallAccept(to: string): void {
-    this.transport?.sendMsg({ t: "call_accept", to });
-  }
-
-  sendCallDecline(to: string): void {
-    this.transport?.sendMsg({ t: "call_decline", to });
+  /** Opt out of proximity bubbles (README §6.3) — or back in with false. */
+  sendBubble(off: boolean): void {
+    this.transport?.sendMsg({ t: "bubble", off });
   }
 
   sendCallOffer(to: string, sdp: string): void {
@@ -198,14 +184,8 @@ export class Connection {
       case "typing":
         this.handlers.onTyping(msg.id, msg.on);
         break;
-      case "call_ring":
-        this.handlers.onCallRing(msg.from, msg.name);
-        break;
       case "call_start":
-        this.handlers.onCallStart(msg.participants);
-        break;
-      case "call_join":
-        this.handlers.onCallJoin(msg.user);
+        this.handlers.onCallStart(msg.participants, msg.you_offer);
         break;
       case "call_leave":
         this.handlers.onCallLeave(msg.id);

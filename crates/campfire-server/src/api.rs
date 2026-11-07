@@ -375,19 +375,11 @@ async fn fallback_event(
                 ClientMsg::Typing { on } => {
                     state.world.broadcast_typing(&room, &token, on);
                 }
-                // Call signaling: same world methods as the WebTransport path
-                // (README §5); fallback clients get presence, chat and calls.
-                ClientMsg::CallRing { to } => {
-                    let _ = state.world.call_ring(&room, &token, &to);
-                }
-                ClientMsg::CallRingStop { to } => {
-                    let _ = state.world.call_ring_stop(&room, &token, &to);
-                }
-                ClientMsg::CallAccept { to } => {
-                    let _ = state.world.call_accept(&room, &token, &to);
-                }
-                ClientMsg::CallDecline { to } => {
-                    let _ = state.world.call_decline(&room, &token, &to);
+                // Bubble opt-out and call signaling: same world methods as
+                // the WebTransport path (README §5); fallback clients get
+                // presence, chat and calls.
+                ClientMsg::Bubble { off } => {
+                    let _ = state.world.set_bubble(&room, &token, off);
                 }
                 ClientMsg::CallOffer { to, sdp } => {
                     let _ = state.world.call_relay_offer(&room, &token, &to, sdp);

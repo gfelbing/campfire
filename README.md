@@ -12,7 +12,7 @@ A virtual-office-style virtual office — avatars walking around 2D tile maps **
 
 **In scope for v1 (a "usable virtual-office"):**
 
-- **Voice + video calls — the headline feature**: 1:1 calls and per-room huddles (WebRTC, P2P mesh with an embedded STUN/TURN fallback). Explicit join, no surprise mic prompts. ([§6](#6-voice--video-calls))
+- **Voice + video calls — the headline feature**: proximity "bubbles" — walk close to someone and you are in a call together (WebRTC, P2P mesh with an embedded STUN/TURN fallback); walk away or opt out to leave. ([§6](#6-voice--video-calls))
 - 2D tile-map worlds rendered in the browser (Tiled JSON map format)
 - Your avatar + all other users' avatars, positions synced in real time with smooth interpolation
 - Presence: see who is in the room, who is in a call (headphone badge), join/leave events
@@ -156,19 +156,15 @@ Because of the HTTP/3-only data path:
 
 ```jsonc
 // client → server
-{"t":"call_ring",     "to":"u_…"}                  // 1:1: start ringing
-{"t":"call_ring_stop","to":"u_…"}
-{"t":"call_accept",   "to":"u_…"}                  // callee accepts → offer begins
-{"t":"call_decline",  "to":"u_…"}
-{"t":"call_offer",    "to":"u_…|room", "sdp":"…"}  // "room" = join the room huddle
+{"t":"bubble",        "off":true}                  // opt out of proximity calls (or back in with false)
+{"t":"call_offer",    "to":"u_…", "sdp":"…"}
 {"t":"call_answer",   "to":"u_…", "sdp":"…"}
 {"t":"call_ice",      "to":"u_…", "candidate":"…"}
 {"t":"call_mute",     "audio":false, "video":true} // presence only (track.enabled flip)
 {"t":"call_leave"}
 // server → client
-{"t":"call_ring",     "from":"u_…", "name":"jules"}
-{"t":"call_start",    "room":"office-1", "participants":[{"id":"u_…","name":"jules"}, …]}
-{"t":"call_join",     "user":{"id":"u_…","name":"jules"}}
+{"t":"call_start",    "room":"office-1", "participants":[{"id":"u_…","name":"jules"}, …],
+                                                  "you_offer":true}   // you are the designated offerer
 {"t":"call_leave",    "id":"u_…"}
 {"t":"call_end",      "reason":"last_left"}
 {"t":"call_offer",    "from":"u_…", "sdp":"…"}     // relayed
@@ -177,7 +173,7 @@ Because of the HTTP/3-only data path:
 {"t":"call_mute",     "id":"u_…", "audio":false, "video":true}
 ```
 
-**Call scope & huddle joining.** Call *state* (`call_start` / `call_join` / `call_leave` / `call_end`) is **room-wide** — every member of the room receives it, because it powers the headphone badge on avatars, not just the in-call UI. Call *presence* (`call_ring` / `call_offer` / `call_answer` / `call_ice` / `call_mute`) stays **call-scoped**: relayed only between participants of the room's active call. A huddle is created or joined by `call_offer` with `to:"room"`; the **joiner is always the offerer** — they open one fresh `RTCPeerConnection` (and one SDP offer) to every existing member, who never renegotiate (README §6.3). A `call_start` is also the catch-up a mid-call *room* joiner receives, so their badge is correct from the start.
+**Call scope & bubble joining.** Call *state* (`call_start` / `call_leave` / `call_end`) is **room-wide** — every member of the room receives it, because it powers the headphone badge on avatars, not just the in-call UI. Call *presence* (`call_offer` / `call_answer` / `call_ice` / `call_mute`) stays **call-scoped**: relayed only between participants of the room's bubble. The server computes bubbles from avatar positions in the 50 ms tick (README §6.3); the client never asks to join. The **joiner is always the offerer** — they open one fresh `RTCPeerConnection` (and one SDP offer) to every existing member, who never renegotiate; the `you_offer` flag on `call_start` marks the designated offerer (the joiner; on creation the smaller user id). A `call_start` is also the catch-up a mid-call *room* joiner or a reconnecting participant receives, so their badge is correct from the start.
 
 **Movement rules (server-enforced):** coordinates are tile space at 0.1-tile resolution; max speed 8 tiles/s (walk 4, run 8); destinations must be walkable (collision layer) and inside map bounds; client sends at most 15 Hz, server accepts at most 30/s.
 
@@ -191,7 +187,7 @@ Because of the HTTP/3-only data path:
 
 Every call participant holds one `RTCPeerConnection` per other participant. Audio is Opus (always on while in a call); video is VP8/VP9 at 720p (only while the camera is on, and off in large groups).
 
-**Why no SFU in v1:** an SFU (LiveKit, mediasoup, Janus) is a second service that owns its own UDP port range — it breaks the single-service constraint. A mesh is correct for virtual-office-style huddle sizes, keeps the server entirely out of the media path, and scales linearly with group size. An SFU is the documented escape hatch for large calls ([§17](#17-backlog-post-v1)).
+**Why no SFU in v1:** an SFU (LiveKit, mediasoup, Janus) is a second service that owns its own UDP port range — it breaks the single-service constraint. A mesh is correct for virtual-office-style bubble sizes, keeps the server entirely out of the media path, and scales linearly with group size. An SFU is the documented escape hatch for large calls ([§17](#17-backlog-post-v1)).
 
 **Group-size guidance (enforced in the UI, not the server):**
 
@@ -232,12 +228,14 @@ ICE priority does the selection: host → server-reflexive → relay; the relay 
 
 ### 6.3 Call model & UX
 
-virtual-office-style, with **explicit join** (the microphone permission prompt happens only when the user chooses to join):
+virtual-office-style **proximity bubbles** — calls form from where avatars stand, with no buttons:
 
-- **1:1 call:** A rings B (server relays `call_ring`); B sees a ringing UI and accepts → offer/answer exchange; either side can hang up.
-- **Room huddle:** any member of a room can start a huddle; others see a "Join call" button; in-call avatars get a headphone badge; a participant panel shows mute/camera state.
+- **Auto-join on approach:** the server computes bubbles in the 50 ms tick from avatar positions. Two eligible users within a **join radius of 3.5 tiles** form a bubble; anyone who walks within it joins. Joining is automatic, so the microphone permission prompt happens on the **first auto-join** — walking close *is* the user's intent. One bubble per room.
+- **Walk away to leave:** a participant who drifts beyond the **leave radius of 4.5 tiles** (hysteresis around the join radius, so edge-hover doesn't flicker) is dropped after a **2 s grace delay**. Explicitly hanging up works too. A bubble dissolves (`call_end {reason:"last_left"}`) when ≤ 1 participant remains.
+- **Opt-out toggle:** a 🔊/🔇 button in the status panel sends `bubble{off}` — the user is dropped from the current bubble at once and never pulled into a new one until they toggle back on.
+- **Glare-free offers:** the joiner offers every existing member (on creation the smaller user id offers); `you_offer` marks it. A reconnected member gets `you_offer:true` in the catch-up: their old peer connections are dead, so they re-offer a fresh connection to everyone.
 - **Mid-call events:** a newcomer opens N-1 fresh peer connections and re-ICEs (existing members don't renegotiate); a leaver's connections are torn down and everyone is notified; a mid-call reconnect rejoins with a fresh offer; mute/camera toggles flip `track.enabled` and broadcast `call_mute` — no renegotiation.
-- **Quality UI:** active-speaker indicator (per-remote audio level), mute/camera/hang-up bar, per-peer connection state ("connecting / connected / via relay").
+- **Quality UI:** active-speaker indicator (per-remote audio level), mute/camera/hang-up bar, per-peer connection state ("connecting / connected / via relay"), headphone badge on in-call avatars, participant panel showing mute/camera state.
 - **Capture:** `getUserMedia` with `echoCancellation, noiseSuppression, autoGainControl` for audio; video capped at 720p.
 
 ## 7. World model (server state)
@@ -249,12 +247,13 @@ World
         ├── map: MapData              // parsed Tiled JSON + walkability grid
         ├── users: Map<UserId, User>  // id, name, avatar, pos, dir, moving, seq
         ├── chat: RingBuffer<ChatMsg> // last 100, sent to joiners
-        └── call: Option<Call>        // participants: Set<UserId>, per-participant audio/video flags
+        └── call: Option<Call>        // the room's bubble: participants + audio/video flags
+                                      // (computed from positions in the tick, README §6.3)
 ```
 
 - Pure in-memory, no locks on the hot path: one owner task per room (the tick loop), messages in via an `mpsc` channel.
 - The tick loop (50 ms) is the only writer of outbound movement batches; everything else (chat, presence, call state) is event-driven.
-- Call state is deliberately trivial — a set plus flags; every transition is driven by a signaling message and validated (same room, sender is a participant).
+- Call state is deliberately trivial — a set plus flags; every transition is driven by the tick's proximity check or a signaling message, validated (same room, sender is a participant).
 - No persistence: restart = empty world. By design for v1.
 
 ## 8. The web client
@@ -262,7 +261,7 @@ World
 - **TypeScript + Vite + PixiJS** (WebGL). Map rendering from Tiled JSON (tileset; collision layer used by the server, ignored by the renderer).
 - Local input (WASD/arrows) with client-side prediction at 60 fps; remote avatars interpolated between 10 Hz snapshots (dead-reckoning + snap when error > 0.3 tile).
 - Name labels above avatars; simple walk animation; room switcher + chat panel; headphone badge on in-call avatars.
-- **Call layer:** `RTCPeerConnection` manager (one peer per call mate, clean teardown, leak-checked in tests), `getUserMedia` with AEC/NS/AGC, ringing UI, huddle participant panel, active-speaker meter, mute/camera/hang-up bar.
+- **Call layer:** `RTCPeerConnection` manager (one peer per call mate, clean teardown, leak-checked in tests), `getUserMedia` with AEC/NS/AGC, bubble participant panel, active-speaker meter, mute/camera/hang-up bar, bubble on/off toggle.
 - Realtime: `WebTransport` if available (all evergreen browsers since ~2025: Chrome, Firefox ≥ 114, Safari ≥ 18.2), otherwise the **SSE + POST fallback** on `/rt/sse` + `/rt/event` (same port, still HTTP/3). The fallback degrades older browsers only — it does *not* help on UDP-blocking networks, because it is also QUIC.
 - Built with Vite, then **embedded into the Rust binary** (`include_dir`/`rust-embed`) → zero static-file configuration at deploy time.
 
@@ -298,7 +297,7 @@ campfire/
 │   └── src/
 │       ├── world/            # map rendering, avatars, interpolation
 │       ├── net/              # WebTransport, SSE fallback, reconnect
-│       └── call/             # peer connections, getUserMedia, ring/huddle UI
+│       └── call/             # peer connections, getUserMedia, bubble UI
 ├── maps/                     # bundled Tiled JSON maps + thumbnails
 └── tools/
     └── loadtest/             # N simulated users + call groups over real QUIC (perf harness)
@@ -346,7 +345,7 @@ One developer, estimates in days. **MVP (walking + presence) = Phases 0–4 (≈
 ### Phase 3 — World state + movement (3 d)
 - `campfire-maps`: Tiled JSON parsing, walkability grid, bounds.
 - Rooms + users in `World`; 50 ms tick loop; batched datagram fan-out; movement validation (speed, walkability, bounds) per §5.
-- Join/leave broadcast; chat history ring buffer.
+- Join/leave broadcast; chat history ring buffer; proximity bubble engine in the tick (README §6.3).
 - Two bundled maps (a small office, an island) authored in Tiled and committed.
 - **Done when:** integration test — 2 in-process clients join the same room, move, and each receives the other's deltas; an invalid move is rejected; chat round-trips with history for a third joiner.
 
@@ -361,21 +360,21 @@ One developer, estimates in days. **MVP (walking + presence) = Phases 0–4 (≈
 - Call signaling types in `campfire-protocol`; `world/call.rs` state machine; relay validation (same room, participants only, size caps).
 - STUN co-location: `AsyncUdpSocket` proxy + STUN binding responder (RFC 5389; tested against RFC 5769 vectors).
 - Embed turn-rs on 443/TCP with TLS + TURN REST auth secret; `POST /api/v1/turn/credential` (1 h TTL, per-IP rate limit).
-- Client: peer-connection wrapper, `getUserMedia` (AEC/NS/AGC, 720p cap), ringing UI, mute/camera/hang-up bar.
+- Client: peer-connection wrapper, `getUserMedia` (AEC/NS/AGC, 720p cap), mute/camera/hang-up bar.
 - **Done when:** two browsers hold a 1:1 audio+video call; a headless page with `iceTransportPolicy: "relay"` and outbound UDP blocked completes the call over `turns:`; `icecandidateerror` events are captured and logged.
 
-### Phase 6 — Room huddles (3 d)  → **full MVP demoable**
-- Huddle start/join/leave state machine; per-participant mesh management (N-1 connections, teardown with zero leaks — asserted in tests); participant panel; avatar headphone badge; mute/camera indicators.
-- Mid-call events: newcomer re-ICE without disturbing existing members; mid-call drop/reconnect; host-leave handling.
+### Phase 6 — Proximity bubbles (3 d)  → **full MVP demoable**
+- Bubble engine in the tick (join radius 3.5, leave radius 4.5 with a 2 s grace delay, one bubble per room, one join per tick); per-participant mesh management (N-1 connections, teardown with zero leaks — asserted in tests); participant panel; avatar headphone badge; mute/camera indicators; bubble on/off toggle.
+- Mid-call events: newcomer re-ICE without disturbing existing members; mid-call drop/reconnect; walk-away leave.
 - Auto voice-only degradation at 9+ participants.
-- **Done when:** 6-participant huddle with video on 6 machines (or headless fakes); a mid-call join plus a mid-call drop/reconnect; no leaked peer connections; auto voice-only engages at 10 participants.
-- *Delivery note:* everything the **server** does for huddles (create/join via `call_offer{to:"room"}`, newcomer re-ICE, room-wide call state, mid-call join/drop, leave, last-leave, fresh huddle on a cleared room) is covered by the `huddle` integration test over real QUIC. The **WebRTC** half (N-1 `RTCPeerConnection`s per member, zero leaked connections, auto voice-only at 9+) is browser-only and verified manually with six windows; the headless E2E lands in Phase 9 (§12).
+- **Done when:** 6-participant bubble with video on 6 machines (or headless fakes); a mid-call join plus a mid-call drop/reconnect; no leaked peer connections; auto voice-only engages at 10 participants.
+- *Delivery note:* everything the **server** does for bubbles (auto-forming from positions, one-joiner-per-tick growth with the joiner as offerer, room-wide call state, mid-call join/drop, walk-away leave, last-leave, fresh bubble on a cleared room) is covered by the `huddle` integration test over real QUIC. The **WebRTC** half (N-1 `RTCPeerConnection`s per member, zero leaked connections, auto voice-only at 9+) is browser-only and verified manually with six windows; the headless E2E lands in Phase 9 (§12).
 
 ### Phase 7 — Chat + presence polish (2 d)
 - Chat UI (input, bubbles, typing indicator, history on join), room list + room switcher UI, presence panel (who's here, who's in a call).
 - Reconnect-with-token (30 s window) per §5.
 - **Done when:** chat is reliable under 5 % simulated packet loss (streams); a dropped connection rejoins without a leave/join flicker.
-- *Delivery note:* reconnect-with-token is implemented end-to-end — `join` carries an optional `token`, `hello` returns the token plus the current `call` roster, a dropped session marks the member *gone* (not removed) for a 30 s window with no `left` broadcast, and a `tick` after the window turns it into a real leave. A new `ClientMsg::leave` skips the window (room switching). The `reconnect` integration test (real QUIC) proves the drop → rejoin keeps id/token/position/call-membership with zero `left`/`joined` seen by room-mates, and the same suite drives chat + a full 1:1 ring→accept→start through a local UDP relay dropping 1 in 20 datagrams each direction. The browser half (mid-call reconnect re-offers every participant, the presence panel's 🎧 badge, the room switcher) is manual for now; headless E2E lands in Phase 9 (§12).
+- *Delivery note:* reconnect-with-token is implemented end-to-end — `join` carries an optional `token`, `hello` returns the token plus the current `call` roster, a dropped session marks the member *gone* (not removed) for a 30 s window with no `left` broadcast, and a `tick` after the window turns it into a real leave. A new `ClientMsg::leave` skips the window (room switching). The `reconnect` integration test (real QUIC) proves the drop → rejoin keeps id/token/position/call-membership with zero `left`/`joined` seen by room-mates, and the same suite drives chat + a bubble's room-wide `call_start` through a local UDP relay dropping 1 in 20 datagrams each direction. The browser half (mid-call reconnect re-offers every participant, the presence panel's 🎧 badge, the room switcher) is manual for now; headless E2E lands in Phase 9 (§12).
 
 ### Phase 8 — Ops (2.5 d)
 - Prometheus `/metrics` (connections, users/room, tick duration, datagrams in/out, rate-limit hits, call count, TURN allocations/relay bytes).
@@ -386,7 +385,7 @@ One developer, estimates in days. **MVP (walking + presence) = Phases 0–4 (≈
 ### Phase 9 — Hardening (3.5 d)
 - Load harness (`tools/loadtest`): walking users + call groups over real QUIC, ramped to the targets in [§13](#13-performance-targets); forced-relay variant (UDP blocked) to soak the TURN path; profile the tick loop and relay forwarding.
 - Security pass: final limits, input validation audit, TURN credential abuse limits ([§14](#14-security--abuse-limits)), TLS config review, dependency audit.
-- E2E suite (headless browser over HTTP/3, fake media) covering movement, chat, 1:1 call, huddle join/leave.
+- E2E suite (headless browser over HTTP/3, fake media) covering movement, chat, bubble join/leave.
 - **Done when:** targets in [§13](#13-performance-targets) met on 2 vCPU; CI (including scheduled E2E) green for a week.
 
 ## 12. Testing strategy
@@ -394,7 +393,7 @@ One developer, estimates in days. **MVP (walking + presence) = Phases 0–4 (≈
 - **Unit** (`campfire-protocol`, `campfire-maps`, `world`): codec round-trips, Tiled parsing fixtures, movement validator (speed/walkability/bounds), tick batching and datagram budgeting, call state machine transitions (incl. rejected cross-room signaling).
 - **STUN/TURN:** STUN binding against RFC 5769 test vectors; TURN allocate/refresh/relay round-trip against the embedded turn-rs with a raw UDP socket; `turns:` path exercised with a TLS client.
 - **Integration** (in-process server on ephemeral ports + real QUIC/WebTransport clients from Rust): join/hello/leave, movement ordering, invalid-move rejection, rate limiting, datagram loss (client keeps newest seq), SSE fallback equivalence, signaling relay policy.
-- **WebRTC E2E** (headless Chromium with `--use-fake-ui-for-media-stream --use-fake-device-for-media-stream`, over HTTP/3): two pages — 1:1 call reaches `connectionState === "connected"` with media flowing; huddle: 3+ pages, join/leave mid-call; relay variant with `iceTransportPolicy: "relay"`.
+- **WebRTC E2E** (headless Chromium with `--use-fake-ui-for-media-stream --use-fake-device-for-media-stream`, over HTTP/3): two pages — a proximity bubble reaches `connectionState === "connected"` with media flowing; 3+ pages, walk-away leave mid-call; relay variant with `iceTransportPolicy: "relay"`.
 - **Load** (`tools/loadtest`, manual + nightly): ramp users and call groups, measure tick latency, relay bandwidth, CPU; output a small report per run.
 
 ## 13. Performance targets (Phase 9 gate)
@@ -403,7 +402,7 @@ One developer, estimates in days. **MVP (walking + presence) = Phases 0–4 (≈
 |---|---|
 | Concurrent users (one room) | 1 000 avatars, 50 ms tick |
 | Concurrent users (server total) | 10 000 across rooms |
-| Concurrent huddle participants (server total) | 200, of which 30 % with video |
+| Concurrent bubble participants (server total) | 200, of which 30 % with video |
 | Tick processing (p99, 1 000-user room) | < 20 ms CPU |
 | Movement update rate | 10 Hz broadcast / 15 Hz accepted per user |
 | Per-user downlink (busy room) | < 1 Mbit/s |
@@ -450,7 +449,7 @@ Numbers are verified with `tools/loadtest`, not assumed; binary movement encodin
 |---|---|---|
 | `h3`/`h3-axum`/`h3-webtransport` are upstream-"experimental" | API churn, bugs | Pin versions; integration suite as safety net; Phase 1 spike validates the stack before any product code |
 | STUN co-location on the QUIC socket is subtle socket code | Broken STUN or QUIC | RFC 5769 vectors + integration tests; fallback: drop STUN entirely (direct-connect rate falls, relay still works) |
-| P2P mesh ceiling (~12 voice / ~8 video) | Big huddles degrade | Enforced UI guidance + auto voice-only; SFU escape hatch (explicitly breaks single-service; backlog) |
+| P2P mesh ceiling (~12 voice / ~8 video) | Big bubbles degrade | Enforced UI guidance + auto voice-only; SFU escape hatch (explicitly breaks single-service; backlog) |
 | turn-rs: relay is TCP/TLS-only, smaller upstream | Locked-down clients rely on it | It is the last ICE tier by design; monitor releases; relay path is E2E-tested in Phase 9 |
 | TURN credential endpoint is anonymous in v1 | Bandwidth abuse via relay | Rate limits, 1 h TTL, allocation/byte monitoring; per-user quotas once accounts exist (backlog) |
 | WebRTC in CI (headless, fake media) can be flaky | Noisy CI | E2E runs on a schedule (nightly), not as a merge gate |
@@ -461,7 +460,7 @@ Numbers are verified with `tools/loadtest`, not assumed; binary movement encodin
 
 ## 17. Backlog (post-v1)
 
-- **SFU for large calls** (LiveKit sidecar or a webrtc-rs relay): 15+ participant huddles, simulcast, load-balanced relay. Deliberate trade: a second service and a UDP port range — the single-service constraint is what keeps it out of v1
+- **SFU for large calls** (LiveKit sidecar or a webrtc-rs relay): 15+ participant bubbles, simulcast, load-balanced relay. Deliberate trade: a second service and a UDP port range — the single-service constraint is what keeps it out of v1
 - **Call recording** — requires server-side media processing (SFU/MCU); a product + privacy decision
 - Screen sharing; spatial audio; phone/SIP gateway
 - Accounts (OAuth) + private messages + per-map permissions + per-user TURN quotas

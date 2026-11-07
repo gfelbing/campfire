@@ -153,8 +153,99 @@ async fn http3(
     (status, String::from_utf8_lossy(&out).into_owned())
 }
 
+/// Validation and state errors: a lone user has no bubble to relay
+/// through; size caps are checked before participation; an opted-out
+/// bystander never joins and cannot relay (README §5/§6.3).
 #[tokio::test]
-async fn call_signaling_roundtrip_over_quic() {
+async fn call_validation_and_state_errors() {
+    let (addr, _root) = start_server().await;
+
+    // Carol joins FIRST and opts out of bubbles immediately: she can never
+    // be pulled into one (deterministic, no race with the tick).
+    let (mut c, _c_id) = join(addr, "office", "carol").await;
+    c.send(&ClientMsg::Bubble { off: true }).await;
+
+    // Alice alone: no bubble yet, so relaying is a state violation.
+    let (mut a, a_id) = join(addr, "office", "alice").await;
+    a.send(&ClientMsg::CallOffer {
+        to: "u_nobody".into(),
+        sdp: "v=0".into(),
+    })
+    .await;
+    assert_err(&mut a, ErrorCode::CallNotAllowed).await;
+
+    // Size caps (checked before participation, README §5).
+    a.send(&ClientMsg::CallOffer {
+        to: "u_nobody".into(),
+        sdp: "x".repeat(MAX_SDP_BYTES + 1),
+    })
+    .await;
+    assert_err(&mut a, ErrorCode::SdpTooLong).await;
+    a.send(&ClientMsg::CallIce {
+        to: "u_nobody".into(),
+        candidate: "x".repeat(MAX_CANDIDATE_BYTES + 1),
+    })
+    .await;
+    assert_err(&mut a, ErrorCode::CandidateTooLong).await;
+
+    // Bob joins: both are at spawn, so the tick forms their bubble; the
+    // whole room gets the badge, carol included.
+    let (mut b, b_id) = join(addr, "office", "bob").await;
+    // Alice hears bob join (drain), then the tick's bubble roster.
+    let ServerMsg::Joined { .. } = a.recv().await else {
+        panic!("expected joined for bob");
+    };
+    let ServerMsg::CallStart { participants, .. } = a.recv().await else {
+        panic!("expected call_start for alice");
+    };
+    assert_eq!(participants.len(), 2);
+    let ServerMsg::CallStart {
+        participants: pb, ..
+    } = b.recv().await
+    else {
+        panic!("expected call_start for bob");
+    };
+    assert_eq!(participants, pb);
+    let pc: Vec<campfire_protocol::UserBrief> = loop {
+        match c.recv().await {
+            ServerMsg::CallStart { participants, .. } => break participants,
+            _ => continue, // presence noise (alice/bob joining)
+        }
+    };
+    assert_eq!(participants, pc, "the badge lists the same roster");
+
+    // Carol is not in the bubble and cannot relay through it.
+    c.send(&ClientMsg::CallOffer {
+        to: a_id.clone(),
+        sdp: "v=0".into(),
+    })
+    .await;
+    assert_err(&mut c, ErrorCode::CallNotAllowed).await;
+
+    // A valid offer relays between the participants.
+    a.send(&ClientMsg::CallOffer {
+        to: b_id.clone(),
+        sdp: "v=0\r\no=alice".into(),
+    })
+    .await;
+    match b.recv().await {
+        ServerMsg::CallOffer { from, .. } => assert_eq!(from, a_id),
+        m => panic!("expected call_offer, got {m:?}"),
+    }
+
+    // Bob leaves: the bubble ends for alice.
+    b.send(&ClientMsg::CallLeave).await;
+    match a.recv().await {
+        ServerMsg::CallEnd { reason } => assert_eq!(reason, "last_left"),
+        m => panic!("expected call_end, got {m:?}"),
+    }
+}
+
+/// Proximity bubbles (README §6.3): two users in the same room spawn at
+/// the same tile, so the server's tick pulls them into one bubble without
+/// any ring/accept. Signaling then relays as before (README §6.1).
+#[tokio::test]
+async fn bubble_forms_and_relays_signaling() {
     let (addr, _root) = start_server().await;
 
     let (mut a, a_id) = join(addr, "office", "alice").await;
@@ -164,31 +255,35 @@ async fn call_signaling_roundtrip_over_quic() {
     };
     assert_eq!(user.id, b_id);
 
-    // Alice rings Bob: only Bob hears the ring, with Alice's name.
-    a.send(&ClientMsg::CallRing { to: b_id.clone() }).await;
-    match b.recv().await {
-        ServerMsg::CallRing { from, name } => {
-            assert_eq!(from, a_id);
-            assert_eq!(name, "alice");
-        }
-        m => panic!("expected call_ring, got {m:?}"),
-    }
-
-    // Bob accepts: both sides hear the call start with the full roster.
-    b.send(&ClientMsg::CallAccept { to: a_id.clone() }).await;
-    let ServerMsg::CallStart { room, participants } = a.recv().await else {
+    // Both are at spawn: within a tick or two the server forms the bubble
+    // and broadcasts the roster room-wide. Exactly one of them is told to
+    // offer (the smaller id).
+    let ServerMsg::CallStart {
+        room,
+        participants,
+        you_offer: a_offers,
+    } = a.recv().await
+    else {
         panic!("expected call_start for alice");
     };
+    let ServerMsg::CallStart {
+        participants: pb,
+        you_offer: b_offers,
+        ..
+    } = b.recv().await
+    else {
+        panic!("expected call_start for bob");
+    };
     assert_eq!(room, "office");
+    assert_eq!(participants, pb, "everyone hears the same roster");
     assert_eq!(participants.len(), 2);
     let ids: Vec<&str> = participants.iter().map(|u| u.id.as_str()).collect();
     assert!(ids.contains(&a_id.as_str()));
     assert!(ids.contains(&b_id.as_str()));
-    let ServerMsg::CallStart { .. } = b.recv().await else {
-        panic!("expected call_start for bob");
-    };
+    assert_ne!(a_offers, b_offers, "exactly one designated offerer");
+    assert_eq!(a_offers, a_id < b_id, "the smaller id offers on creation");
 
-    // SDP roundtrip: the caller offers, the callee answers (README §7).
+    // SDP roundtrip: the designated offerer offers, the other answers.
     a.send(&ClientMsg::CallOffer {
         to: b_id.clone(),
         sdp: "v=0\r\no=alice".into(),
@@ -259,97 +354,11 @@ async fn call_signaling_roundtrip_over_quic() {
         m => panic!("expected call_mute, got {m:?}"),
     }
 
-    // Bob hangs up: in a 1:1 that ends the call for Alice.
+    // Bob hangs up: with alice the only participant left, the bubble ends.
     b.send(&ClientMsg::CallLeave).await;
     match a.recv().await {
         ServerMsg::CallEnd { reason } => assert_eq!(reason, "last_left"),
         m => panic!("expected call_end (last_left), got {m:?}"),
-    }
-}
-
-#[tokio::test]
-async fn call_validation_and_state_errors() {
-    let (addr, _root) = start_server().await;
-
-    let (mut a, a_id) = join(addr, "office", "alice").await;
-    let (mut b, b_id) = join(addr, "office", "bob").await;
-    let (mut c, _c_id) = join(addr, "office", "carol").await;
-    // Presence noise: one `joined` per later joiner, per earlier joiner.
-    let ServerMsg::Joined { .. } = a.recv().await else {
-        panic!("expected joined");
-    };
-    let ServerMsg::Joined { .. } = b.recv().await else {
-        panic!("expected joined");
-    };
-    let ServerMsg::Joined { .. } = a.recv().await else {
-        panic!("expected joined");
-    };
-
-    // You cannot ring yourself.
-    a.send(&ClientMsg::CallRing { to: a_id.clone() }).await;
-    assert_err(&mut a, ErrorCode::CallNotAllowed).await;
-
-    // Alice rings Bob.
-    a.send(&ClientMsg::CallRing { to: b_id.clone() }).await;
-    let ServerMsg::CallRing { from, .. } = b.recv().await else {
-        panic!("expected call_ring");
-    };
-    assert_eq!(from, a_id);
-
-    // One call per room: Carol cannot start her own while one is in flight.
-    c.send(&ClientMsg::CallRing { to: a_id.clone() }).await;
-    assert_err(&mut c, ErrorCode::CallNotAllowed).await;
-
-    // Bob accepts; the whole room gets the roster (headphone badge).
-    b.send(&ClientMsg::CallAccept { to: a_id.clone() }).await;
-    let ServerMsg::CallStart { .. } = a.recv().await else {
-        panic!("expected call_start");
-    };
-    let ServerMsg::CallStart { .. } = b.recv().await else {
-        panic!("expected call_start");
-    };
-    let ServerMsg::CallStart { .. } = c.recv().await else {
-        panic!("expected call_start");
-    };
-
-    // Carol is not in the call and cannot relay through it.
-    c.send(&ClientMsg::CallOffer {
-        to: a_id.clone(),
-        sdp: "v=0".into(),
-    })
-    .await;
-    assert_err(&mut c, ErrorCode::CallNotAllowed).await;
-
-    // Size caps (checked before participation, README §5).
-    a.send(&ClientMsg::CallOffer {
-        to: b_id.clone(),
-        sdp: "x".repeat(MAX_SDP_BYTES + 1),
-    })
-    .await;
-    assert_err(&mut a, ErrorCode::SdpTooLong).await;
-    a.send(&ClientMsg::CallIce {
-        to: b_id.clone(),
-        candidate: "x".repeat(MAX_CANDIDATE_BYTES + 1),
-    })
-    .await;
-    assert_err(&mut a, ErrorCode::CandidateTooLong).await;
-
-    // A valid offer still relays after the rejected ones.
-    a.send(&ClientMsg::CallOffer {
-        to: b_id.clone(),
-        sdp: "v=0\r\no=alice".into(),
-    })
-    .await;
-    match b.recv().await {
-        ServerMsg::CallOffer { from, .. } => assert_eq!(from, a_id),
-        m => panic!("expected call_offer, got {m:?}"),
-    }
-
-    // Bob leaves: the 1:1 ends for Alice.
-    b.send(&ClientMsg::CallLeave).await;
-    match a.recv().await {
-        ServerMsg::CallEnd { reason } => assert_eq!(reason, "last_left"),
-        m => panic!("expected call_end, got {m:?}"),
     }
 }
 
