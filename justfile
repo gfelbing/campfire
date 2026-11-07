@@ -38,14 +38,36 @@ dev *args: certs
 build: client-build
 	cargo build --workspace --release
 
-# Self-signed dev certs for localhost (browser needs a one-time exception).
+# Dev certs: a local CA plus a localhost server cert signed by it.
+#
+# The CA must actually be trusted by the browser (`just trust`): QUIC
+# verifies certificates independently of the "proceed anyway" exception, so
+# a plain self-signed cert silently keeps the browser on HTTP/1.1 (it never
+# switches to HTTP/3, and WebTransport — which rides QUIC — fails too).
 certs:
 	mkdir -p certs
-	test -f certs/cert.pem -a -f certs/key.pem || \
+	test -f certs/ca.pem -a -f certs/ca-key.pem || \
 	  openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 \
-	    -sha256 -days 90 -nodes -keyout certs/key.pem -out certs/cert.pem \
-	    -subj "/CN=localhost" -addext "subjectAltName=DNS:localhost,IP:127.0.0.1"
-	@echo "dev certs ready in certs/"
+	    -sha256 -days 3650 -nodes -keyout certs/ca-key.pem -out certs/ca.pem \
+	    -subj "/CN=campfire-dev-ca" \
+	    -addext "basicConstraints=critical,CA:TRUE" \
+	    -addext "keyUsage=critical,keyCertSign,cRLSign"
+	if [ ! -f certs/cert.pem -o ! -f certs/key.pem ]; then \
+	  openssl req -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 \
+	    -sha256 -nodes -keyout certs/key.pem -out certs/req.csr \
+	    -subj "/CN=localhost" && \
+	  printf "subjectAltName=DNS:localhost,IP:127.0.0.1\n" > certs/san.ext && \
+	  openssl x509 -req -in certs/req.csr -CA certs/ca.pem \
+	    -CAkey certs/ca-key.pem -CAcreateserial -days 3650 -sha256 \
+	    -extfile certs/san.ext -out certs/cert.pem; fi
+	@echo "dev certs ready in certs/ (run 'just trust' once so browsers speak HTTP/3)"
+
+# Install the dev CA into the NSS trust store Brave/Chrome/Chromium use
+# (~/.pki/nssdb). Firefox keeps its own store; import there via Settings →
+# Privacy → Certificates → View Certificates → Authorities if needed.
+trust: certs
+	certutil -d sql:$HOME/.pki/nssdb -A -t "C,," -n "campfire-dev-ca" -i certs/ca.pem
+	@echo "campfire-dev-ca trusted for Brave/Chrome/Chromium — restart the browser fully"
 
 # Run the server (dev defaults; extra args pass through: just server -- --listen 0.0.0.0:443)
 server *args:
