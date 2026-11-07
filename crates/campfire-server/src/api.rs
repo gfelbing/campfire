@@ -52,10 +52,11 @@ pub struct AppState {
     pub static_dir: Option<PathBuf>,
     /// Shared TURN REST secret for minting relay credentials (README §6.2).
     pub turn_secret: String,
-    /// Per-IP throttle for the TURN credential endpoint (one per 10 min).
-    /// Keyed by the peer's remote address; a single bucket when the
-    /// address is unknown (no connection extension).
-    pub turn_rate: Arc<std::sync::Mutex<HashMap<std::net::IpAddr, Instant>>>,
+    /// Per-IP throttle for the TURN credential endpoint: a *fresh pair* is
+    /// minted at most once per 10 min per IP; repeats within the window get
+    /// the cached pair (many users behind one NAT legitimately share it —
+    /// the mint limit is what throttles abuse, not uniqueness).
+    pub turn_rate: Arc<std::sync::Mutex<HashMap<std::net::IpAddr, (Instant, TurnCredential)>>>,
 }
 
 impl AppState {
@@ -159,16 +160,18 @@ async fn list_rooms(State(state): State<AppState>) -> Json<Vec<RoomInfo>> {
 /// so expiry is enforced by us minting fresh ones and clients using them
 /// for one call setup.
 const TURN_TTL: Duration = Duration::from_secs(3600);
-/// One credential per ten minutes per peer address.
+/// A fresh pair is minted at most once per ten minutes per peer address;
+/// repeats inside the window get the cached pair (shared IPs, README §14).
 const TURN_CRED_LIMIT: Duration = Duration::from_secs(600);
 
-#[derive(Serialize)]
-struct TurnCredential {
+/// Public because it sits in `AppState::turn_rate`'s value type (tests
+/// construct the state).
+#[derive(Clone, Serialize)]
+pub struct TurnCredential {
     username: String,
     credential: String,
     expires: u64,
 }
-
 /// `POST /api/v1/turn/credential` → a short-lived TURN REST pair.
 ///
 /// The username is `"{expires_unix}:{peer_ip}"` per the TURN REST draft;
@@ -180,27 +183,40 @@ async fn turn_credential(
 ) -> Result<Json<TurnCredential>, (StatusCode, String)> {
     let ip = remote.ip();
     {
-        let mut seen = state.turn_rate.lock().unwrap();
+        let seen = state.turn_rate.lock().unwrap();
         let now = Instant::now();
-        if let Some(last) = seen.get(&ip)
+        if let Some((last, cred)) = seen.get(&ip)
             && now.duration_since(*last) < TURN_CRED_LIMIT
+            && cred.expires > now_unix().saturating_add(60)
+        // still > 1 min of life left
         {
-            return Err((StatusCode::TOO_MANY_REQUESTS, "try again later".into()));
+            // Same IP inside the mint window: hand back the cached pair.
+            return Ok(Json(cred.clone()));
         }
-        seen.insert(ip, now);
     }
-    let now_unix = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
+    let now_unix = now_unix();
     let expires = now_unix + TURN_TTL.as_secs();
     let username = format!("{expires}:{ip}");
     let credential = crate::stun::turn_rest_credential(&state.turn_secret, &username);
-    Ok(Json(TurnCredential {
+    let cred = TurnCredential {
         username,
         credential,
         expires,
-    }))
+    };
+    state
+        .turn_rate
+        .lock()
+        .unwrap()
+        .insert(ip, (Instant::now(), cred.clone()));
+    Ok(Json(cred))
+}
+
+/// Unix seconds now (0 if the clock is before the epoch).
+fn now_unix() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 // ---------------------------------------------------------------------------

@@ -453,7 +453,15 @@ async fn turn_credential_endpoint() {
         "expires {expires} vs now {now}"
     );
 
-    // Rate limit: a second request from the same IP is rejected (1 / 10 min).
+    // Rate limit: a second request from the same IP inside the mint window
+    // gets the *cached* pair — many users behind one NAT legitimately share
+    // it, and the mint limit (not uniqueness) is what throttles abuse.
     let (status, body) = http3(addr, &root, "POST", "/api/v1/turn/credential", None).await;
-    assert_eq!(status, 429, "body: {body}");
+    assert_eq!(status, 200, "body: {body}");
+    let v2: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(
+        v2["username"], *username,
+        "same cached pair within the window"
+    );
+    assert_eq!(v2["credential"], *credential);
 }
