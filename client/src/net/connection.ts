@@ -283,6 +283,9 @@ class WTConn {
   private reader: ReadableStreamDefaultReader<Uint8Array> | null = null;
   private writer: WritableStreamDefaultWriter<Uint8Array> | null = null;
   private dgReader: ReadableStreamDefaultReader<Uint8Array> | null = null;
+  // WebTransport has no readyState (that is WebSocket); track liveness
+  // ourselves so datagram sends don't go out on a dead transport.
+  private live = false;
 
   constructor(private conn: Connection) {}
 
@@ -291,14 +294,20 @@ class WTConn {
     // construction (the WS-style `/wt` shortcut is not valid here).
     const wt = new WebTransport(new URL("/wt", location.origin).toString());
     this.wt = wt;
+    this.live = false;
     wt.closed.then(
-      () => this.conn.onTransportDown(),
+      () => {
+        this.live = false;
+        this.conn.onTransportDown();
+      },
       (err) => {
+        this.live = false;
         console.warn("webtransport closed:", err);
         this.conn.onTransportDown();
       },
     );
     await wt.ready;
+    this.live = true;
 
     const stream = await wt.createBidirectionalStream();
     const writer = stream.writable.getWriter();
@@ -364,7 +373,7 @@ class WTConn {
   }
 
   sendMove(id: string, x: number, y: number, d: Dir, moving: boolean, seq: number): void {
-    if (!this.wt || this.wt.readyState !== "connected") return;
+    if (!this.wt || !this.live) return;
     const batch: MovementBatch = {
       m: [{ id, x, y, d, mv: moving ? 1 : 0, s: seq }],
     };
