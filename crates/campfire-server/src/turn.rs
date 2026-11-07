@@ -1,11 +1,14 @@
 //! Co-located TURN server (README §6.2).
 //!
-//! The relay lives in this same binary on the same port number (443/TCP in
-//! production): `turns:host?transport=tcp` is indistinguishable from
-//! ordinary HTTPS to a firewall, which is exactly what locked-down
-//! networks need as the last-resort media path. It is started as a
-//! background task and never blocks the app — if it fails, the service
-//! still works; only relayed calls on hostile networks degrade.
+//! The relay lives in this same binary behind the same port number (443/TCP
+//! in production): `turns:host?transport=tcp` is indistinguishable from
+//! ordinary HTTPS to a firewall, which is exactly what locked-down networks
+//! need as the last-resort media path. The TLS for it terminates at the
+//! public TCP front (`crate::bootstrap`, which also serves the HTTP/3
+//! Alt-Svc bootstrap); TURN itself binds a *plaintext* loopback listener that
+//! the front splices recognized STUN/TURN streams to. It is started as a
+//! background task and never blocks the app — if it fails, the service still
+//! works; only relayed calls on hostile networks degrade.
 //!
 //! Authentication is native TURN REST (RFC 8489): the server is given the
 //! shared `secret` (our `--turn-secret`), and the handler verifies
@@ -13,12 +16,16 @@
 //! long-term username the browser sends. Our credential endpoint
 //! (`POST /api/v1/turn/credential`) mints exactly that pair.
 
+use std::net::SocketAddr;
+
 use tracing::{debug, error};
-use turn_server::config::{Auth, Config, Interface, Log, Server, Ssl};
+use turn_server::config::{Auth, Config, Interface, Log, Server};
 
 /// Spawn the TURN server. `secret` is the shared TURN REST secret that
 /// must match what [`crate::api::AppState`] mints credentials with.
-pub fn start(cfg: &crate::config::Config, secret: &str) {
+/// `internal` is the plaintext loopback TCP listener the TLS front
+/// ([`crate::bootstrap`]) splices STUN/TURN streams to.
+pub fn start(cfg: &crate::config::Config, secret: &str, internal: SocketAddr) {
     // turn-server builds its TLS config via `ServerConfig::builder()`,
     // which resolves rustls' *global default* crypto provider.
     let _ = rustls::crypto::ring::default_provider().install_default();
@@ -30,13 +37,11 @@ pub fn start(cfg: &crate::config::Config, secret: &str) {
             max_threads: 4,
             realm: "campfire".to_owned(),
             interfaces: vec![Interface::Tcp {
-                listen: cfg.listen,
+                // Plaintext loopback: TLS terminates at the public TLS front.
+                listen: internal,
                 external: cfg.external_addr(),
                 idle_timeout: 60,
-                ssl: Some(Ssl {
-                    private_key: cfg.key.to_string_lossy().into_owned(),
-                    certificate_chain: cfg.cert.to_string_lossy().into_owned(),
-                }),
+                ssl: None,
             }],
         },
         // Our own tracing stack owns the log output.

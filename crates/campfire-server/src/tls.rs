@@ -13,6 +13,23 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 
+/// Build a plain rustls server config (TLS 1.3, ring provider) with the
+/// given ALPN list. quinn consumes it via [`quinn::crypto::rustls::
+/// QuicServerConfig`]; the TCP TLS front (`bootstrap`) uses it directly.
+pub fn rustls_server_config(
+    certs: Vec<CertificateDer<'static>>,
+    key: PrivateKeyDer<'static>,
+    alpn: Vec<Vec<u8>>,
+) -> Result<rustls::ServerConfig> {
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let mut rustls_conf = rustls::ServerConfig::builder_with_provider(provider)
+        .with_protocol_versions(&[&rustls::version::TLS13])?
+        .with_no_client_auth()
+        .with_single_cert(certs, key)?;
+    rustls_conf.alpn_protocols = alpn;
+    Ok(rustls_conf)
+}
+
 /// Build the quinn server config from already-loaded TLS material.
 ///
 /// Exposed (and used by the integration tests) so tests can hand in
@@ -25,12 +42,7 @@ pub fn server_config(
     key: PrivateKeyDer<'static>,
     idle_timeout: Duration,
 ) -> Result<quinn::ServerConfig> {
-    let provider = Arc::new(rustls::crypto::ring::default_provider());
-    let mut rustls_conf = rustls::ServerConfig::builder_with_provider(provider)
-        .with_protocol_versions(&[&rustls::version::TLS13])?
-        .with_no_client_auth()
-        .with_single_cert(certs, key)?;
-    rustls_conf.alpn_protocols = vec![b"h3".to_vec()];
+    let rustls_conf = rustls_server_config(certs, key, vec![b"h3".to_vec()])?;
 
     let crypto = quinn::crypto::rustls::QuicServerConfig::try_from(rustls_conf)
         .with_context(|| "building QUIC-compatible crypto config")?;
@@ -54,7 +66,7 @@ pub fn server_config_from_files(
     server_config(certs, key, idle_timeout)
 }
 
-fn load_pem(
+pub(crate) fn load_pem(
     cert: &Path,
     key: &Path,
 ) -> Result<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>)> {

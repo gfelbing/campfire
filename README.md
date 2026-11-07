@@ -35,7 +35,7 @@ A virtual-office-style virtual office — avatars walking around 2D tile maps **
 |---|---|
 | Written in Rust | Server is 100% Rust (one pragmatic exception noted in [§10](#10-key-technical-decisions)) |
 | Single service | One binary, in-memory state, no sidecars, no database. The web client is *embedded into the binary* so the deploy artifact is a single file. STUN and TURN are embedded in the same process, not separate daemons |
-| One port number: 443 | The process opens **exactly two sockets: 443/UDP (QUIC/HTTP/3 + STUN) and 443/TCP (TURN/TLS)**. No other listeners. All application traffic — page, assets, API, health, metrics, realtime, call signaling — goes over HTTP/3 on UDP; TCP exists solely so the media relay can pass locked-down networks |
+| One port number: 443 | The process opens **exactly two sockets: 443/UDP (QUIC/HTTP/3 + STUN) and 443/TCP (a TLS front: Alt-Svc bootstrap + TURN splice)**. No other listeners. All application traffic — page, assets, API, health, metrics, realtime, call signaling — goes over HTTP/3 on UDP; TCP exists to let browsers discover HTTP/3 (they need an `Alt-Svc` header over TCP to switch) and so the media relay can pass locked-down networks |
 | Media is P2P | WebRTC media flows browser-to-browser over *client-ephemeral* UDP. The server opens no media port range, relays media only when P2P fails (TURN), and can never decrypt it |
 
 Because of the HTTP/3-only data path:
@@ -66,7 +66,8 @@ Because of the HTTP/3-only data path:
  │  443/UDP:  QUIC/HTTP/3 router (static, /api, /healthz,     │
  │            /metrics) + WebTransport sessions (streams +    │
  │            datagrams) + STUN binding responder (demuxed)   │
- │  443/TCP:  TURN/TLS media relay (embedded turn-rs)         │
+ │  443/TCP:  TLS front — Alt-Svc bootstrap (browsers discover │
+ │            HTTP/3 here) + TURN splice (embedded turn-rs)   │
  │                                                            │
  │  in-memory: rooms, users, 50 ms tick loop, room calls      │
  └────────────────────────────────────────────────────────────┘
@@ -96,7 +97,7 @@ Because of the HTTP/3-only data path:
 |---|---|---|
 | 443/UDP | QUIC/HTTP/3 (ALPN `h3`) | all application traffic + WebTransport realtime + call signaling |
 | 443/UDP | STUN (RFC 5389), demuxed on the same socket | reflexive address discovery for WebRTC ([§6.2](#62-nat-traversal-everything-fits-in-443-tcpudp)) |
-| 443/TCP | TURN over TLS (`turns:`, RFC 7065 / RFC 6062) | media relay fallback for locked-down networks ([§6.2](#62-nat-traversal-everything-fits-in-443-tcpudp)) |
+| 443/TCP | TLS front: Alt-Svc bootstrap + TURN splice (`turns:`, RFC 7065 / RFC 6062) | browsers discover HTTP/3 only via an `Alt-Svc` header, which must arrive over TCP — the front answers HTTP/1.1 with `Alt-Svc: h3=…` and reloads the visitor into QUIC; STUN-over-TLS streams (magic cookie at bytes 4–8) are spliced to TURN's plaintext loopback listener, the media relay fallback for locked-down networks ([§6.2](#62-nat-traversal-everything-fits-in-443-tcpudp)) |
 
 **HTTP/3 endpoints**
 

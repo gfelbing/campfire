@@ -38,6 +38,7 @@ tokio.workspace = true
 tokio-stream.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+tokio-rustls.workspace = true
 turn-server.workspace = true
 
 [dev-dependencies]

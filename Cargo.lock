@@ -363,6 +363,7 @@ dependencies = [
  "serde_json",
  "sha1",
  "tokio",
+ "tokio-rustls",
  "tokio-stream",
  "tracing",
  "tracing-subscriber",

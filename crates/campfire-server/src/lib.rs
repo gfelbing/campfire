@@ -5,6 +5,7 @@
 //! endpoints reusable by integration tests and the load-test tool (README §12).
 
 pub mod api;
+pub mod bootstrap;
 pub mod config;
 pub mod demux;
 pub mod realtime;
@@ -41,7 +42,13 @@ pub async fn run(cfg: &config::Config) -> Result<()> {
             secret
         }
     };
-    turn::start(cfg, &turn_secret);
+    // The public TCP port is a TLS front (`bootstrap`, README §6.2): it
+    // serves the Alt-Svc bootstrap browsers need to discover HTTP/3, and
+    // splices STUN/TURN (recognized by the STUN magic cookie) to TURN's
+    // internal plaintext listener below.
+    let turn_internal = bootstrap::free_local_tcp()?;
+    bootstrap::start(cfg, turn_internal)?;
+    turn::start(cfg, &turn_secret, turn_internal);
     let state = api::AppState::new(cfg, turn_secret);
     info!(%local, "campfire listening over HTTP/3 (QUIC) + STUN + TURN");
     let _tick = world::start_ticking(state.world.clone());
