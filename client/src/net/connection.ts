@@ -23,6 +23,20 @@ export interface ConnHandlers {
   onChat: (c: ChatMsg) => void;
   onTyping: (id: string, on: boolean) => void;
   onMovement: (batch: MovementBatch) => void;
+  /** `from` is ringing us (README §5 `call_ring`). */
+  onCallRing: (from: string, name: string) => void;
+  /** A call started; `participants` is the full list. */
+  onCallStart: (participants: UserBrief[]) => void;
+  /** A participant joined an ongoing call (huddles, Phase 6). */
+  onCallJoin: (u: UserBrief) => void;
+  /** A participant left an ongoing call (huddles, Phase 6). */
+  onCallLeave: (id: string) => void;
+  /** The call is over: `last_left`, `canceled`, `declined`, `hangup`. */
+  onCallEnd: (reason: string) => void;
+  onCallOffer: (from: string, sdp: string) => void;
+  onCallAnswer: (from: string, sdp: string) => void;
+  onCallIce: (from: string, candidate: string) => void;
+  onCallMute: (id: string, audio: boolean, video: boolean) => void;
   onError: (code: string) => void;
   onStatus: (s: ConnStatus) => void;
 }
@@ -70,6 +84,46 @@ export class Connection {
     const t = this.transport;
     if (!t || !this.selfId) return;
     t.sendMove(this.selfId, x, y, d, moving, ++this.moveSeq);
+  }
+
+  // --- call signaling (README §5/§6): plain stream messages, the server
+  // --- relays between same-room participants and never sees media.
+
+  sendCallRing(to: string): void {
+    this.transport?.sendMsg({ t: "call_ring", to });
+  }
+
+  sendCallRingStop(to: string): void {
+    this.transport?.sendMsg({ t: "call_ring_stop", to });
+  }
+
+  sendCallAccept(to: string): void {
+    this.transport?.sendMsg({ t: "call_accept", to });
+  }
+
+  sendCallDecline(to: string): void {
+    this.transport?.sendMsg({ t: "call_decline", to });
+  }
+
+  sendCallOffer(to: string, sdp: string): void {
+    this.transport?.sendMsg({ t: "call_offer", to, sdp });
+  }
+
+  sendCallAnswer(to: string, sdp: string): void {
+    this.transport?.sendMsg({ t: "call_answer", to, sdp });
+  }
+
+  /** `candidate` is the peer's `RTCIceCandidateInit`, JSON-encoded. */
+  sendCallIce(to: string, candidate: string): void {
+    this.transport?.sendMsg({ t: "call_ice", to, candidate });
+  }
+
+  sendCallMute(audio: boolean, video: boolean): void {
+    this.transport?.sendMsg({ t: "call_mute", audio, video });
+  }
+
+  sendCallLeave(): void {
+    this.transport?.sendMsg({ t: "call_leave" });
   }
 
   private resetMoveSeq(): void {
@@ -126,6 +180,33 @@ export class Connection {
         break;
       case "typing":
         this.handlers.onTyping(msg.id, msg.on);
+        break;
+      case "call_ring":
+        this.handlers.onCallRing(msg.from, msg.name);
+        break;
+      case "call_start":
+        this.handlers.onCallStart(msg.participants);
+        break;
+      case "call_join":
+        this.handlers.onCallJoin(msg.user);
+        break;
+      case "call_leave":
+        this.handlers.onCallLeave(msg.id);
+        break;
+      case "call_end":
+        this.handlers.onCallEnd(msg.reason);
+        break;
+      case "call_offer":
+        this.handlers.onCallOffer(msg.from, msg.sdp);
+        break;
+      case "call_answer":
+        this.handlers.onCallAnswer(msg.from, msg.sdp);
+        break;
+      case "call_ice":
+        this.handlers.onCallIce(msg.from, msg.candidate);
+        break;
+      case "call_mute":
+        this.handlers.onCallMute(msg.id, msg.audio, msg.video);
         break;
       case "error":
         console.warn("server error:", msg.code);

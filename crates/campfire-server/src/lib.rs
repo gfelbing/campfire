@@ -6,24 +6,63 @@
 
 pub mod api;
 pub mod config;
+pub mod demux;
 pub mod realtime;
+pub mod stun;
 pub mod tls;
+pub mod turn;
 pub mod world;
 
-use anyhow::Result;
-use tracing::{debug, info};
+use std::sync::Arc;
 
-/// Run the server until Ctrl-C: bind the QUIC socket, accept connections,
-/// and drive each one over HTTP/3 through the Axum router.
+use anyhow::Result;
+use rand::RngCore;
+use tracing::{debug, info, warn};
+
+/// Run the server until Ctrl-C.
+///
+/// One port number, two protocols on it (README §2): QUIC/HTTP/3 + STUN
+/// share the UDP socket through [`demux::DemuxSocket`], and the co-located
+/// TURN server takes the same address over TCP.
 pub async fn run(cfg: &config::Config) -> Result<()> {
     let quinn_conf = tls::server_config_from_files(&cfg.cert, &cfg.key, cfg.idle_timeout())?;
-    let endpoint = quinn::Endpoint::server(quinn_conf, cfg.listen)?;
-    let local = endpoint.local_addr()?;
-    let state = api::AppState::new(cfg);
-    info!(%local, "campfire listening over HTTP/3 (QUIC)");
+    let socket = demux::DemuxSocket::bind(cfg.listen)?;
+    let local = socket.local_addr()?;
+    let endpoint = make_endpoint(quinn_conf, socket)?;
+    // TURN REST secret: `--turn-secret`, or generated (and logged once) so
+    // the app still works without the flag.
+    let turn_secret = match &cfg.turn_secret {
+        Some(secret) => secret.clone(),
+        None => {
+            let mut bytes = [0u8; 32];
+            rand::thread_rng().fill_bytes(&mut bytes);
+            let secret: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+            warn!(%secret, "no --turn-secret configured; generated an ephemeral one (relay credentials reset on every restart)");
+            secret
+        }
+    };
+    turn::start(cfg, &turn_secret);
+    let state = api::AppState::new(cfg, turn_secret);
+    info!(%local, "campfire listening over HTTP/3 (QUIC) + STUN + TURN");
     let _tick = world::start_ticking(state.world.clone());
     run_endpoint(endpoint, api::router(state)).await;
     Ok(())
+}
+
+/// Build a QUIC server endpoint over the shared demux socket.
+///
+/// Exposed for integration tests, which also need the STUN/QUIC demux on
+/// one socket.
+pub fn make_endpoint(
+    server_conf: quinn::ServerConfig,
+    socket: Arc<demux::DemuxSocket>,
+) -> std::io::Result<quinn::Endpoint> {
+    quinn::Endpoint::new_with_abstract_socket(
+        quinn::EndpointConfig::default(),
+        Some(server_conf),
+        socket,
+        Arc::new(quinn::TokioRuntime),
+    )
 }
 
 /// Accept loop for a ready endpoint (split out for tests).
@@ -51,6 +90,10 @@ pub async fn run_endpoint(endpoint: quinn::Endpoint, app: axum::Router) {
                     return;
                 }
             };
+            // h3-axum injects no ConnectInfo, so the per-peer remote
+            // address rides in as an extension for rate limiting
+            // (README §6.2: the TURN credential endpoint is per-IP).
+            let app = app.layer(axum::Extension(conn.remote_address()));
             if let Err(err) = serve_http3(app, conn).await {
                 debug!(error = %err, "HTTP/3 connection ended");
             }

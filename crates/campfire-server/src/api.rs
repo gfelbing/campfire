@@ -8,6 +8,7 @@
 
 use std::collections::HashMap;
 use std::io::Read;
+use std::net::SocketAddr;
 use std::path::{Component, Path, PathBuf};
 use std::pin::Pin;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -21,7 +22,7 @@ use axum::http::header;
 use axum::response::sse::Event;
 use axum::response::{IntoResponse, Response, Sse};
 use axum::routing::{connect, get, post};
-use axum::{Json, Router};
+use axum::{Extension, Json, Router};
 use bytes::Bytes;
 use campfire_protocol::{Avatar, ChatMsg, ClientMsg, ErrorCode, ServerMsg, to_line};
 use futures_util::StreamExt;
@@ -49,13 +50,21 @@ pub struct AppState {
     pub world: World,
     /// Serve static files from this directory instead of the embed (dev).
     pub static_dir: Option<PathBuf>,
+    /// Shared TURN REST secret for minting relay credentials (README §6.2).
+    pub turn_secret: String,
+    /// Per-IP throttle for the TURN credential endpoint (one per 10 min).
+    /// Keyed by the peer's remote address; a single bucket when the
+    /// address is unknown (no connection extension).
+    pub turn_rate: Arc<std::sync::Mutex<HashMap<std::net::IpAddr, Instant>>>,
 }
 
 impl AppState {
-    pub fn new(cfg: &Config) -> Self {
+    pub fn new(cfg: &Config, turn_secret: String) -> Self {
         Self {
             world: World::new(),
             static_dir: cfg.static_dir.clone(),
+            turn_secret,
+            turn_rate: Arc::new(std::sync::Mutex::new(HashMap::new())),
         }
     }
 }
@@ -86,6 +95,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/maps", get(list_maps))
         .route("/api/v1/maps/{id}", get(map_by_id))
         .route("/api/v1/rooms", get(list_rooms))
+        // TURN REST credentials for the co-located relay (README §6.2).
+        .route("/api/v1/turn/credential", post(turn_credential))
         // WebTransport realtime session (README §5).
         .route("/wt", connect(handle_wt))
         // Realtime fallback for browsers without WebTransport (README §8).
@@ -137,6 +148,59 @@ async fn map_by_id(UrlPath(id): UrlPath<String>) -> Result<impl IntoResponse, St
 /// `GET /api/v1/rooms` → the active rooms with member counts.
 async fn list_rooms(State(state): State<AppState>) -> Json<Vec<RoomInfo>> {
     Json(state.world.rooms_list())
+}
+
+// ---------------------------------------------------------------------------
+// TURN REST credentials (README §6.2)
+// ---------------------------------------------------------------------------
+
+/// Credentials live for one hour; the server does not validate the
+/// timestamp inside the username (turn-server trusts the shared secret),
+/// so expiry is enforced by us minting fresh ones and clients using them
+/// for one call setup.
+const TURN_TTL: Duration = Duration::from_secs(3600);
+/// One credential per ten minutes per peer address.
+const TURN_CRED_LIMIT: Duration = Duration::from_secs(600);
+
+#[derive(Serialize)]
+struct TurnCredential {
+    username: String,
+    credential: String,
+    expires: u64,
+}
+
+/// `POST /api/v1/turn/credential` → a short-lived TURN REST pair.
+///
+/// The username is `"{expires_unix}:{peer_ip}"` per the TURN REST draft;
+/// the credential is `base64(HMAC-SHA1(secret, username))`, which the
+/// co-located turn-server verifies independently.
+async fn turn_credential(
+    State(state): State<AppState>,
+    Extension(remote): Extension<SocketAddr>,
+) -> Result<Json<TurnCredential>, (StatusCode, String)> {
+    let ip = remote.ip();
+    {
+        let mut seen = state.turn_rate.lock().unwrap();
+        let now = Instant::now();
+        if let Some(last) = seen.get(&ip)
+            && now.duration_since(*last) < TURN_CRED_LIMIT
+        {
+            return Err((StatusCode::TOO_MANY_REQUESTS, "try again later".into()));
+        }
+        seen.insert(ip, now);
+    }
+    let now_unix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let expires = now_unix + TURN_TTL.as_secs();
+    let username = format!("{expires}:{ip}");
+    let credential = crate::stun::turn_rest_credential(&state.turn_secret, &username);
+    Ok(Json(TurnCredential {
+        username,
+        credential,
+        expires,
+    }))
 }
 
 // ---------------------------------------------------------------------------
@@ -287,6 +351,35 @@ async fn fallback_event(
                 }
                 ClientMsg::Typing { on } => {
                     state.world.broadcast_typing(&room, &token, on);
+                }
+                // Call signaling: same world methods as the WebTransport path
+                // (README §5); fallback clients get presence, chat and calls.
+                ClientMsg::CallRing { to } => {
+                    let _ = state.world.call_ring(&room, &token, &to);
+                }
+                ClientMsg::CallRingStop { to } => {
+                    let _ = state.world.call_ring_stop(&room, &token, &to);
+                }
+                ClientMsg::CallAccept { to } => {
+                    let _ = state.world.call_accept(&room, &token, &to);
+                }
+                ClientMsg::CallDecline { to } => {
+                    let _ = state.world.call_decline(&room, &token, &to);
+                }
+                ClientMsg::CallOffer { to, sdp } => {
+                    let _ = state.world.call_relay_offer(&room, &token, &to, sdp);
+                }
+                ClientMsg::CallAnswer { to, sdp } => {
+                    let _ = state.world.call_relay_answer(&room, &token, &to, sdp);
+                }
+                ClientMsg::CallIce { to, candidate } => {
+                    let _ = state.world.call_relay_ice(&room, &token, &to, candidate);
+                }
+                ClientMsg::CallMute { audio, video } => {
+                    let _ = state.world.call_mute(&room, &token, audio, video);
+                }
+                ClientMsg::CallLeave => {
+                    let _ = state.world.call_leave(&room, &token);
                 }
                 ClientMsg::Join { .. } => return Err(err(ErrorCode::BadMessage)),
             }

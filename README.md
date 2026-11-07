@@ -42,7 +42,7 @@ Because of the HTTP/3-only data path:
 
 - **No WebSockets.** WebSocket is defined over an HTTP/1.1 upgrade and has no HTTP/3 variant. The modern replacement — the one that rides on HTTP/3 natively — is **WebTransport** (RFC 9220 / W3C WebTransport API): bidirectional streams *and* unordered datagrams on top of QUIC. Browsers expose it as `new WebTransport("https://host/wt")`. Call signaling is just another message type on this channel — no separate signaling protocol or port.
 - **TLS is mandatory** (QUIC is always TLS 1.3, and browsers only allow WebRTC + WebTransport in secure contexts). Certificate handling is part of the design ([§15](#15-hosting--operations)).
-- **The UDP socket carries two protocols** — QUIC and STUN — demultiplexed by first byte ([§6.2](#62-nat-traversal-everything-fits-in-443-tcpudp)).
+- **The UDP socket carries two protocols** — QUIC and STUN — demultiplexed by STUN header validation (magic cookie; a GREASE'd QUIC 1-RTT packet may carry any first byte below 0x80, so the first byte alone cannot disambiguate) ([§6.2](#62-nat-traversal-everything-fits-in-443-tcpudp)).
 - Health checks and curl-based debugging need `curl --http3`.
 - **Honest limitation:** a network that blocks UDP entirely cannot use the app at all — QUIC itself is UDP, and so is the SSE fallback. The TCP port saves *media* on networks that allow 443/TCP but not P2P media; it does not make the app reachable without UDP. That is the inherent price of "HTTP/3 only", accepted by design.
 
@@ -203,7 +203,7 @@ Every call participant holds one `RTCPeerConnection` per other participant. Audi
 | Layer | Where it lives | Notes |
 |---|---|---|
 | P2P media | browser ↔ browser, client-ephemeral UDP | The common path; the server is not involved |
-| STUN (reflexive candidates) | **443/UDP, co-located with QUIC** | Small in-process responder. Demux by first byte: every QUIC packet has first byte ≥ 0x40 (short header `10xxxxxx`, long header `01xxxxxx`), while STUN messages (RFC 5389) start with 0x00/0x01 — unambiguous. A ~200-line `AsyncUdpSocket` proxy feeds QUIC packets to quinn and answers STUN Binding itself |
+| STUN (reflexive candidates) | **443/UDP, co-located with QUIC** | Small in-process responder. Demux by STUN header: a datagram that parses as a STUN message (message type + magic cookie, RFC 5389) is answered here, everything else is QUIC. The first byte alone cannot disambiguate — a GREASE'd (RFC 9287) QUIC 1-RTT packet may carry any first byte below 0x80, including the 0x00/0x01 STUN classes. A ~200-line `AsyncUdpSocket` proxy feeds QUIC packets to quinn and answers STUN Binding itself |
 | TURN (relay fallback) | **443/TCP**, TLS (`turns:`, RFC 7065) | Embedded **turn-rs** (pure Rust; RFC 5766/6062/8489; actively maintained, v4.x). The relay leg toward the peer is UDP *outbound* from the server — no extra port |
 
 What that buys us:

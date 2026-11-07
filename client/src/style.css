@@ -264,3 +264,292 @@ body {
   padding: 0 0.9rem;
   cursor: pointer;
 }
+
+/* --- status panel: call button + target picker (README §6.3) ------------- */
+
+.status-call-btn {
+  pointer-events: auto;
+  font: inherit;
+  font-size: 0.85rem;
+  background: #1a1d22;
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 0.2rem 0.5rem;
+  cursor: pointer;
+}
+
+.status-call-btn:hover {
+  border-color: var(--accent);
+}
+
+.status-call-list {
+  pointer-events: auto;
+  position: absolute;
+  top: 100%;
+  right: 0;
+  margin-top: 4px;
+  min-width: 140px;
+  max-height: 220px;
+  overflow-y: auto;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 0.3rem;
+  display: grid;
+  gap: 0.2rem;
+  z-index: 5;
+}
+
+.status-call-user {
+  font: inherit;
+  font-size: 0.8rem;
+  text-align: left;
+  color: var(--text);
+  background: #1a1d22;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  padding: 0.35rem 0.55rem;
+  cursor: pointer;
+}
+
+.status-call-user:hover {
+  border-color: var(--accent);
+}
+
+.status-call-empty {
+  font-size: 0.75rem;
+  color: var(--muted);
+  font-style: italic;
+  padding: 0.2rem 0.3rem;
+}
+
+/* --- call UI (README §6.3) ------------------------------------------------ */
+
+.call {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+/* incoming: centered card over a dimmed backdrop */
+.call-incoming {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  background: rgba(0, 0, 0, 0.45);
+  pointer-events: auto;
+}
+
+.call-incoming-card {
+  width: min(320px, 90vw);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  padding: 1.4rem;
+  text-align: center;
+  display: grid;
+  gap: 0.5rem;
+}
+
+.call-incoming-icon {
+  font-size: 2.4rem;
+  animation: call-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes call-pulse {
+  0%,
+  100% {
+    transform: scale(1);
+  }
+  50% {
+    transform: scale(1.15);
+  }
+}
+
+.call-incoming-name {
+  font-size: 1.15rem;
+  font-weight: 700;
+}
+
+.call-incoming-sub {
+  color: var(--muted);
+  font-size: 0.85rem;
+  margin-bottom: 0.4rem;
+}
+
+.call-incoming-actions {
+  display: flex;
+  gap: 0.6rem;
+  justify-content: center;
+}
+
+.call-incoming-actions button {
+  font: inherit;
+  font-size: 0.9rem;
+  font-weight: 600;
+  border-radius: 10px;
+  padding: 0.5rem 1.2rem;
+  cursor: pointer;
+  border: none;
+}
+
+.call-accept {
+  background: #4d9e57;
+  color: #fff;
+}
+
+.call-decline {
+  background: #8a3b3b;
+  color: #fff;
+}
+
+/* outgoing: small toast, top center */
+.call-outgoing {
+  position: absolute;
+  top: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 0.45rem 0.7rem;
+  font-size: 0.85rem;
+  pointer-events: auto;
+}
+
+.call-cancel {
+  font: inherit;
+  font-size: 0.8rem;
+  background: #8a3b3b;
+  color: #fff;
+  border: none;
+  border-radius: 8px;
+  padding: 0.25rem 0.7rem;
+  cursor: pointer;
+}
+
+/* in-call panel: right side, under the status panel */
+.call-panel {
+  position: absolute;
+  top: 118px;
+  right: 12px;
+  width: min(280px, calc(100vw - 24px));
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  overflow: hidden;
+  display: grid;
+  gap: 0.4rem;
+  padding: 0.5rem;
+  pointer-events: auto;
+}
+
+.call-panel-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 0.5rem;
+}
+
+.call-peer-name {
+  font-weight: 700;
+  font-size: 0.9rem;
+}
+
+.call-peer-state {
+  color: var(--muted);
+  font-size: 0.72rem;
+}
+
+.call-panel[data-state="connected"] .call-peer-state {
+  color: #58a858;
+}
+
+.call-panel[data-state="failed"] .call-peer-state {
+  color: #e06060;
+}
+
+.call-video-wrap {
+  position: relative;
+  aspect-ratio: 16 / 9;
+  background: #000;
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.call-remote-video {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  display: block;
+}
+
+.call-remote-video.speaking {
+  outline: 3px solid #4d9e57;
+  outline-offset: -3px;
+}
+
+.call-local-video {
+  position: absolute;
+  right: 6px;
+  bottom: 6px;
+  width: 34%;
+  aspect-ratio: 16 / 9;
+  object-fit: cover;
+  border-radius: 6px;
+  border: 1px solid var(--line);
+  transform: scaleX(-1);
+}
+
+.call-badge {
+  position: absolute;
+  top: 6px;
+  font-size: 0.68rem;
+  background: rgba(0, 0, 0, 0.65);
+  border-radius: 6px;
+  padding: 0.15rem 0.45rem;
+}
+
+.call-badge-mute {
+  left: 6px;
+}
+
+.call-badge-cam {
+  left: 88px;
+}
+
+.call-controls {
+  display: flex;
+  justify-content: center;
+  gap: 0.5rem;
+}
+
+.call-btn {
+  font-size: 1rem;
+  width: 44px;
+  height: 40px;
+  background: #1a1d22;
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  cursor: pointer;
+}
+
+.call-btn:hover {
+  border-color: var(--accent);
+}
+
+.call-btn.off {
+  background: #3a2020;
+  border-color: #8a3b3b;
+}
+
+.call-hangup {
+  background: #8a3b3b !important;
+  border-color: #8a3b3b !important;
+}

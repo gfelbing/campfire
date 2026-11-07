@@ -1,6 +1,8 @@
 // Campfire client entry point: boot overlay → map load → Pixi world →
 // realtime connection → game loop (README §8).
 
+import { CallManager } from "./call/manager";
+import { createCallUI } from "./call/callui";
 import { attachKeys, desiredVelocity } from "./input/keys";
 import { Connection } from "./net/connection";
 import type { ChatMsg, Dir, MovementBatch, UserBrief } from "./net/types";
@@ -43,6 +45,14 @@ async function main(): Promise<void> {
   let myId = "";
   let chat: ChatUI | null = null;
 
+  // Room roster (id → brief): drives the call-target picker (README §6.3).
+  const roster = new Map<string, UserBrief>();
+  const updateCallTargets = (): void => {
+    status.setCallTargets(
+      [...roster.values()].filter((u) => u.id !== myId),
+    );
+  };
+
   const conn = new Connection(opts.room, opts.name, opts.color, {
     onHello: (h) => {
       myId = h.you;
@@ -52,29 +62,68 @@ async function main(): Promise<void> {
         y = me.y;
         dir = me.d;
       }
+      roster.clear();
+      for (const u of h.users) roster.set(u.id, u);
       world.local.setDir(dir);
       world.manager.hello(h.users, h.you);
       chat?.history(h.chat, h.you);
       status.setUsers(h.users.length);
+      manager.setSelfId(h.you);
+      updateCallTargets();
     },
     onJoined: (u: UserBrief) => {
       world.manager.joined(u);
+      roster.set(u.id, u);
       status.bumpUsers(1);
+      updateCallTargets();
     },
     onLeft: (id) => {
       world.manager.left(id);
+      roster.delete(id);
       status.bumpUsers(-1);
+      updateCallTargets();
     },
     onChat: (c: ChatMsg) => chat?.add(c, myId),
     onTyping: (id, on) => chat?.typing(id, on),
     onMovement: (batch: MovementBatch) => world.manager.movement(batch.m),
+    // Call signaling (README §5/§6): the manager owns the state machine.
+    onCallRing: (from, name) => manager.onCallRing(from, name),
+    onCallStart: (ps) => manager.onCallStart(ps),
+    onCallJoin: (u) => manager.onCallJoin(u),
+    onCallLeave: (id) => manager.onCallLeave(id),
+    onCallEnd: (reason) => manager.onCallEnd(reason),
+    onCallOffer: (from, sdp) => manager.onCallOffer(from, sdp),
+    onCallAnswer: (from, sdp) => manager.onCallAnswer(from, sdp),
+    onCallIce: (from, c) => manager.onCallIce(from, c),
+    onCallMute: (id, a, v) => manager.onCallMute(id, a, v),
     onError: (code) => chat?.system(`server error: ${code}`),
-    onStatus: (s) => status.setConn(s),
+    onStatus: (s) => {
+      status.setConn(s);
+      // The server drops us from the call when the session ends; we cannot
+      // hear `call_end` over a dead link, so tear down locally (README §6.3).
+      if (s !== "connected") manager.onConnectionDown();
+    },
   });
 
   const ui = document.getElementById("ui")!;
   chat = createChat(ui, (t) => conn.sendChat(t), (on) => conn.sendTyping(on));
-  const status = createStatus(ui);
+  const callUI = createCallUI(ui, {
+    onAccept: () => void manager.accept(),
+    onDecline: () => manager.decline(),
+    onHangup: () => manager.hangup(),
+    onToggleMute: () => manager.toggleMute(),
+    onToggleCamera: () => manager.toggleCamera(),
+  });
+  const manager = new CallManager(conn, {
+    onPhase: (ph) => callUI.setPhase(ph),
+    onLocalStream: (s) => callUI.setLocalStream(s),
+    onRemoteStream: (s) => callUI.setRemoteStream(s),
+    onPeerState: (st, viaRelay) => callUI.setPeerState(st, viaRelay),
+    onPeerMute: (a, v) => callUI.setPeerMute(a, v),
+    onLocalMute: (a, v) => callUI.setLocalMute(a, v),
+    onLog: (t) => chat?.system(t),
+  });
+  const status = createStatus(ui, (u) => void manager.ring(u));
   status.setRoom(opts.room);
 
   // Game loop: integrate local movement, draw, send at ≤10 Hz.

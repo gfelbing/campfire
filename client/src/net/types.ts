@@ -32,7 +32,10 @@ export type ErrorCode =
   | "name_too_long"
   | "chat_too_long"
   | "room_too_long"
-  | "unknown_room";
+  | "unknown_room"
+  | "call_not_allowed"
+  | "sdp_too_long"
+  | "candidate_too_long";
 
 // --- server → client -------------------------------------------------------
 
@@ -42,6 +45,15 @@ export type ServerMsg =
   | { t: "left"; id: string }
   | { t: "chat"; from: string; name: string; text: string; ts: number }
   | { t: "typing"; id: string; on: boolean }
+  | { t: "call_ring"; from: string; name: string }
+  | { t: "call_start"; room: string; participants: UserBrief[] }
+  | { t: "call_join"; user: UserBrief }
+  | { t: "call_leave"; id: string }
+  | { t: "call_end"; reason: string }
+  | { t: "call_offer"; from: string; sdp: string }
+  | { t: "call_answer"; from: string; sdp: string }
+  | { t: "call_ice"; from: string; candidate: string }
+  | { t: "call_mute"; id: string; audio: boolean; video: boolean }
   | { t: "error"; code: ErrorCode };
 
 // --- client → server -------------------------------------------------------
@@ -49,7 +61,16 @@ export type ServerMsg =
 export type ClientMsg =
   | { t: "join"; room: string; name: string; avatar?: { color: string } }
   | { t: "chat"; text: string }
-  | { t: "typing"; on: boolean };
+  | { t: "typing"; on: boolean }
+  | { t: "call_ring"; to: string }
+  | { t: "call_ring_stop"; to: string }
+  | { t: "call_accept"; to: string }
+  | { t: "call_decline"; to: string }
+  | { t: "call_offer"; to: string; sdp: string }
+  | { t: "call_answer"; to: string; sdp: string }
+  | { t: "call_ice"; to: string; candidate: string }
+  | { t: "call_mute"; audio: boolean; video: boolean }
+  | { t: "call_leave" };
 
 // --- datagrams -------------------------------------------------------------
 

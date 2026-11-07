@@ -31,10 +31,28 @@ pub struct Config {
     /// compile-time embed (dev loop: `vite build --watch` + server).
     #[arg(long)]
     pub static_dir: Option<PathBuf>,
+
+    /// TURN REST shared secret (README §6.2). Clients fetch per-user
+    /// credentials from `POST /api/v1/turn/credential`. When omitted, a
+    /// random secret is generated at startup (logged once) — relay
+    /// credentials then reset on every restart.
+    #[arg(long)]
+    pub turn_secret: Option<String>,
+
+    /// Externally visible address of this server, advertised by the TURN
+    /// server for relayed allocations. Defaults to `listen` (correct for
+    /// dev; set behind a NAT/firewall).
+    #[arg(long)]
+    pub external: Option<SocketAddr>,
 }
 
 impl Config {
     pub fn idle_timeout(&self) -> Duration {
         Duration::from_secs(self.idle_timeout_secs)
+    }
+
+    /// Address to advertise to peers (`--external` or `listen`).
+    pub fn external_addr(&self) -> SocketAddr {
+        self.external.unwrap_or(self.listen)
     }
 }

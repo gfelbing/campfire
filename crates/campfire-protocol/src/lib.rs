@@ -19,6 +19,13 @@ use thiserror::Error;
 /// Marker documenting the wire encoding used across the protocol.
 pub const WIRE_ENCODING: &str = "ndjson";
 
+/// Relay cap for SDP payloads (README §5: SDP is a few KB).
+pub const MAX_SDP_BYTES: usize = 64 * 1024;
+/// Relay cap for one ICE candidate (README §5: a few hundred bytes).
+pub const MAX_CANDIDATE_BYTES: usize = 1024;
+/// `call_offer.to` value that means "join the room huddle" (Phase 6).
+pub const ROOM_TARGET: &str = "room";
+
 /// Direction an avatar faces.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Dir {
@@ -83,6 +90,13 @@ pub enum ErrorCode {
     RoomTooLong,
     /// Room id is not a known map.
     UnknownRoom,
+    /// Call signaling state violation: not in the room together, sender
+    /// not a participant, or a call is already in progress (README §5/§6).
+    CallNotAllowed,
+    /// SDP payload exceeds the 64 KB relay cap (README §5).
+    SdpTooLong,
+    /// ICE candidate exceeds the 1 KB relay cap (README §5).
+    CandidateTooLong,
 }
 
 /// Client → server, reliable stream.
@@ -101,6 +115,47 @@ pub enum ClientMsg {
     Typing {
         on: bool,
     },
+    /// 1:1: start ringing `to` (must be in the same room). Phase 5.
+    CallRing {
+        to: String,
+    },
+    /// 1:1: cancel a ringing call to `to` before it is answered.
+    CallRingStop {
+        to: String,
+    },
+    /// Callee accepts the ring from `to`; the caller then creates the offer.
+    CallAccept {
+        to: String,
+    },
+    /// Callee declines the ring from `to`.
+    CallDecline {
+        to: String,
+    },
+    /// Relay one SDP offer. `to` is a user id, or `"room"` to join a room
+    /// huddle (Phase 6).
+    CallOffer {
+        to: String,
+        sdp: String,
+    },
+    /// Relay one SDP answer to `to`.
+    CallAnswer {
+        to: String,
+        sdp: String,
+    },
+    /// Relay one ICE candidate to `to` (the candidate is the peer's
+    /// serialized candidate, JSON-encoded by the client).
+    CallIce {
+        to: String,
+        candidate: String,
+    },
+    /// Presence: the sender's mute/camera state flipped (track.enabled).
+    /// Broadcast to every other call participant.
+    CallMute {
+        audio: bool,
+        video: bool,
+    },
+    /// Leave the current call (1:1 or huddle).
+    CallLeave,
 }
 
 /// Server → client, reliable stream.
@@ -128,6 +183,50 @@ pub enum ServerMsg {
     Typing {
         id: String,
         on: bool,
+    },
+    /// 1:1: `from` is ringing you.
+    CallRing {
+        from: String,
+        name: String,
+    },
+    /// A call just started: everyone in it gets the full participant list.
+    CallStart {
+        room: String,
+        participants: Vec<UserBrief>,
+    },
+    /// Someone joined an ongoing call (huddle; Phase 6).
+    CallJoin {
+        user: UserBrief,
+    },
+    /// A participant left an ongoing call.
+    CallLeave {
+        id: String,
+    },
+    /// The call is over. `reason` is one of `last_left`, `canceled`,
+    /// `declined`, `hangup` (README §5).
+    CallEnd {
+        reason: String,
+    },
+    /// Relayed SDP offer from `from`.
+    CallOffer {
+        from: String,
+        sdp: String,
+    },
+    /// Relayed SDP answer from `from`.
+    CallAnswer {
+        from: String,
+        sdp: String,
+    },
+    /// Relayed ICE candidate from `from`.
+    CallIce {
+        from: String,
+        candidate: String,
+    },
+    /// `id`'s mute/camera state changed.
+    CallMute {
+        id: String,
+        audio: bool,
+        video: bool,
     },
     Error {
         code: ErrorCode,

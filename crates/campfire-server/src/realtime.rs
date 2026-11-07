@@ -328,6 +328,62 @@ fn dispatch(
             world.broadcast_typing(&room, &id, on);
             true
         }
+        // Call signaling (README §5): the world validates (same room, sender
+        // involved, size caps); errors go back as `error` messages.
+        Ok(ClientMsg::CallRing { to }) => {
+            let Some((room, id, _)) = session.clone() else {
+                return send(tx, ErrorCode::BadMessage);
+            };
+            call_result(world.call_ring(&room, &id, &to), tx)
+        }
+        Ok(ClientMsg::CallRingStop { to }) => {
+            let Some((room, id, _)) = session.clone() else {
+                return send(tx, ErrorCode::BadMessage);
+            };
+            call_result(world.call_ring_stop(&room, &id, &to), tx)
+        }
+        Ok(ClientMsg::CallAccept { to }) => {
+            let Some((room, id, _)) = session.clone() else {
+                return send(tx, ErrorCode::BadMessage);
+            };
+            call_result(world.call_accept(&room, &id, &to), tx)
+        }
+        Ok(ClientMsg::CallDecline { to }) => {
+            let Some((room, id, _)) = session.clone() else {
+                return send(tx, ErrorCode::BadMessage);
+            };
+            call_result(world.call_decline(&room, &id, &to), tx)
+        }
+        Ok(ClientMsg::CallOffer { to, sdp }) => {
+            let Some((room, id, _)) = session.clone() else {
+                return send(tx, ErrorCode::BadMessage);
+            };
+            call_result(world.call_relay_offer(&room, &id, &to, sdp), tx)
+        }
+        Ok(ClientMsg::CallAnswer { to, sdp }) => {
+            let Some((room, id, _)) = session.clone() else {
+                return send(tx, ErrorCode::BadMessage);
+            };
+            call_result(world.call_relay_answer(&room, &id, &to, sdp), tx)
+        }
+        Ok(ClientMsg::CallIce { to, candidate }) => {
+            let Some((room, id, _)) = session.clone() else {
+                return send(tx, ErrorCode::BadMessage);
+            };
+            call_result(world.call_relay_ice(&room, &id, &to, candidate), tx)
+        }
+        Ok(ClientMsg::CallMute { audio, video }) => {
+            let Some((room, id, _)) = session.clone() else {
+                return send(tx, ErrorCode::BadMessage);
+            };
+            call_result(world.call_mute(&room, &id, audio, video), tx)
+        }
+        Ok(ClientMsg::CallLeave) => {
+            let Some((room, id, _)) = session.clone() else {
+                return send(tx, ErrorCode::BadMessage);
+            };
+            call_result(world.call_leave(&room, &id), tx)
+        }
         Err(_err) => send(tx, ErrorCode::BadMessage),
     }
 }
@@ -343,6 +399,14 @@ pub(crate) fn valid_room(room: &str) -> bool {
 /// Send one `error` message; `false` means the client is gone.
 fn send(tx: &mpsc::UnboundedSender<ServerMsg>, code: ErrorCode) -> bool {
     tx.send(ServerMsg::Error { code }).is_ok()
+}
+
+/// A world call-method result as a dispatch return value.
+fn call_result(result: Result<(), ErrorCode>, tx: &mpsc::UnboundedSender<ServerMsg>) -> bool {
+    match result {
+        Ok(()) => true,
+        Err(code) => send(tx, code),
+    }
 }
 
 /// Seconds since the Unix epoch (0 if the clock is before 1970 — harmless).

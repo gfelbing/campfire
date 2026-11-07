@@ -6,13 +6,16 @@
 //! movement datagram per room (README §5); per-room owner tasks from README §7
 //! are the next step if the lock ever shows up in a profile.
 
+pub mod call;
+
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use campfire_protocol::{
-    Avatar, ChatMsg, Dir, MovementBatch, MovementEntry, ServerMsg, UserBrief, UserState,
+    Avatar, ChatMsg, Dir, ErrorCode, MAX_CANDIDATE_BYTES, MAX_SDP_BYTES, MovementBatch,
+    MovementEntry, ServerMsg, UserBrief, UserState,
 };
 use rand::RngCore;
 
@@ -55,11 +58,13 @@ struct Member {
     dtx: tokio::sync::mpsc::UnboundedSender<Vec<u8>>,
 }
 
-/// One room (one map): presence + chat history.
+/// One room (one map): presence + chat history + the in-flight call, if any.
 #[derive(Default)]
 struct Room {
     users: HashMap<UserId, Member>,
     chat: VecDeque<ChatMsg>,
+    /// The room's call (README §7): at most one per room in v1.
+    call: Option<call::Call>,
 }
 
 /// Why a join was refused.
@@ -186,13 +191,16 @@ impl World {
         Ok(joined)
     }
 
-    /// Remove a user from their room and tell everyone left inside.
+    /// Remove a user from their room and tell everyone left inside. A call
+    /// involving the leaver drops (README §6.3): the leaver is not notified,
+    /// they are gone.
     pub fn leave(&self, room: &str, id: &str) {
         let mut rooms = self.rooms.lock().unwrap();
         let Some(entry) = rooms.get_mut(room) else {
             return;
         };
         if entry.users.remove(id).is_some() {
+            leave_call(entry, id);
             for m in entry.users.values() {
                 let _ = m.tx.send(ServerMsg::Left { id: id.to_owned() });
             }
@@ -321,6 +329,289 @@ impl World {
         }
     }
 
+    // -------------------------------------------------------------------
+    // Call signaling (README §5/§6): the server relays between members of
+    // the same room/call and tracks who is in which call. It never sees
+    // media. `room` is always the sender's room, so cross-room signaling
+    // cannot reach another room's state.
+    // -------------------------------------------------------------------
+
+    /// Start ringing `to` from `from`. At most one call may be in flight or
+    /// active in the room (README §7: one `Call` per room).
+    pub fn call_ring(&self, room: &str, from: &str, to: &str) -> Result<(), ErrorCode> {
+        let mut rooms = self.rooms.lock().unwrap();
+        let Some(entry) = rooms.get_mut(room) else {
+            return Err(ErrorCode::CallNotAllowed);
+        };
+        if to == from || !entry.users.contains_key(to) {
+            return Err(ErrorCode::CallNotAllowed);
+        }
+        let caller_name = entry
+            .users
+            .get(from)
+            .map(|m| m.name.clone())
+            .ok_or(ErrorCode::CallNotAllowed)?;
+        if entry.call.is_some() {
+            return Err(ErrorCode::CallNotAllowed);
+        }
+        entry.call = Some(call::Call::new_one_to_one(from.to_owned(), to.to_owned()));
+        if let Some(m) = entry.users.get(to) {
+            let _ = m.tx.send(ServerMsg::CallRing {
+                from: from.to_owned(),
+                name: caller_name,
+            });
+        }
+        Ok(())
+    }
+
+    /// The caller cancels a ring that has not been answered yet.
+    pub fn call_ring_stop(&self, room: &str, from: &str, to: &str) -> Result<(), ErrorCode> {
+        let mut rooms = self.rooms.lock().unwrap();
+        let Some(entry) = rooms.get_mut(room) else {
+            return Err(ErrorCode::CallNotAllowed);
+        };
+        let callee = entry
+            .call
+            .as_ref()
+            .and_then(|c| c.ringing.clone())
+            .filter(|(a, b)| a == from && b == to)
+            .map(|(_, b)| b)
+            .ok_or(ErrorCode::CallNotAllowed)?;
+        entry.call = None;
+        if let Some(m) = entry.users.get(&callee) {
+            let _ = m.tx.send(ServerMsg::CallEnd {
+                reason: "canceled".to_owned(),
+            });
+        }
+        Ok(())
+    }
+
+    /// The callee accepts: both become participants and hear `call_start`.
+    /// The caller then creates the offer (WebRTC: the one who speaks first
+    /// to an answer must be the one who rang).
+    pub fn call_accept(&self, room: &str, from: &str, to: &str) -> Result<(), ErrorCode> {
+        let mut rooms = self.rooms.lock().unwrap();
+        let Some(entry) = rooms.get_mut(room) else {
+            return Err(ErrorCode::CallNotAllowed);
+        };
+        // `from` must be the callee, `to` the caller of the in-flight ring.
+        let is_ringing = entry
+            .call
+            .as_ref()
+            .and_then(|c| c.ringing.clone())
+            .is_some_and(|(caller, callee)| caller == to && callee == from);
+        if !is_ringing {
+            return Err(ErrorCode::CallNotAllowed);
+        }
+        let name_from = entry
+            .users
+            .get(from)
+            .map(|m| m.name.clone())
+            .unwrap_or_default();
+        let name_to = entry
+            .users
+            .get(to)
+            .map(|m| m.name.clone())
+            .unwrap_or_default();
+        let call = entry.call.as_mut().expect("checked above");
+        call.ringing = None;
+        call.participants.insert(
+            from.to_owned(),
+            (
+                name_from,
+                call::ParticipantFlags {
+                    audio: true,
+                    video: true,
+                },
+            ),
+        );
+        call.participants.insert(
+            to.to_owned(),
+            (
+                name_to,
+                call::ParticipantFlags {
+                    audio: true,
+                    video: true,
+                },
+            ),
+        );
+        let participants = call.participant_list();
+        for id in [from, to] {
+            if let Some(m) = entry.users.get(id) {
+                let _ = m.tx.send(ServerMsg::CallStart {
+                    room: room.to_owned(),
+                    participants: participants.clone(),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// The callee declines the ring.
+    pub fn call_decline(&self, room: &str, from: &str, to: &str) -> Result<(), ErrorCode> {
+        let mut rooms = self.rooms.lock().unwrap();
+        let Some(entry) = rooms.get_mut(room) else {
+            return Err(ErrorCode::CallNotAllowed);
+        };
+        let caller = entry
+            .call
+            .as_ref()
+            .and_then(|c| c.ringing.clone())
+            .filter(|(a, b)| a == to && b == from)
+            .map(|(a, _)| a)
+            .ok_or(ErrorCode::CallNotAllowed)?;
+        entry.call = None;
+        if let Some(m) = entry.users.get(&caller) {
+            let _ = m.tx.send(ServerMsg::CallEnd {
+                reason: "declined".to_owned(),
+            });
+        }
+        Ok(())
+    }
+
+    /// Relay an SDP offer between two participants of the room's active call.
+    pub fn call_relay_offer(
+        &self,
+        room: &str,
+        from: &str,
+        to: &str,
+        sdp: String,
+    ) -> Result<(), ErrorCode> {
+        if sdp.len() > MAX_SDP_BYTES {
+            return Err(ErrorCode::SdpTooLong);
+        }
+        let rooms = self.rooms.lock().unwrap();
+        let Some(entry) = rooms.get(room) else {
+            return Err(ErrorCode::CallNotAllowed);
+        };
+        let target = call_target(entry, from, to)?;
+        let _ = target.tx.send(ServerMsg::CallOffer {
+            from: from.to_owned(),
+            sdp,
+        });
+        Ok(())
+    }
+
+    /// Relay an SDP answer between two participants of the room's active call.
+    pub fn call_relay_answer(
+        &self,
+        room: &str,
+        from: &str,
+        to: &str,
+        sdp: String,
+    ) -> Result<(), ErrorCode> {
+        if sdp.len() > MAX_SDP_BYTES {
+            return Err(ErrorCode::SdpTooLong);
+        }
+        let rooms = self.rooms.lock().unwrap();
+        let Some(entry) = rooms.get(room) else {
+            return Err(ErrorCode::CallNotAllowed);
+        };
+        let target = call_target(entry, from, to)?;
+        let _ = target.tx.send(ServerMsg::CallAnswer {
+            from: from.to_owned(),
+            sdp,
+        });
+        Ok(())
+    }
+
+    /// Relay one ICE candidate between two participants of the active call.
+    pub fn call_relay_ice(
+        &self,
+        room: &str,
+        from: &str,
+        to: &str,
+        candidate: String,
+    ) -> Result<(), ErrorCode> {
+        if candidate.len() > MAX_CANDIDATE_BYTES {
+            return Err(ErrorCode::CandidateTooLong);
+        }
+        let rooms = self.rooms.lock().unwrap();
+        let Some(entry) = rooms.get(room) else {
+            return Err(ErrorCode::CallNotAllowed);
+        };
+        let target = call_target(entry, from, to)?;
+        let _ = target.tx.send(ServerMsg::CallIce {
+            from: from.to_owned(),
+            candidate,
+        });
+        Ok(())
+    }
+
+    /// The sender's mute/camera state flipped; broadcast to the other call
+    /// participants (presence only, README §6.3 — no renegotiation).
+    pub fn call_mute(
+        &self,
+        room: &str,
+        from: &str,
+        audio: bool,
+        video: bool,
+    ) -> Result<(), ErrorCode> {
+        let mut rooms = self.rooms.lock().unwrap();
+        let Some(entry) = rooms.get_mut(room) else {
+            return Err(ErrorCode::CallNotAllowed);
+        };
+        {
+            let call = entry.call.as_mut().ok_or(ErrorCode::CallNotAllowed)?;
+            let flags = call
+                .participants
+                .get_mut(from)
+                .ok_or(ErrorCode::CallNotAllowed)?;
+            flags.1 = call::ParticipantFlags { audio, video };
+        }
+        let call = entry.call.as_ref().expect("checked above");
+        for (uid, m) in &entry.users {
+            if uid != from && call.participants.contains_key(uid) {
+                let _ = m.tx.send(ServerMsg::CallMute {
+                    id: from.to_owned(),
+                    audio,
+                    video,
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// Hang up: the sender leaves the room's call (or cancels their ring).
+    pub fn call_leave(&self, room: &str, from: &str) -> Result<(), ErrorCode> {
+        let mut rooms = self.rooms.lock().unwrap();
+        let Some(entry) = rooms.get_mut(room) else {
+            return Err(ErrorCode::CallNotAllowed);
+        };
+        let ringing = entry.call.as_ref().and_then(|c| c.ringing.clone());
+        match ringing {
+            // Caller hangs up while ringing.
+            Some((caller, callee)) if from == caller => {
+                entry.call = None;
+                if let Some(m) = entry.users.get(&callee) {
+                    let _ = m.tx.send(ServerMsg::CallEnd {
+                        reason: "canceled".to_owned(),
+                    });
+                }
+            }
+            // Callee hangs up while ringing: a decline.
+            Some((caller, callee)) if from == callee => {
+                entry.call = None;
+                if let Some(m) = entry.users.get(&caller) {
+                    let _ = m.tx.send(ServerMsg::CallEnd {
+                        reason: "declined".to_owned(),
+                    });
+                }
+            }
+            _ => {
+                let involved = entry
+                    .call
+                    .as_ref()
+                    .is_some_and(|c| c.participants.contains_key(from));
+                if !involved {
+                    return Err(ErrorCode::CallNotAllowed);
+                }
+                leave_call(entry, from);
+            }
+        }
+        Ok(())
+    }
+
     /// Snapshot of the active rooms for `GET /api/v1/rooms`.
     pub fn rooms_list(&self) -> Vec<RoomInfo> {
         let rooms = self.rooms.lock().unwrap();
@@ -354,6 +645,59 @@ pub fn start_ticking(world: World) -> tokio::task::JoinHandle<()> {
             world.tick();
         }
     })
+}
+
+/// Find the relay target of a call message: both `from` and `to` must be
+/// participants of the room's active call (which implicitly rejects ringing
+/// state, non-members, and the `"room"` huddle target — Phase 6).
+fn call_target<'a>(entry: &'a Room, from: &str, to: &str) -> Result<&'a Member, ErrorCode> {
+    let call = entry.call.as_ref().ok_or(ErrorCode::CallNotAllowed)?;
+    if !call.participants.contains_key(from) || !call.participants.contains_key(to) {
+        return Err(ErrorCode::CallNotAllowed);
+    }
+    entry.users.get(to).ok_or(ErrorCode::CallNotAllowed)
+}
+
+/// Drop `id` from the room's call, if any, and tell the rest (README §6.3).
+/// Used when the leaver is gone and cannot be notified: a ring in flight
+/// ends for the other side, an active 1:1 ends with `last_left` for the
+/// survivor, a huddle just loses a participant.
+fn leave_call(entry: &mut Room, id: &str) {
+    let ringing = entry.call.as_ref().and_then(|c| c.ringing.clone());
+    if let Some((caller, callee)) = ringing {
+        if id == caller || id == callee {
+            let other = if id == caller { callee } else { caller };
+            entry.call = None;
+            if let Some(m) = entry.users.get(&other) {
+                let _ = m.tx.send(ServerMsg::CallEnd {
+                    reason: "canceled".to_owned(),
+                });
+            }
+        }
+        // Ringing someone else: untouched.
+        return;
+    }
+    let Some(mut call) = entry.call.take() else {
+        return;
+    };
+    if call.participants.remove(id).is_some() {
+        let end = call.kind == call::CallKind::OneToOne && call.participants.len() < 2;
+        for (uid, m) in &entry.users {
+            if call.participants.contains_key(uid) {
+                let _ = if end {
+                    m.tx.send(ServerMsg::CallEnd {
+                        reason: "last_left".to_owned(),
+                    })
+                } else {
+                    m.tx.send(ServerMsg::CallLeave { id: id.to_owned() })
+                };
+            }
+        }
+        if end || call.participants.is_empty() {
+            return; // the call is over
+        }
+    }
+    entry.call = Some(call);
 }
 
 /// Split a room's dirty entries into datagram-sized JSON batches: encode all
@@ -639,5 +983,250 @@ mod tests {
             rx_b.try_recv().unwrap(),
             ServerMsg::Typing { on: true, .. }
         ));
+    }
+
+    // -- calls (README §5/§6) -------------------------------------------
+
+    /// A joined test user, keeping its outbound stream receiver.
+    struct TestUser {
+        id: String,
+        rx: tokio::sync::mpsc::UnboundedReceiver<ServerMsg>,
+    }
+
+    fn join_user(world: &World, room: &str, name: &str) -> TestUser {
+        let (tx, rx) = channel();
+        let (dtx, _dgr) = datagram_channel();
+        let joined = world.join(room, name, None, tx, dtx).unwrap();
+        TestUser { id: joined.you, rx }
+    }
+
+    fn start_call(world: &World, a: &mut TestUser, b: &mut TestUser) {
+        a.rx.try_recv().unwrap(); // alice hears bob join
+        world.call_ring("office", &a.id, &b.id).unwrap();
+        b.rx.try_recv().unwrap(); // bob hears the ring
+        world.call_accept("office", &b.id, &a.id).unwrap();
+        a.rx.try_recv().unwrap();
+        b.rx.try_recv().unwrap();
+    }
+
+    #[test]
+    fn call_ring_reaches_the_callee_only() {
+        let world = World::new();
+        let mut a = join_user(&world, "office", "alice");
+        let mut b = join_user(&world, "office", "bob");
+        a.rx.try_recv().unwrap(); // alice hears bob join
+
+        world.call_ring("office", &a.id, &b.id).unwrap();
+        match b.rx.try_recv().unwrap() {
+            ServerMsg::CallRing { from, name } => {
+                assert_eq!(from, a.id);
+                assert_eq!(name, "alice");
+            }
+            other => panic!("expected call_ring, got {other:?}"),
+        }
+        assert!(a.rx.try_recv().is_err(), "caller must not get an echo");
+
+        // A second ring is rejected while one is in flight (one call per room).
+        let c = join_user(&world, "office", "carol");
+        a.rx.try_recv().unwrap();
+        b.rx.try_recv().unwrap();
+        assert_eq!(
+            world.call_ring("office", &c.id, &a.id),
+            Err(ErrorCode::CallNotAllowed)
+        );
+
+        // Only the caller can cancel; the callee declines instead.
+        assert_eq!(
+            world.call_ring_stop("office", &b.id, &a.id),
+            Err(ErrorCode::CallNotAllowed)
+        );
+        world.call_ring_stop("office", &a.id, &b.id).unwrap();
+        match b.rx.try_recv().unwrap() {
+            ServerMsg::CallEnd { reason } => assert_eq!(reason, "canceled"),
+            other => panic!("expected call_end, got {other:?}"),
+        }
+
+        // The room is free again: a new ring works.
+        world.call_ring("office", &a.id, &b.id).unwrap();
+        assert!(matches!(
+            b.rx.try_recv().unwrap(),
+            ServerMsg::CallRing { .. }
+        ));
+    }
+
+    #[test]
+    fn call_accept_starts_for_both_participants() {
+        let world = World::new();
+        let mut a = join_user(&world, "office", "alice");
+        let mut b = join_user(&world, "office", "bob");
+        a.rx.try_recv().unwrap();
+        world.call_ring("office", &a.id, &b.id).unwrap();
+        b.rx.try_recv().unwrap();
+
+        // The caller cannot accept their own ring.
+        assert_eq!(
+            world.call_accept("office", &a.id, &b.id),
+            Err(ErrorCode::CallNotAllowed)
+        );
+        world.call_accept("office", &b.id, &a.id).unwrap();
+
+        let mut expected = vec![a.id.clone(), b.id.clone()];
+        expected.sort();
+        for u in [&mut a, &mut b] {
+            match u.rx.try_recv().unwrap() {
+                ServerMsg::CallStart { room, participants } => {
+                    assert_eq!(room, "office");
+                    let mut ids: Vec<String> = participants.iter().map(|p| p.id.clone()).collect();
+                    ids.sort();
+                    assert_eq!(ids, expected, "both hear the same two participants");
+                }
+                other => panic!("expected call_start, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn call_relay_requires_same_room_and_participation() {
+        let world = World::new();
+        let mut a = join_user(&world, "office", "alice");
+        let mut b = join_user(&world, "office", "bob");
+        let c = join_user(&world, "office", "carol");
+        a.rx.try_recv().unwrap();
+        b.rx.try_recv().unwrap();
+
+        // Cross-room: carol (office) cannot ring dave (island).
+        let d = join_user(&world, "island", "dave");
+        assert_eq!(
+            world.call_ring("office", &c.id, &d.id),
+            Err(ErrorCode::CallNotAllowed)
+        );
+
+        start_call(&world, &mut a, &mut b);
+        // A bystander in the room cannot send or receive call payloads.
+        assert_eq!(
+            world.call_relay_offer("office", &c.id, &b.id, "sdp".into()),
+            Err(ErrorCode::CallNotAllowed)
+        );
+        assert_eq!(
+            world.call_relay_offer("office", &a.id, &c.id, "sdp".into()),
+            Err(ErrorCode::CallNotAllowed)
+        );
+        // The two participants relay offer, answer and ICE both ways.
+        world
+            .call_relay_offer("office", &a.id, &b.id, "v=0 offer".into())
+            .unwrap();
+        assert!(matches!(
+            b.rx.try_recv().unwrap(),
+            ServerMsg::CallOffer { ref sdp, .. } if sdp == "v=0 offer"
+        ));
+        world
+            .call_relay_answer("office", &b.id, &a.id, "v=0 answer".into())
+            .unwrap();
+        assert!(matches!(
+            a.rx.try_recv().unwrap(),
+            ServerMsg::CallAnswer { ref sdp, .. } if sdp == "v=0 answer"
+        ));
+        world
+            .call_relay_ice(
+                "office",
+                &a.id,
+                &b.id,
+                "candidate:1 udp 2130706431 ...".into(),
+            )
+            .unwrap();
+        assert!(matches!(
+            b.rx.try_recv().unwrap(),
+            ServerMsg::CallIce { .. }
+        ));
+
+        // `"room"` as a target is a huddle join: Phase 6, rejected for now.
+        assert_eq!(
+            world.call_relay_offer("office", &a.id, "room", "sdp".into()),
+            Err(ErrorCode::CallNotAllowed)
+        );
+        // Relay caps (README §5).
+        assert_eq!(
+            world.call_relay_offer("office", &a.id, &b.id, "x".repeat(65 * 1024)),
+            Err(ErrorCode::SdpTooLong)
+        );
+        assert_eq!(
+            world.call_relay_ice("office", &a.id, &b.id, "x".repeat(1025)),
+            Err(ErrorCode::CandidateTooLong)
+        );
+    }
+
+    #[test]
+    fn call_mute_is_presence_broadcast_to_others() {
+        let world = World::new();
+        let mut a = join_user(&world, "office", "alice");
+        let mut b = join_user(&world, "office", "bob");
+        let mut c = join_user(&world, "office", "carol");
+        a.rx.try_recv().unwrap();
+        b.rx.try_recv().unwrap();
+        start_call(&world, &mut a, &mut b);
+        world.call_mute("office", &a.id, false, true).unwrap();
+        match b.rx.try_recv().unwrap() {
+            ServerMsg::CallMute { id, audio, video } => {
+                assert_eq!(id, a.id);
+                assert!(!audio && video);
+            }
+            other => panic!("expected call_mute, got {other:?}"),
+        }
+        assert!(a.rx.try_recv().is_err(), "no echo to the sender");
+        assert!(
+            c.rx.try_recv().is_err(),
+            "bystanders do not hear call presence"
+        );
+        // A non-participant cannot flip presence either.
+        assert_eq!(
+            world.call_mute("office", &c.id, true, true),
+            Err(ErrorCode::CallNotAllowed)
+        );
+    }
+
+    #[test]
+    fn call_leave_and_room_leave_drop_the_call() {
+        let world = World::new();
+        let mut a = join_user(&world, "office", "alice");
+        let mut b = join_user(&world, "office", "bob");
+        start_call(&world, &mut a, &mut b);
+
+        // Caller hangs up: the callee gets `last_left` (the 1:1 is over).
+        world.call_leave("office", &a.id).unwrap();
+        match b.rx.try_recv().unwrap() {
+            ServerMsg::CallEnd { reason } => assert_eq!(reason, "last_left"),
+            other => panic!("expected call_end, got {other:?}"),
+        }
+        // With no call left, call_leave is a state violation.
+        assert_eq!(
+            world.call_leave("office", &a.id),
+            Err(ErrorCode::CallNotAllowed)
+        );
+
+        // Room leave mid-call: the survivor gets the call drop, the leaver
+        // (gone) is not notified.
+        world.call_ring("office", &a.id, &b.id).unwrap();
+        b.rx.try_recv().unwrap();
+        world.call_accept("office", &b.id, &a.id).unwrap();
+        a.rx.try_recv().unwrap();
+        b.rx.try_recv().unwrap();
+        world.leave("office", &b.id);
+        assert!(matches!(
+            a.rx.try_recv().unwrap(),
+            ServerMsg::CallEnd { ref reason } if reason == "last_left"
+        ));
+        assert!(matches!(a.rx.try_recv().unwrap(), ServerMsg::Left { .. }));
+
+        // A drop during ringing cancels the ring for the caller.
+        let mut b2 = join_user(&world, "office", "bob2");
+        a.rx.try_recv().unwrap();
+        world.call_ring("office", &a.id, &b2.id).unwrap();
+        b2.rx.try_recv().unwrap();
+        world.leave("office", &b2.id);
+        assert!(matches!(
+            a.rx.try_recv().unwrap(),
+            ServerMsg::CallEnd { ref reason } if reason == "canceled"
+        ));
+        assert!(matches!(a.rx.try_recv().unwrap(), ServerMsg::Left { .. }));
     }
 }
