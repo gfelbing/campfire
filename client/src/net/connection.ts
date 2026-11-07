@@ -287,7 +287,9 @@ class WTConn {
   constructor(private conn: Connection) {}
 
   async connect(): Promise<void> {
-    const wt = new WebTransport(`/wt`);
+    // WebTransport requires an absolute URL — relative paths throw on
+    // construction (the WS-style `/wt` shortcut is not valid here).
+    const wt = new WebTransport(new URL("/wt", location.origin).toString());
     this.wt = wt;
     wt.closed.then(
       () => this.conn.onTransportDown(),
