@@ -6,8 +6,9 @@
 //! in [`crate::world::World::call_*`]: same room, sender involved, size
 //! caps on SDP/ICE. The server never touches media; it relays.
 //!
-//! Phase 5 implements 1:1 calls (`CallKind::OneToOne`). Room huddles
-//! (`CallKind::Huddle`) land in Phase 6.
+//! 1:1 calls start with a ring (`ringing`); room huddles are created or
+//! joined via `call_offer` with `to: "room"` — the joiner is always the
+//! offerer, so existing members never renegotiate (README §6.3).
 
 use std::collections::HashMap;
 
@@ -51,6 +52,26 @@ impl Call {
             kind: CallKind::OneToOne,
             participants: HashMap::new(),
             ringing: Some((caller, callee)),
+        }
+    }
+
+    /// A room huddle with its first participant (the creator).
+    pub fn new_huddle(creator: UserId, name: String) -> Self {
+        let mut participants = HashMap::new();
+        participants.insert(
+            creator,
+            (
+                name,
+                ParticipantFlags {
+                    audio: true,
+                    video: true,
+                },
+            ),
+        );
+        Self {
+            kind: CallKind::Huddle,
+            participants,
+            ringing: None,
         }
     }
 

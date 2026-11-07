@@ -283,6 +283,13 @@ body {
   border-color: var(--accent);
 }
 
+/* "Join call" mode: a huddle is running, we are not in it (README §6.3). */
+.status-call-btn.join {
+  background: #274156;
+  border-color: #4a90d9;
+  font-weight: 600;
+}
+
 .status-call-list {
   pointer-events: auto;
   position: absolute;
@@ -474,53 +481,97 @@ body {
   color: #e06060;
 }
 
-.call-video-wrap {
+.call-grid {
+  display: grid;
+  gap: 0.35rem;
+  grid-template-columns: 1fr 1fr;
+}
+
+.call-grid:empty::after {
+  content: "no one else on the call yet";
+  grid-column: 1 / -1;
+  color: var(--muted);
+  font-size: 0.75rem;
+  text-align: center;
+  padding: 0.8rem 0;
+}
+
+.call-tile {
   position: relative;
   aspect-ratio: 16 / 9;
   background: #000;
-  border-radius: 8px;
+  border-radius: 6px;
   overflow: hidden;
 }
 
-.call-remote-video {
+.call-tile video {
   width: 100%;
   height: 100%;
   object-fit: contain;
   display: block;
 }
 
-.call-remote-video.speaking {
+.call-tile video.speaking {
   outline: 3px solid #4d9e57;
   outline-offset: -3px;
 }
 
-.call-local-video {
+.call-tile-info {
   position: absolute;
-  right: 6px;
-  bottom: 6px;
-  width: 34%;
+  left: 4px;
+  bottom: 4px;
+  display: flex;
+  gap: 0.3rem;
+  align-items: baseline;
+  background: rgba(0, 0, 0, 0.55);
+  border-radius: 5px;
+  padding: 0.05rem 0.35rem;
+  max-width: calc(100% - 8px);
+}
+
+.call-tile-info .tile-name {
+  font-size: 0.68rem;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.call-tile-info .tile-state {
+  font-size: 0.6rem;
+  color: #9aa0a8;
+  white-space: nowrap;
+}
+
+.call-pip {
+  position: absolute;
+  right: 8px;
+  bottom: 56px;
+  width: 72px;
   aspect-ratio: 16 / 9;
   object-fit: cover;
   border-radius: 6px;
   border: 1px solid var(--line);
   transform: scaleX(-1);
+  background: #000;
 }
 
 .call-badge {
   position: absolute;
-  top: 6px;
-  font-size: 0.68rem;
+  top: 4px;
+  font-size: 0.62rem;
   background: rgba(0, 0, 0, 0.65);
   border-radius: 6px;
-  padding: 0.15rem 0.45rem;
+  padding: 0.1rem 0.4rem;
 }
 
-.call-badge-mute {
-  left: 6px;
+.call-tile .tile-mute {
+  left: 4px;
 }
 
-.call-badge-cam {
-  left: 88px;
+.call-tile .tile-cam {
+  left: 4px;
+  top: 24px;
 }
 
 .call-controls {

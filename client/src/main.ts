@@ -53,6 +53,17 @@ async function main(): Promise<void> {
     );
   };
 
+  // Who is in the room's call (room-wide call state, README §5): powers
+  // the avatars' headphone badge and the status button's "Join call".
+  const inCall = new Set<string>();
+  const refreshCallUi = (): void => {
+    for (const id of roster.keys()) {
+      if (id !== myId) world.manager.setInCall(id, inCall.has(id));
+    }
+    world.local.setInCall(inCall.has(myId));
+    status.setCallState(inCall.size > 0, inCall.has(myId));
+  };
+
   const conn = new Connection(opts.room, opts.name, opts.color, {
     onHello: (h) => {
       myId = h.you;
@@ -70,6 +81,10 @@ async function main(): Promise<void> {
       status.setUsers(h.users.length);
       manager.setSelfId(h.you);
       updateCallTargets();
+      // A mid-call room joiner may already have received the room-wide
+      // `call_start` catch-up before this `hello`; now that the roster is
+      // known, light up the in-call badges (README §6.3).
+      refreshCallUi();
     },
     onJoined: (u: UserBrief) => {
       world.manager.joined(u);
@@ -86,17 +101,38 @@ async function main(): Promise<void> {
     onChat: (c: ChatMsg) => chat?.add(c, myId),
     onTyping: (id, on) => chat?.typing(id, on),
     onMovement: (batch: MovementBatch) => world.manager.movement(batch.m),
-    // Call signaling (README §5/§6): the manager owns the state machine.
+    // Call signaling (README §5/§6): the manager owns the state machine;
+    // the room-wide call *state* also drives the badges + status button.
     onCallRing: (from, name) => manager.onCallRing(from, name),
-    onCallStart: (ps) => manager.onCallStart(ps),
-    onCallJoin: (u) => manager.onCallJoin(u),
-    onCallLeave: (id) => manager.onCallLeave(id),
-    onCallEnd: (reason) => manager.onCallEnd(reason),
+    onCallStart: (ps) => {
+      inCall.clear();
+      for (const p of ps) inCall.add(p.id);
+      refreshCallUi();
+      manager.onCallStart(ps);
+    },
+    onCallJoin: (u) => {
+      inCall.add(u.id);
+      refreshCallUi();
+      manager.onCallJoin(u);
+    },
+    onCallLeave: (id) => {
+      inCall.delete(id);
+      refreshCallUi();
+      manager.onCallLeave(id);
+    },
+    onCallEnd: (reason) => {
+      inCall.clear();
+      refreshCallUi();
+      manager.onCallEnd(reason);
+    },
     onCallOffer: (from, sdp) => manager.onCallOffer(from, sdp),
     onCallAnswer: (from, sdp) => manager.onCallAnswer(from, sdp),
     onCallIce: (from, c) => manager.onCallIce(from, c),
     onCallMute: (id, a, v) => manager.onCallMute(id, a, v),
-    onError: (code) => chat?.system(`server error: ${code}`),
+    onError: (code) => {
+      chat?.system(`server error: ${code}`);
+      manager.onError(code);
+    },
     onStatus: (s) => {
       status.setConn(s);
       // The server drops us from the call when the session ends; we cannot
@@ -117,13 +153,15 @@ async function main(): Promise<void> {
   const manager = new CallManager(conn, {
     onPhase: (ph) => callUI.setPhase(ph),
     onLocalStream: (s) => callUI.setLocalStream(s),
-    onRemoteStream: (s) => callUI.setRemoteStream(s),
-    onPeerState: (st, viaRelay) => callUI.setPeerState(st, viaRelay),
-    onPeerMute: (a, v) => callUI.setPeerMute(a, v),
+    onPeers: (ps) => callUI.setPeers(ps),
     onLocalMute: (a, v) => callUI.setLocalMute(a, v),
     onLog: (t) => chat?.system(t),
   });
-  const status = createStatus(ui, (u) => void manager.ring(u));
+  const status = createStatus(
+    ui,
+    (u) => void manager.ring(u),
+    () => void manager.joinHuddle(),
+  );
   status.setRoom(opts.room);
 
   // Game loop: integrate local movement, draw, send at ≤10 Hz.

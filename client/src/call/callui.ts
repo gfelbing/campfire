@@ -1,8 +1,9 @@
-//! Call UI (README §6.3): incoming/outgoing overlays, the active-call
-//! panel with video, the mute/camera/hang-up bar, per-peer connection
-//! state, and the active-speaker indicator.
+//! Call UI (README §6.3): incoming/outgoing overlays and the active-call
+//! panel with a video grid (one tile per remote participant + local PiP),
+//! per-tile connection state / mute / camera / active-speaker indicators,
+//! and the mute/camera/hang-up bar.
 
-import type { CallPhase } from "./manager";
+import type { CallPhase, PeerView } from "./manager";
 import type { PeerState } from "./peer";
 
 export interface CallUiActions {
@@ -16,26 +17,37 @@ export interface CallUiActions {
 export interface CallUI {
   setPhase(phase: CallPhase): void;
   setLocalStream(stream: MediaStream | null): void;
-  setRemoteStream(stream: MediaStream | null): void;
-  setPeerState(state: PeerState, viaRelay: boolean): void;
-  setPeerMute(audio: boolean, video: boolean): void;
+  /** Update the grid from the manager's roster (create/update/remove tiles). */
+  setPeers(peers: PeerView[]): void;
   setLocalMute(audio: boolean, video: boolean): void;
 }
 
-function stateText(state: PeerState, viaRelay: boolean): string {
-  switch (state) {
-    case "connected":
-      return viaRelay ? "connected (via relay)" : "connected";
-    case "connecting":
-    case "new":
-      return "connecting…";
-    case "disconnected":
-      return "reconnecting…";
-    case "failed":
-      return "connection failed";
-    default:
-      return state;
+/** Aggregate the per-peer states into one panel-level label. */
+function aggregateState(peers: PeerView[]): { text: string; state: PeerState } {
+  if (peers.length === 0) return { text: "waiting for peers…", state: "new" };
+  const has = (s: PeerState) => peers.some((p) => p.state === s);
+  if (has("failed")) return { text: "connection problem", state: "failed" };
+  const connected = peers.filter((p) => p.state === "connected");
+  const viaRelay = connected.some((p) => p.viaRelay);
+  if (connected.length === peers.length) {
+    return { text: viaRelay ? "connected (via relay)" : "connected", state: "connected" };
   }
+  if (has("disconnected")) return { text: "reconnecting…", state: "disconnected" };
+  return { text: "connecting…", state: "connecting" };
+}
+
+interface Tile {
+  id: string;
+  el: HTMLElement;
+  video: HTMLVideoElement;
+  nameEl: HTMLElement;
+  stateEl: HTMLElement;
+  muteEl: HTMLElement;
+  camEl: HTMLElement;
+  stream: MediaStream | null;
+  source: MediaStreamAudioSourceNode | null;
+  analyser: AnalyserNode | null;
+  data: Uint8Array<ArrayBuffer> | null;
 }
 
 export function createCallUI(container: HTMLElement, actions: CallUiActions): CallUI {
@@ -62,12 +74,8 @@ export function createCallUI(container: HTMLElement, actions: CallUiActions): Ca
         <span class="call-peer-name"></span>
         <span class="call-peer-state">connecting…</span>
       </div>
-      <div class="call-video-wrap">
-        <video class="call-remote-video" autoplay playsinline></video>
-        <video class="call-local-video" autoplay playsinline muted></video>
-        <span class="call-badge call-badge-mute hidden">🔇 muted</span>
-        <span class="call-badge call-badge-cam hidden">📷 camera off</span>
-      </div>
+      <div class="call-grid"></div>
+      <video class="call-pip" autoplay playsinline muted></video>
       <div class="call-controls">
         <button class="call-btn call-mute" title="mute / unmute (🎤)">🎤</button>
         <button class="call-btn call-camera" title="camera on / off (📷)">📷</button>
@@ -83,10 +91,8 @@ export function createCallUI(container: HTMLElement, actions: CallUiActions): Ca
   const panel = root.querySelector<HTMLElement>(".call-panel")!;
   const peerName = root.querySelector<HTMLElement>(".call-peer-name")!;
   const peerState = root.querySelector<HTMLElement>(".call-peer-state")!;
-  const remoteVideo = root.querySelector<HTMLVideoElement>(".call-remote-video")!;
-  const localVideo = root.querySelector<HTMLVideoElement>(".call-local-video")!;
-  const muteBadge = root.querySelector<HTMLElement>(".call-badge-mute")!;
-  const camBadge = root.querySelector<HTMLElement>(".call-badge-cam")!;
+  const grid = root.querySelector<HTMLElement>(".call-grid")!;
+  const pip = root.querySelector<HTMLVideoElement>(".call-pip")!;
   const muteBtn = root.querySelector<HTMLButtonElement>(".call-mute")!;
   const camBtn = root.querySelector<HTMLButtonElement>(".call-camera")!;
 
@@ -105,77 +111,186 @@ export function createCallUI(container: HTMLElement, actions: CallUiActions): Ca
     actions.onHangup();
   });
 
-  // --- active-speaker indicator (README §6.3): an analyser on the remote
-  // --- audio track lights up the video border while the peer talks.
+  // --- tiles: one per remote participant, created/updated in place -------
+  // --- (rebuilding <video> elements would restart the streams).
+  const tiles = new Map<string, Tile>();
+  /** Shared AudioContext for the per-tile level meters (README §6.3). */
   let audioCtx: AudioContext | null = null;
-  let analyser: AnalyserNode | null = null;
   let levelTimer: number | null = null;
 
-  function stopLevelMeter(): void {
-    if (levelTimer !== null) {
-      window.clearInterval(levelTimer);
-      levelTimer = null;
+  function ensureCtx(): AudioContext | null {
+    if (typeof AudioContext === "undefined") return null;
+    if (!audioCtx) {
+      audioCtx = new AudioContext();
+      void audioCtx.resume().catch(() => {});
     }
-    analyser?.disconnect();
-    analyser = null;
-    void audioCtx?.close().catch(() => {});
-    audioCtx = null;
-    remoteVideo.classList.remove("speaking");
+    return audioCtx;
   }
 
-  function startLevelMeter(stream: MediaStream): void {
-    stopLevelMeter();
+  function makeTile(p: PeerView): Tile {
+    const el = document.createElement("div");
+    el.className = "call-tile";
+    el.innerHTML = `
+      <video autoplay playsinline></video>
+      <div class="call-tile-info"><span class="tile-name"></span><span class="tile-state"></span></div>
+      <span class="call-badge tile-mute hidden">🔇</span>
+      <span class="call-badge tile-cam hidden">📷 off</span>`;
+    const video = el.querySelector<HTMLVideoElement>("video")!;
+    const tile: Tile = {
+      id: p.id,
+      el,
+      video,
+      nameEl: el.querySelector<HTMLElement>(".tile-name")!,
+      stateEl: el.querySelector<HTMLElement>(".tile-state")!,
+      muteEl: el.querySelector<HTMLElement>(".tile-mute")!,
+      camEl: el.querySelector<HTMLElement>(".tile-cam")!,
+      stream: null,
+      source: null,
+      analyser: null,
+      data: null,
+    };
+    grid.appendChild(el);
+    return tile;
+  }
+
+  /** Detach the tile's level meter (audio source + analyser). */
+  function stopMeter(t: Tile): void {
+    t.source?.disconnect();
+    t.source = null;
+    t.analyser?.disconnect();
+    t.analyser = null;
+    t.data = null;
+    t.video.classList.remove("speaking");
+    if (tiles.size === 0) {
+      if (levelTimer !== null) {
+        window.clearInterval(levelTimer);
+        levelTimer = null;
+      }
+      void audioCtx?.close().catch(() => {});
+      audioCtx = null;
+    }
+  }
+
+  function destroyTile(t: Tile): void {
+    stopMeter(t);
+    t.el.remove();
+  }
+
+  /** Attach (or re-attach) the tile's level meter to its stream. */
+  function startMeter(t: Tile, stream: MediaStream): void {
+    stopMeter(t);
+    const ctx = ensureCtx();
     const audio = stream.getAudioTracks()[0];
-    if (!audio || typeof AudioContext === "undefined") return;
-    audioCtx = new AudioContext();
-    analyser = audioCtx.createAnalyser();
+    if (!ctx || !audio) return;
+    const source = ctx.createMediaStreamSource(new MediaStream([audio]));
+    const analyser = ctx.createAnalyser();
     analyser.fftSize = 512;
-    audioCtx.createMediaStreamSource(new MediaStream([audio])).connect(analyser);
-    const data = new Uint8Array(analyser.frequencyBinCount);
-    levelTimer = window.setInterval(() => {
-      analyser!.getByteFrequencyData(data);
-      let sum = 0;
-      for (let i = 0; i < data.length; i++) sum += data[i];
-      const level = sum / data.length;
-      remoteVideo.classList.toggle("speaking", level > 24);
-    }, 100);
+    source.connect(analyser);
+    t.source = source;
+    t.analyser = analyser;
+    t.data = new Uint8Array(analyser.frequencyBinCount);
+    if (levelTimer === null) {
+      // 10 Hz (README §6.3): one pass over all tiles per tick.
+      levelTimer = window.setInterval(() => {
+        for (const tile of tiles.values()) {
+          if (!tile.analyser || !tile.data) {
+            tile.video.classList.remove("speaking");
+            continue;
+          }
+          tile.analyser.getByteFrequencyData(tile.data);
+          let sum = 0;
+          for (let i = 0; i < tile.data.length; i++) sum += tile.data[i];
+          tile.video.classList.toggle("speaking", sum / tile.data.length > 24);
+        }
+      }, 100);
+    }
+  }
+
+  function updateTile(t: Tile, p: PeerView): void {
+    t.nameEl.textContent = p.name;
+    t.stateEl.textContent = stateText(p.state, p.viaRelay);
+    t.muteEl.classList.toggle("hidden", p.audioOn);
+    t.camEl.classList.toggle("hidden", p.videoOn);
+    if (p.stream !== t.stream) {
+      t.stream = p.stream;
+      t.video.srcObject = p.stream;
+      if (p.stream) startMeter(t, p.stream);
+      else stopMeter(t);
+    }
   }
 
   return {
     setPhase(phase) {
       incoming.classList.toggle("hidden", phase.p !== "incoming");
       outgoing.classList.toggle("hidden", phase.p !== "outgoing");
-      panel.classList.toggle("hidden", phase.p !== "in-call");
+      panel.classList.toggle("hidden", phase.p !== "in-call" && phase.p !== "joining");
       if (phase.p === "incoming") incomingName.textContent = phase.name;
       if (phase.p === "outgoing") outgoingText.textContent = `Calling ${phase.name}…`;
       if (phase.p === "in-call") {
-        peerName.textContent = phase.name;
+        peerName.textContent =
+          phase.kind === "huddle"
+            ? `Room huddle · ${phase.participants.length + 1} in call`
+            : `Call with ${phase.participants[0]?.name ?? ""}`;
+      }
+      if (phase.p === "joining") {
+        peerName.textContent = "Joining call…";
         peerState.textContent = "connecting…";
-        muteBadge.classList.add("hidden");
-        camBadge.classList.add("hidden");
+        panel.dataset.state = "connecting";
+      }
+      if (phase.p === "in-call" || phase.p === "joining") {
         muteBtn.classList.remove("off");
         camBtn.classList.remove("off");
       }
     },
     setLocalStream(stream) {
-      localVideo.srcObject = stream;
+      pip.srcObject = stream;
     },
-    setRemoteStream(stream) {
-      remoteVideo.srcObject = stream;
-      if (stream) startLevelMeter(stream);
-      else stopLevelMeter();
-    },
-    setPeerState(state, viaRelay) {
-      peerState.textContent = stateText(state, viaRelay);
-      panel.dataset.state = state;
-    },
-    setPeerMute(audio, video) {
-      muteBadge.classList.toggle("hidden", audio);
-      camBadge.classList.toggle("hidden", video);
+    setPeers(peers) {
+      const seen = new Set<string>();
+      for (const p of peers) {
+        seen.add(p.id);
+        let t = tiles.get(p.id);
+        if (!t) {
+          t = makeTile(p);
+          tiles.set(p.id, t);
+        }
+        updateTile(t, p);
+      }
+      for (const [id, t] of tiles) {
+        if (!seen.has(id)) {
+          tiles.delete(id);
+          destroyTile(t);
+        }
+      }
+      if (phaseVisible()) {
+        const agg = aggregateState(peers);
+        peerState.textContent = agg.text;
+        panel.dataset.state = agg.state;
+      }
     },
     setLocalMute(audio, video) {
       muteBtn.classList.toggle("off", !audio);
       camBtn.classList.toggle("off", !video);
     },
   };
+
+  function phaseVisible(): boolean {
+    return !panel.classList.contains("hidden");
+  }
+
+  function stateText(state: PeerState, viaRelay: boolean): string {
+    switch (state) {
+      case "connected":
+        return viaRelay ? "connected (via relay)" : "connected";
+      case "connecting":
+      case "new":
+        return "connecting…";
+      case "disconnected":
+        return "reconnecting…";
+      case "failed":
+        return "connection failed";
+      default:
+        return state;
+    }
+  }
 }

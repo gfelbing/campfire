@@ -299,12 +299,15 @@ async fn call_validation_and_state_errors() {
     c.send(&ClientMsg::CallRing { to: a_id.clone() }).await;
     assert_err(&mut c, ErrorCode::CallNotAllowed).await;
 
-    // Bob accepts; both sides get the roster.
+    // Bob accepts; the whole room gets the roster (headphone badge).
     b.send(&ClientMsg::CallAccept { to: a_id.clone() }).await;
     let ServerMsg::CallStart { .. } = a.recv().await else {
         panic!("expected call_start");
     };
     let ServerMsg::CallStart { .. } = b.recv().await else {
+        panic!("expected call_start");
+    };
+    let ServerMsg::CallStart { .. } = c.recv().await else {
         panic!("expected call_start");
     };
 

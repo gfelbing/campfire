@@ -5,6 +5,10 @@
 
 export type Dir = "n" | "s" | "e" | "w";
 
+/// `call_offer.to` value that means "create/join the room huddle"
+/// (README §5; mirrors `ROOM_TARGET` on the server).
+export const ROOM_TARGET = "room";
+
 export interface UserState {
   id: string;
   name: string;

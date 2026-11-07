@@ -172,6 +172,8 @@ Because of the HTTP/3-only data path:
 {"t":"call_mute",     "id":"u_…", "audio":false, "video":true}
 ```
 
+**Call scope & huddle joining.** Call *state* (`call_start` / `call_join` / `call_leave` / `call_end`) is **room-wide** — every member of the room receives it, because it powers the headphone badge on avatars, not just the in-call UI. Call *presence* (`call_ring` / `call_offer` / `call_answer` / `call_ice` / `call_mute`) stays **call-scoped**: relayed only between participants of the room's active call. A huddle is created or joined by `call_offer` with `to:"room"`; the **joiner is always the offerer** — they open one fresh `RTCPeerConnection` (and one SDP offer) to every existing member, who never renegotiate (README §6.3). A `call_start` is also the catch-up a mid-call *room* joiner receives, so their badge is correct from the start.
+
 **Movement rules (server-enforced):** coordinates are tile space at 0.1-tile resolution; max speed 8 tiles/s (walk 4, run 8); destinations must be walkable (collision layer) and inside map bounds; client sends at most 15 Hz, server accepts at most 30/s.
 
 **Datagram budgeting:** movement entries are ~15–20 B each → ~50–70 deltas per 1200 B datagram. If a room tick exceeds one datagram, the remainder goes on the reliable stream (rare, large rooms only).
@@ -362,6 +364,7 @@ One developer, estimates in days. **MVP (walking + presence) = Phases 0–4 (≈
 - Mid-call events: newcomer re-ICE without disturbing existing members; mid-call drop/reconnect; host-leave handling.
 - Auto voice-only degradation at 9+ participants.
 - **Done when:** 6-participant huddle with video on 6 machines (or headless fakes); a mid-call join plus a mid-call drop/reconnect; no leaked peer connections; auto voice-only engages at 10 participants.
+- *Delivery note:* everything the **server** does for huddles (create/join via `call_offer{to:"room"}`, newcomer re-ICE, room-wide call state, mid-call join/drop, leave, last-leave, fresh huddle on a cleared room) is covered by the `huddle` integration test over real QUIC. The **WebRTC** half (N-1 `RTCPeerConnection`s per member, zero leaked connections, auto voice-only at 9+) is browser-only and verified manually with six windows; the headless E2E lands in Phase 9 (§12).
 
 ### Phase 7 — Chat + presence polish (2 d)
 - Chat UI (input, bubbles, typing indicator, history on join), room list + room switcher UI, presence panel (who's here, who's in a call).

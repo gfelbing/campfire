@@ -1,5 +1,7 @@
-// Connection + room status, top right (README §8), with the 1:1 call
-// button: pick a room-mate to ring (README §6.3).
+// Connection + room status, top right (README §8), with the call button:
+// a room-mate picker when no call is running, a "Join call" action when a
+// huddle is active and we are not in it, hidden while we are in a call
+// (README §6.3).
 
 import type { UserBrief } from "../net/types";
 
@@ -11,6 +13,8 @@ export interface StatusUI {
   bumpUsers(delta: number): void;
   /** Room-mates we can ring (already excludes ourselves). */
   setCallTargets(users: UserBrief[]): void;
+  /** Is the room's call running, and are we in it? */
+  setCallState(active: boolean, inCall: boolean): void;
   setConn(s: ConnState): void;
 }
 
@@ -21,6 +25,7 @@ function userText(n: number): string {
 export function createStatus(
   container: HTMLElement,
   onCall: (u: UserBrief) => void,
+  onJoinHuddle: () => void,
 ): StatusUI {
   const panel = document.createElement("div");
   panel.className = "status";
@@ -43,6 +48,29 @@ export function createStatus(
 
   let users = 0;
   let targets: UserBrief[] = [];
+  let callActive = false;
+  let inCall = false;
+
+  /** The button: hidden in a call, "Join call" when a huddle is running,
+   *  ring-picker otherwise. */
+  function renderCallButton(): void {
+    if (inCall) {
+      callBtn.classList.add("hidden");
+      callList.classList.add("hidden");
+      return;
+    }
+    callBtn.classList.remove("hidden");
+    if (callActive) {
+      callBtn.classList.add("join");
+      callBtn.textContent = "📞 Join call";
+      callBtn.title = "Join the room huddle";
+      callList.classList.add("hidden");
+    } else {
+      callBtn.classList.remove("join");
+      callBtn.textContent = "📞";
+      callBtn.title = "Call someone in this room";
+    }
+  }
 
   function renderList(): void {
     callList.innerHTML = "";
@@ -66,6 +94,11 @@ export function createStatus(
   }
 
   callBtn.addEventListener("click", () => {
+    if (callActive) {
+      // A huddle is running: join it (the joiner is the offerer, README §6.3).
+      onJoinHuddle();
+      return;
+    }
     callList.classList.toggle("hidden");
     if (!callList.classList.contains("hidden")) renderList();
   });
@@ -90,6 +123,11 @@ export function createStatus(
     setCallTargets: (list) => {
       targets = list;
       if (!callList.classList.contains("hidden")) renderList();
+    },
+    setCallState: (active, us) => {
+      callActive = active;
+      inCall = us;
+      renderCallButton();
     },
     setConn: (s) => {
       panel.dataset.conn = s;

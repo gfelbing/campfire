@@ -13,6 +13,8 @@ export class AvatarView {
   private body: Graphics;
   private facing: Graphics;
   label: Text;
+  /** 🎧 shown above the label while the user is in a call (README §6.3). */
+  private inCallBadge: Text;
   private baseX = 0;
   private baseY = 0;
   private bobbing = false;
@@ -31,13 +33,27 @@ export class AvatarView {
     });
     this.label.anchor.set(0.5, 1);
     this.label.y = -18;
-    this.container.addChild(this.body, this.facing, this.label);
+    this.inCallBadge = new Text({
+      text: "🎧",
+      style: {
+        fontSize: 11,
+      },
+    });
+    this.inCallBadge.anchor.set(0.5, 1);
+    this.inCallBadge.y = -30;
+    this.inCallBadge.visible = false;
+    this.container.addChild(this.body, this.facing, this.label, this.inCallBadge);
     this.setName(name);
     this.setColor(color);
   }
 
   setName(name: string): void {
     this.label.text = name;
+  }
+
+  /** Toggle the headphone badge (call state is room-wide, README §5). */
+  setInCall(on: boolean): void {
+    this.inCallBadge.visible = on;
   }
 
   setColor(color: number): void {
@@ -176,6 +192,11 @@ export class AvatarManager {
     this.layer.removeChild(r.view.container);
     r.view.container.destroy({ children: true });
     this.remotes.delete(id);
+  }
+
+  /** Toggle the headphone badge on one remote avatar (README §6.3). */
+  setInCall(id: string, on: boolean): void {
+    this.remotes.get(id)?.view.setInCall(on);
   }
 
   /** Apply one movement batch; keep only entries with a newer sequence. */

@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 
 use campfire_protocol::{
     Avatar, ChatMsg, Dir, ErrorCode, MAX_CANDIDATE_BYTES, MAX_SDP_BYTES, MovementBatch,
-    MovementEntry, ServerMsg, UserBrief, UserState,
+    MovementEntry, ROOM_TARGET, ServerMsg, UserBrief, UserState,
 };
 use rand::RngCore;
 
@@ -74,6 +74,18 @@ pub enum JoinError {
     RoomFull,
     /// The room id is not a known map.
     UnknownRoom,
+}
+
+/// What a huddle join (`call_offer` with `to: "room"`) resolves to.
+enum JoinAction {
+    /// No call in the room: create the huddle with the sender in it.
+    Create,
+    /// A huddle is running: add the sender.
+    Join,
+    /// A 1:1 is ringing or active: the room is busy.
+    Busy,
+    /// The sender is already in the huddle.
+    AlreadyIn,
 }
 
 /// The whole world: the map registry plus every occupied room.
@@ -187,6 +199,18 @@ impl World {
                     user: brief.clone(),
                 });
             }
+        }
+        // Catch-up (README §6.3): if the room already has a running call,
+        // the new room member gets its current roster so their avatars'
+        // headphone badge is correct from the start.
+        if let Some(call) = &room_entry.call
+            && !call.participants.is_empty()
+            && let Some(m) = room_entry.users.get(&id)
+        {
+            let _ = m.tx.send(ServerMsg::CallStart {
+                room: room.to_owned(),
+                participants: call.participant_list(),
+            });
         }
         Ok(joined)
     }
@@ -436,13 +460,97 @@ impl World {
             ),
         );
         let participants = call.participant_list();
-        for id in [from, to] {
-            if let Some(m) = entry.users.get(id) {
-                let _ = m.tx.send(ServerMsg::CallStart {
-                    room: room.to_owned(),
-                    participants: participants.clone(),
-                });
+        // Room-wide (README §6.3): call state powers the headphone badge,
+        // so every member of the room learns who is in the call.
+        for m in entry.users.values() {
+            let _ = m.tx.send(ServerMsg::CallStart {
+                room: room.to_owned(),
+                participants: participants.clone(),
+            });
+        }
+        Ok(())
+    }
+
+    /// Create the room's huddle, or join the one already running
+    /// (`call_offer` with `to: "room"`, README §5/§6.3). The joiner is
+    /// always the offerer: they open N-1 fresh peer connections to the
+    /// existing members, who never renegotiate. A 1:1 in flight or active
+    /// blocks the join (one call per room, README §7).
+    pub fn call_join_huddle(&self, room: &str, from: &str) -> Result<(), ErrorCode> {
+        let mut rooms = self.rooms.lock().unwrap();
+        let Some(entry) = rooms.get_mut(room) else {
+            return Err(ErrorCode::CallNotAllowed);
+        };
+        let Some(name) = entry.users.get(from).map(|m| m.name.clone()) else {
+            return Err(ErrorCode::CallNotAllowed);
+        };
+        // Decide what this join means (before mutating the call).
+        let action = match entry.call.as_ref() {
+            None => JoinAction::Create,
+            Some(c) if c.kind == call::CallKind::Huddle => {
+                if c.contains(from) {
+                    JoinAction::AlreadyIn
+                } else {
+                    JoinAction::Join
+                }
             }
+            // A 1:1 is ringing or active: the room is busy.
+            Some(_) => JoinAction::Busy,
+        };
+        let participants = match action {
+            JoinAction::Busy | JoinAction::AlreadyIn => return Err(ErrorCode::CallNotAllowed),
+            JoinAction::Create => {
+                // No call in the room: create the huddle with us in it and
+                // tell the whole room (badge).
+                entry.call = Some(call::Call::new_huddle(from.to_owned(), name));
+                let participants = entry
+                    .call
+                    .as_ref()
+                    .map(|c| c.participant_list())
+                    .unwrap_or_default();
+                for m in entry.users.values() {
+                    let _ = m.tx.send(ServerMsg::CallStart {
+                        room: room.to_owned(),
+                        participants: participants.clone(),
+                    });
+                }
+                return Ok(());
+            }
+            JoinAction::Join => {
+                let call = entry.call.as_mut().expect("checked above");
+                // Everyone else in the room learns of the new participant
+                // (badge + participant panel); the joiner gets the full
+                // roster below.
+                let user = UserBrief {
+                    id: from.to_owned(),
+                    name: name.clone(),
+                };
+                call.participants.insert(
+                    from.to_owned(),
+                    (
+                        name,
+                        call::ParticipantFlags {
+                            audio: true,
+                            video: true,
+                        },
+                    ),
+                );
+                for (uid, m) in &entry.users {
+                    if uid == from {
+                        continue;
+                    }
+                    let _ = m.tx.send(ServerMsg::CallJoin { user: user.clone() });
+                }
+                call.participant_list()
+            }
+        };
+        // The joiner gets the full roster so they can open one peer
+        // connection (and one offer) to every existing member.
+        if let Some(m) = entry.users.get(from) {
+            let _ = m.tx.send(ServerMsg::CallStart {
+                room: room.to_owned(),
+                participants,
+            });
         }
         Ok(())
     }
@@ -469,7 +577,10 @@ impl World {
         Ok(())
     }
 
-    /// Relay an SDP offer between two participants of the room's active call.
+    /// Relay an SDP offer between two participants of the room's active
+    /// call. A `to` of [`ROOM_TARGET`] ("room") instead creates or joins
+    /// the room's huddle (README §5) — the SDP for that join is unused, the
+    /// joiner offers each existing member individually.
     pub fn call_relay_offer(
         &self,
         room: &str,
@@ -479,6 +590,9 @@ impl World {
     ) -> Result<(), ErrorCode> {
         if sdp.len() > MAX_SDP_BYTES {
             return Err(ErrorCode::SdpTooLong);
+        }
+        if to == ROOM_TARGET {
+            return self.call_join_huddle(room, from);
         }
         let rooms = self.rooms.lock().unwrap();
         let Some(entry) = rooms.get(room) else {
@@ -649,7 +763,8 @@ pub fn start_ticking(world: World) -> tokio::task::JoinHandle<()> {
 
 /// Find the relay target of a call message: both `from` and `to` must be
 /// participants of the room's active call (which implicitly rejects ringing
-/// state, non-members, and the `"room"` huddle target — Phase 6).
+/// state and non-members). The `"room"` huddle target is handled before
+/// this (in [`World::call_relay_offer`]).
 fn call_target<'a>(entry: &'a Room, from: &str, to: &str) -> Result<&'a Member, ErrorCode> {
     let call = entry.call.as_ref().ok_or(ErrorCode::CallNotAllowed)?;
     if !call.participants.contains_key(from) || !call.participants.contains_key(to) {
@@ -658,10 +773,13 @@ fn call_target<'a>(entry: &'a Room, from: &str, to: &str) -> Result<&'a Member, 
     entry.users.get(to).ok_or(ErrorCode::CallNotAllowed)
 }
 
-/// Drop `id` from the room's call, if any, and tell the rest (README §6.3).
-/// Used when the leaver is gone and cannot be notified: a ring in flight
-/// ends for the other side, an active 1:1 ends with `last_left` for the
-/// survivor, a huddle just loses a participant.
+/// Drop `id` from the room's call, if any, and tell the room (README §6.3).
+/// Used when the leaver hangs up or is gone and cannot be notified.
+///
+/// The call state is room-wide (it powers the avatars' headphone badge),
+/// so every remaining member of the room is told — not just the call
+/// participants: a huddle shrinks with `call_leave`, a 1:1 or an emptied
+/// huddle ends with `call_end(last_left)`.
 fn leave_call(entry: &mut Room, id: &str) {
     let ringing = entry.call.as_ref().and_then(|c| c.ringing.clone());
     if let Some((caller, callee)) = ringing {
@@ -680,24 +798,24 @@ fn leave_call(entry: &mut Room, id: &str) {
     let Some(mut call) = entry.call.take() else {
         return;
     };
-    if call.participants.remove(id).is_some() {
-        let end = call.kind == call::CallKind::OneToOne && call.participants.len() < 2;
-        for (uid, m) in &entry.users {
-            if call.participants.contains_key(uid) {
-                let _ = if end {
-                    m.tx.send(ServerMsg::CallEnd {
-                        reason: "last_left".to_owned(),
-                    })
-                } else {
-                    m.tx.send(ServerMsg::CallLeave { id: id.to_owned() })
-                };
-            }
-        }
-        if end || call.participants.is_empty() {
-            return; // the call is over
-        }
+    if call.participants.remove(id).is_none() {
+        entry.call = Some(call); // not in the call: nothing happened
+        return;
     }
-    entry.call = Some(call);
+    // A 1:1 cannot survive a leave; a huddle can, down to its last member.
+    let over = call.kind == call::CallKind::OneToOne || call.participants.is_empty();
+    for m in entry.users.values() {
+        let _ = if over {
+            m.tx.send(ServerMsg::CallEnd {
+                reason: "last_left".to_owned(),
+            })
+        } else {
+            m.tx.send(ServerMsg::CallLeave { id: id.to_owned() })
+        };
+    }
+    if !over {
+        entry.call = Some(call);
+    }
 }
 
 /// Split a room's dirty entries into datagram-sized JSON batches: encode all
@@ -1139,7 +1257,8 @@ mod tests {
             ServerMsg::CallIce { .. }
         ));
 
-        // `"room"` as a target is a huddle join: Phase 6, rejected for now.
+        // `"room"` as a target is a huddle join — but a 1:1 is active, so
+        // the room is busy and the join is rejected.
         assert_eq!(
             world.call_relay_offer("office", &a.id, "room", "sdp".into()),
             Err(ErrorCode::CallNotAllowed)
@@ -1173,6 +1292,12 @@ mod tests {
             other => panic!("expected call_mute, got {other:?}"),
         }
         assert!(a.rx.try_recv().is_err(), "no echo to the sender");
+        // Bystanders hear the call *state* (badge) but not its presence
+        // (mute/camera): the room-wide call_start, then nothing.
+        assert!(matches!(
+            c.rx.try_recv().unwrap(),
+            ServerMsg::CallStart { .. }
+        ));
         assert!(
             c.rx.try_recv().is_err(),
             "bystanders do not hear call presence"
@@ -1191,11 +1316,14 @@ mod tests {
         let mut b = join_user(&world, "office", "bob");
         start_call(&world, &mut a, &mut b);
 
-        // Caller hangs up: the callee gets `last_left` (the 1:1 is over).
+        // Caller hangs up: the whole room gets `last_left` (badge), the
+        // 1:1 is over for everyone.
         world.call_leave("office", &a.id).unwrap();
-        match b.rx.try_recv().unwrap() {
-            ServerMsg::CallEnd { reason } => assert_eq!(reason, "last_left"),
-            other => panic!("expected call_end, got {other:?}"),
+        for u in [&mut a, &mut b] {
+            match u.rx.try_recv().unwrap() {
+                ServerMsg::CallEnd { reason } => assert_eq!(reason, "last_left"),
+                other => panic!("expected call_end, got {other:?}"),
+            }
         }
         // With no call left, call_leave is a state violation.
         assert_eq!(
@@ -1228,5 +1356,107 @@ mod tests {
             ServerMsg::CallEnd { ref reason } if reason == "canceled"
         ));
         assert!(matches!(a.rx.try_recv().unwrap(), ServerMsg::Left { .. }));
+    }
+
+    #[test]
+    fn huddle_create_join_leave() {
+        let world = World::new();
+        let mut a = join_user(&world, "office", "alice");
+        let mut b = join_user(&world, "office", "bob");
+        let mut c = join_user(&world, "office", "carol");
+        let (a_id, b_id, c_id) = (a.id.clone(), b.id.clone(), c.id.clone());
+        a.rx.try_recv().unwrap(); // bob
+        a.rx.try_recv().unwrap(); // carol
+        b.rx.try_recv().unwrap(); // carol
+
+        // Alice creates the huddle: call_offer with to = "room". The whole
+        // room hears call_start (headphone badge).
+        world
+            .call_relay_offer("office", &a.id, ROOM_TARGET, "sdp".into())
+            .unwrap();
+        for u in [&mut a, &mut b, &mut c] {
+            match u.rx.try_recv().unwrap() {
+                ServerMsg::CallStart { room, participants } => {
+                    assert_eq!(room, "office");
+                    assert_eq!(
+                        participants,
+                        vec![UserBrief {
+                            id: a_id.clone(),
+                            name: "alice".into(),
+                        }]
+                    );
+                }
+                other => panic!("expected call_start, got {other:?}"),
+            }
+        }
+
+        // Bob joins mid-call: everyone else hears call_join (room-wide,
+        // badge + panel); Bob gets the full roster to offer each member.
+        world
+            .call_relay_offer("office", &b.id, ROOM_TARGET, "sdp".into())
+            .unwrap();
+        for u in [&mut a, &mut c] {
+            match u.rx.try_recv().unwrap() {
+                ServerMsg::CallJoin { ref user } => assert_eq!(user.id, b_id),
+                other => panic!("expected call_join, got {other:?}"),
+            }
+        }
+        match b.rx.try_recv().unwrap() {
+            ServerMsg::CallStart { participants, .. } => {
+                let mut ids: Vec<&str> = participants.iter().map(|p| p.id.as_str()).collect();
+                ids.sort();
+                let mut expected = vec![a_id.as_str(), b_id.as_str()];
+                expected.sort();
+                assert_eq!(ids, expected);
+            }
+            other => panic!("expected call_start, got {other:?}"),
+        }
+
+        // Joining a huddle you are already in is rejected.
+        assert_eq!(
+            world.call_relay_offer("office", &b.id, ROOM_TARGET, "sdp".into()),
+            Err(ErrorCode::CallNotAllowed)
+        );
+
+        // Bob leaves the call: the room-wide call_leave reaches everyone
+        // still in the room (including Bob, for his own badge); the huddle
+        // continues with Alice.
+        world.call_leave("office", &b.id).unwrap();
+        for u in [&mut a, &mut b, &mut c] {
+            match u.rx.try_recv().unwrap() {
+                ServerMsg::CallLeave { ref id } => assert_eq!(id, &b_id),
+                other => panic!("expected call_leave, got {other:?}"),
+            }
+        }
+
+        // Carol leaves the *room* mid-call: presence only, the call state
+        // is untouched (she was never a participant).
+        world.leave("office", &c_id);
+        assert!(matches!(a.rx.try_recv().unwrap(), ServerMsg::Left { .. }));
+        assert!(matches!(b.rx.try_recv().unwrap(), ServerMsg::Left { .. }));
+
+        // Alice hangs up as the last participant: call_end(last_left) for
+        // the whole room, and the room's call slot is cleared (no leak).
+        world.call_leave("office", &a.id).unwrap();
+        for u in [&mut a, &mut b] {
+            match u.rx.try_recv().unwrap() {
+                ServerMsg::CallEnd { ref reason } => assert_eq!(reason, "last_left"),
+                other => panic!("expected call_end, got {other:?}"),
+            }
+        }
+        world
+            .call_relay_offer("office", &b.id, ROOM_TARGET, "sdp".into())
+            .expect("the room can start a fresh huddle");
+        match b.rx.try_recv().unwrap() {
+            ServerMsg::CallStart { participants, .. } => {
+                assert_eq!(participants.len(), 1);
+                assert_eq!(participants[0].id, b.id);
+            }
+            other => panic!("expected call_start, got {other:?}"),
+        }
+        assert!(matches!(
+            a.rx.try_recv().unwrap(),
+            ServerMsg::CallStart { .. }
+        ));
     }
 }
