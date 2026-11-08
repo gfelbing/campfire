@@ -107,6 +107,7 @@ Because of the HTTP/3-only data path:
 | `/assets/*` | GET | JS/CSS/images (embedded) |
 | `/api/v1/maps` | GET | List maps: `{id, name, thumb}` |
 | `/api/v1/maps/{id}` | GET | Tiled JSON for one map |
+| `/api/v1/maps/{id}/{*path}` | GET | a file from the map's directory (tileset images) |
 | `/api/v1/rooms` | GET | Active rooms: `{room, map, users}` |
 | `/api/v1/turn/credential` | POST | Short-lived TURN credentials: `{urls, username, credential, expires_in}` (RFC 8489, HMAC-signed, 1 h TTL, rate-limited) |
 | `/healthz` | GET | Liveness: `{status, users, rooms, uptime}` |
@@ -298,7 +299,7 @@ campfire/
 │       ├── world/            # map rendering, avatars, interpolation
 │       ├── net/              # WebTransport, SSE fallback, reconnect
 │       └── call/             # peer connections, getUserMedia, bubble UI
-├── maps/                     # bundled Tiled JSON maps + thumbnails
+├── maps/                     # one self-contained directory per map: <id>.json + its tilesets
 └── tools/
     └── loadtest/             # N simulated users + call groups over real QUIC (perf harness)
 ```

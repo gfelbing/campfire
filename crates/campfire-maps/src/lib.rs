@@ -148,11 +148,12 @@ fn spawn_point(width: u32, height: u32, walkable: &[bool]) -> Result<(f32, f32),
 static MAPS: Dir<'static> = include_dir!("$CARGO_MANIFEST_DIR/../../maps");
 
 /// Parse every `*.json` in the embedded `maps/` directory, keyed by file
-/// stem. Files that fail to parse are skipped, so a bad map can't take the
-/// server down.
+/// stem. Each map lives in its own directory (`maps/<id>/<id>.json`) together
+/// with its tilesets, so a map is self-contained. Files that fail to parse
+/// are skipped, so a bad map can't take the server down.
 pub fn bundled() -> HashMap<String, MapData> {
     let mut maps = HashMap::new();
-    for file in MAPS.files() {
+    for file in walk(&MAPS) {
         if file.path().extension().is_none_or(|e| e != "json") {
             continue;
         }
@@ -168,6 +169,32 @@ pub fn bundled() -> HashMap<String, MapData> {
         }
     }
     maps
+}
+
+/// All embedded files, recursively. include_dir 0.7's `files()` only lists
+/// the directory's immediate files, so walk `entries()` ourselves.
+fn walk(dir: &Dir<'static>) -> Vec<&'static include_dir::File<'static>> {
+    let mut out = Vec::new();
+    for entry in dir.entries() {
+        match entry {
+            include_dir::DirEntry::Dir(d) => out.extend(walk(d)),
+            include_dir::DirEntry::File(f) => out.push(f),
+        }
+    }
+    out
+}
+
+/// An embedded file belonging to one map's directory (a tileset image, for
+/// example). `path` is relative to `maps/<id>/`; `..` segments are refused,
+/// and include_dir's lookup simply fails for anything outside the tree.
+pub fn asset(id: &str, path: &str) -> Option<&'static [u8]> {
+    if path
+        .split('/')
+        .any(|seg| seg.is_empty() || seg == "." || seg == "..")
+    {
+        return None;
+    }
+    MAPS.get_file(format!("{id}/{path}")).map(|f| f.contents())
 }
 
 #[cfg(test)]

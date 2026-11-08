@@ -62,14 +62,17 @@ def tile_pixels(base):
 
 
 def write_tileset():
+    """One self-contained tiles.png per map directory (each map carries
+    its own tilesets; nothing lives in client/src/assets)."""
     tiles = [WATER, FLOOR, WALL]
     pixels = []
     for t in tiles:
         pixels.extend(tile_pixels(t))
-    path = os.path.join(ROOT, "client", "src", "assets", "tiles.png")
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    write_png(path, TILE_SIZE, TILE_SIZE * len(tiles), pixels)
-    print(path)
+    for map_id in ("office", "island"):
+        path = os.path.join(OUT, map_id, "tiles.png")
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        write_png(path, TILE_SIZE, TILE_SIZE * len(tiles), pixels)
+        print(path)
 
 
 def tiled(w, h, ground, collision):
@@ -128,7 +131,9 @@ def tiled(w, h, ground, collision):
 
 
 def save(filename, doc):
-    path = os.path.join(OUT, filename)
+    # maps/<map-id>/<map-id>.json — one self-contained directory per map.
+    stem = os.path.splitext(filename)[0]
+    path = os.path.join(OUT, stem, filename)
     with open(path, "w") as f:
         json.dump(doc, f, indent=1)
         f.write("\n")

@@ -110,6 +110,9 @@ pub fn router(state: AppState) -> Router {
         .route("/metrics", get(metrics_endpoint))
         .route("/api/v1/maps", get(list_maps))
         .route("/api/v1/maps/{id}", get(map_by_id))
+        // Map-owned files (tileset images) relative to the map URL, so the
+        // Tiled JSON's relative `image` paths resolve as-is (README §6.1).
+        .route("/api/v1/maps/{id}/{*path}", get(map_asset))
         .route("/api/v1/rooms", get(list_rooms))
         // TURN REST credentials for the co-located relay (README §6.2).
         .route("/api/v1/turn/credential", post(turn_credential))
@@ -172,6 +175,23 @@ async fn map_by_id(UrlPath(id): UrlPath<String>) -> Result<impl IntoResponse, St
             )
         })
         .ok_or(StatusCode::NOT_FOUND)
+}
+
+/// `GET /api/v1/maps/{id}/{*path}` → a file from the map's own directory
+/// (tileset images). Content type by extension, PNG as the only expected one.
+async fn map_asset(
+    UrlPath((id, path)): UrlPath<(String, String)>,
+) -> Result<impl IntoResponse, StatusCode> {
+    let bytes = campfire_maps::asset(&id, &path).ok_or(StatusCode::NOT_FOUND)?;
+    let mime = match path.rsplit('.').next() {
+        Some("png") => "image/png",
+        Some("jpg" | "jpeg") => "image/jpeg",
+        Some("webp") => "image/webp",
+        Some("gif") => "image/gif",
+        Some("json") => "application/json",
+        _ => "application/octet-stream",
+    };
+    Ok(([(header::CONTENT_TYPE, mime)], Bytes::from_static(bytes)))
 }
 
 /// `GET /api/v1/rooms` → the active rooms with member counts.
