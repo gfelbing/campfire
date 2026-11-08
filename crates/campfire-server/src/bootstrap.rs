@@ -106,11 +106,29 @@ pub fn start(
                     metrics.turn_splice_close();
                 } else {
                     let line = buf[..n].iter().position(|&b| b == b'\n').map(|i| &buf[..i]);
+                    // The request target ("GET /play/office/office.json?name=… …"):
+                    // the reload must keep it, or the browser loses its query
+                    // parameters (the ?alt=1 marker would otherwise replace them).
+                    let target = line
+                        .as_deref()
+                        .and_then(|l| std::str::from_utf8(l).ok())
+                        .and_then(|l| {
+                            l.split(' ')
+                                .nth(1)
+                                .filter(|t| t.starts_with('/') && !t.contains(' '))
+                                .map(|t| t.to_owned())
+                        });
                     let wants_alt_marker = line.is_some_and(|l| {
                         let l = std::str::from_utf8(l).unwrap_or("");
                         l.contains("alt=1")
                     });
-                    if let Err(err) = bootstrap_answer(tls, &alt, wants_alt_marker).await {
+                    let sep = if target.as_deref().is_some_and(|t| t.contains('?')) {
+                        "&"
+                    } else {
+                        "?"
+                    };
+                    let refresh = target.map(|t| format!("{t}{sep}alt=1"));
+                    if let Err(err) = bootstrap_answer(tls, &alt, wants_alt_marker, refresh).await {
                         debug!(%err, "TLS front: bootstrap answer failed");
                     }
                 }
@@ -183,7 +201,12 @@ async fn splice_to_turn<S>(
 /// (`?alt=1`) so the browser re-requests over HTTP/3 with the alternative
 /// cached. If the reload still lands here (no `alt=1` → refresh; `alt=1` →
 /// explanation), UDP to this port is not reachable from that browser.
-async fn bootstrap_answer<S>(mut tls: S, alt: &str, wants_alt_marker: bool) -> std::io::Result<()>
+async fn bootstrap_answer<S>(
+    mut tls: S,
+    alt: &str,
+    wants_alt_marker: bool,
+    refresh: Option<String>,
+) -> std::io::Result<()>
 where
     S: tokio::io::AsyncWrite + Unpin,
 {
@@ -193,10 +216,15 @@ where
 because the browser has not switched to HTTP/3 yet.</p>\
 <p>If reloading the page does not fix this, UDP to this port is not \
 reachable from your browser/network.</p>"
+            .to_owned()
     } else {
-        "<!doctype html><meta charset=utf-8>\
-<meta http-equiv=refresh content=\"0; url=?alt=1\">\
+        // Reload to the original target (query kept) with the alt marker.
+        let refresh_url = refresh.as_deref().unwrap_or("?alt=1");
+        format!(
+            "<!doctype html><meta charset=utf-8>\
+<meta http-equiv=refresh content=\"0; url={refresh_url}\">\
 <title>Campfire</title><p>Switching to HTTP/3&hellip;</p>"
+        )
     };
     let head = format!(
         "HTTP/1.1 200 OK\r\nAlt-Svc: {alt}\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n",

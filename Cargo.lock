@@ -334,7 +334,6 @@ dependencies = [
 name = "campfire-maps"
 version = "0.1.0"
 dependencies = [
- "include_dir",
  "serde",
  "serde_json",
  "thiserror",

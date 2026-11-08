@@ -36,7 +36,9 @@ pub async fn start_server() -> (SocketAddr, CertificateDer<'static>) {
     let socket = campfire_server::demux::DemuxSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap();
     let addr = socket.local_addr().unwrap();
     let endpoint = campfire_server::make_endpoint(conf, socket).unwrap();
-    let world = campfire_server::world::World::new();
+    let world = campfire_server::world::World::new(campfire_maps::Maps::load(
+        std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../maps")),
+    ));
     let _tick = campfire_server::world::start_ticking(world.clone());
     let state = campfire_server::api::AppState {
         world,

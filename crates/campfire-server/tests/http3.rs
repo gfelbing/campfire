@@ -82,7 +82,16 @@ async fn http3_healthz_index_and_maps() {
     assert_eq!(status, 200);
     let maps: Vec<serde_json::Value> = serde_json::from_str(&body).unwrap();
     let ids: Vec<&str> = maps.iter().map(|m| m["id"].as_str().unwrap()).collect();
-    assert_eq!(ids, vec!["island", "office"], "maps body: {body}");
+    assert_eq!(
+        ids,
+        vec![
+            "island",
+            "interiors/conference",
+            "interiors/office",
+            "office"
+        ],
+        "maps body: {body}"
+    );
 
     // Unknown path → 404.
     let (status, _) = get(addr, &root, "/nope").await;
@@ -95,12 +104,13 @@ async fn api_maps_by_id_and_rooms() {
     campfire_server::api::mark_start();
     let (addr, root) = start_server().await;
 
-    // GET /api/v1/maps/office — the raw Tiled JSON for one map.
-    let (status, body) = get(addr, &root, "/api/v1/maps/office").await;
+    // GET /api/v1/maps/interiors/conference — the raw Tiled JSON for
+    // one map (id with a slash: the file's path under `maps/`).
+    let (status, body) = get(addr, &root, "/api/v1/maps/interiors/conference").await;
     assert_eq!(status, 200, "map body: {body}");
     let map: serde_json::Value = serde_json::from_str(&body).unwrap();
-    assert_eq!(map["width"], 40);
-    assert_eq!(map["height"], 30);
+    assert_eq!(map["width"], 24);
+    assert_eq!(map["height"], 14);
     let layer_names: Vec<&str> = map["layers"]
         .as_array()
         .unwrap()
@@ -108,7 +118,7 @@ async fn api_maps_by_id_and_rooms() {
         .map(|l| l["name"].as_str().unwrap())
         .collect();
     assert!(
-        layer_names.contains(&"ground") && layer_names.contains(&"collision"),
+        layer_names.contains(&"collisions"),
         "layers: {layer_names:?}"
     );
 

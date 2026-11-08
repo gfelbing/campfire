@@ -32,6 +32,12 @@ pub struct Config {
     #[arg(long)]
     pub static_dir: Option<PathBuf>,
 
+    /// Maps directory: each direct subdirectory is a map (its own Tiled
+    /// file plus tilesets). Mounted externally in deployment; dev defaults
+    /// to the local `maps/` folder.
+    #[arg(long, default_value = "maps")]
+    pub maps_dir: PathBuf,
+
     /// TURN REST shared secret (README §6.2). Clients fetch per-user
     /// credentials from `POST /api/v1/turn/credential`. When omitted, a
     /// random secret is generated at startup (logged once) — relay

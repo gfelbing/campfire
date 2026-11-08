@@ -9,8 +9,8 @@
 //! blocked). Maps without a collision layer are fully walkable.
 
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 
-use include_dir::{Dir, include_dir};
 use serde::Deserialize;
 use thiserror::Error;
 
@@ -74,12 +74,12 @@ impl MapData {
             return Err(MapError::EmptyGrid);
         }
         let cells = (raw.width * raw.height) as usize;
-        // First tile layer named "collision" decides walkability; without
-        // one the whole map is walkable.
-        let collision = raw
-            .layers
-            .iter()
-            .find(|l| l.kind == "tilelayer" && l.name == "collision");
+        // First tile layer named "collision" (or "collisions", the Tiled
+        // Tiled convention) decides walkability; without one the whole
+        // map is walkable.
+        let collision = raw.layers.iter().find(|l| {
+            l.kind == "tilelayer" && (l.name == "collision" || l.name == "collisions")
+        });
         let walkable = match collision.and_then(|l| l.data.as_ref()) {
             Some(gids) if gids.len() == cells => gids.iter().map(|&gid| gid == 0).collect(),
             Some(_) => return Err(MapError::CollisionSizeMismatch),
@@ -143,58 +143,117 @@ fn spawn_point(width: u32, height: u32, walkable: &[bool]) -> Result<(f32, f32),
     Err(MapError::NoSpawn)
 }
 
-/// The `maps/` directory next to the workspace root, embedded at compile
-/// time (single deploy artifact, README §3).
-static MAPS: Dir<'static> = include_dir!("$CARGO_MANIFEST_DIR/../../maps");
-
-/// Parse every `*.json` in the embedded `maps/` directory, keyed by file
-/// stem. Each map lives in its own directory (`maps/<id>/<id>.json`) together
-/// with its tilesets, so a map is self-contained. Files that fail to parse
-/// are skipped, so a bad map can't take the server down.
-pub fn bundled() -> HashMap<String, MapData> {
-    let mut maps = HashMap::new();
-    for file in walk(&MAPS) {
-        if file.path().extension().is_none_or(|e| e != "json") {
-            continue;
-        }
-        let Some(stem) = file
-            .path()
-            .file_stem()
-            .map(|s| s.to_string_lossy().into_owned())
-        else {
-            continue;
-        };
-        if let Ok(map) = MapData::parse(&stem, file.contents()) {
-            maps.insert(stem, map);
-        }
-    }
-    maps
+/// The loaded maps, keyed by the map file's path under the maps directory
+/// (extension dropped; a file named after its directory collapses to the
+/// directory name: `office/office.json` → `office`,
+/// `interiors/conference.tmj` → `interiors/conference`). Loaded
+/// from disk at startup (maps are mounted externally in deployment; dev uses
+/// the local `maps/` folder).
+pub struct Maps {
+    /// The maps directory the maps were loaded from (also serves tileset
+    /// assets: `maps_dir/<id>/<path>`).
+    pub dir: PathBuf,
+    maps: HashMap<String, MapData>,
 }
 
-/// All embedded files, recursively. include_dir 0.7's `files()` only lists
-/// the directory's immediate files, so walk `entries()` ourselves.
-fn walk(dir: &Dir<'static>) -> Vec<&'static include_dir::File<'static>> {
-    let mut out = Vec::new();
-    for entry in dir.entries() {
-        match entry {
-            include_dir::DirEntry::Dir(d) => out.extend(walk(d)),
-            include_dir::DirEntry::File(f) => out.push(f),
+/// The map id for a map file at `path` under the maps directory: the
+/// relative path without extension, minus a final segment repeating the
+/// previous one (`office/office.json` → `office`).
+#[doc(hidden)]
+pub fn map_id(dir: &Path, file: &Path) -> Option<String> {
+    let rel = file.strip_prefix(dir).ok()?;
+    let mut segments: Vec<String> = rel
+        .components()
+        .filter_map(|c| match c {
+            std::path::Component::Normal(s) => Some(s.to_string_lossy().into_owned()),
+            _ => None,
+        })
+        .collect();
+    let stem = rel.file_stem()?.to_string_lossy().into_owned();
+    segments.pop();
+    if let Some(parent) = segments.last() {
+        if *parent == stem {
+            segments.pop();
         }
     }
-    out
+    segments.push(stem);
+    let id = segments.join("/");
+    valid_id(&id).then_some(id)
 }
 
-/// An embedded file belonging to one map's directory (a tileset image, for
-/// example). `path` is relative to `maps/<id>/`; `..` segments are refused,
-/// and include_dir's lookup simply fails for anything outside the tree.
-pub fn asset(id: &str, path: &str) -> Option<&'static [u8]> {
-    if path
-        .split('/')
-        .any(|seg| seg.is_empty() || seg == "." || seg == "..")
-    {
-        return None;
+impl Maps {
+    /// Load every `*.json`/`*.tmj` file under `dir` (recursively), keyed by
+    /// [`map_id`]. Files that fail to parse are skipped, so a bad map can't
+    /// take the server down.
+    pub fn load(dir: &Path) -> Self {
+        let mut maps = HashMap::new();
+        let mut walk: Vec<PathBuf> = vec![dir.to_owned()];
+        while let Some(path) = walk.pop() {
+            let Ok(entries) = std::fs::read_dir(&path) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    walk.push(path);
+                } else if path
+                    .extension()
+                    .is_some_and(|e| e == "json" || e == "tmj")
+                {
+                    let Some(id) = map_id(dir, &path) else {
+                        continue;
+                    };
+                    let Ok(data) = std::fs::read(&path) else {
+                        continue;
+                    };
+                    if let Ok(map) = MapData::parse(&id, &data) {
+                        maps.insert(id, map);
+                    }
+                }
+            }
+        }
+        Self { dir: dir.to_owned(), maps }
     }
-    MAPS.get_file(format!("{id}/{path}")).map(|f| f.contents())
+
+    /// The map with the given id.
+    pub fn get(&self, id: &str) -> Option<&MapData> {
+        self.maps.get(id)
+    }
+
+    /// Every map, sorted by id.
+    pub fn all(&self) -> Vec<&MapData> {
+        let mut maps: Vec<&MapData> = self.maps.values().collect();
+        maps.sort_by(|a, b| a.id.cmp(&b.id));
+        maps
+    }
+
+    /// A file belonging to one map's directory (a tileset image, for
+    /// example), read from disk. `path` is relative to `maps_dir/<id>/`;
+    /// `..` segments are refused.
+    pub fn asset(&self, id: &str, path: &str) -> Option<Vec<u8>> {
+        if path
+            .split('/')
+            .any(|seg| seg.is_empty() || seg == "." || seg == "..")
+        {
+            return None;
+        }
+        std::fs::read(self.dir.join(id).join(path)).ok()
+    }
+}
+
+/// Whether the id is a valid room id (also used as a map directory name).
+fn valid_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 64
+        && id
+            .split('/')
+            .all(|seg| {
+                !seg.is_empty()
+                    && seg.len() <= 32
+                    && seg
+                        .chars()
+                        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
+            })
 }
 
 #[cfg(test)]
@@ -280,19 +339,26 @@ mod tests {
 
     #[test]
     fn bundled_maps_are_loaded() {
-        let maps = bundled();
-        assert!(maps.contains_key("office"), "office map missing");
-        assert!(maps.contains_key("island"), "island map missing");
-        let office = &maps["office"];
+        let maps = Maps::load(Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../maps")));
+        assert!(maps.get("office").is_some(), "office map missing");
+        assert!(maps.get("island").is_some(), "island map missing");
+        let office = maps.get("office").unwrap();
         assert_eq!((office.width, office.height), (40, 30));
-        let island = &maps["island"];
+        let island = maps.get("island").unwrap();
         assert_eq!((island.width, island.height), (36, 28));
-        for map in maps.values() {
+        for map in maps.all() {
             assert!(
                 map.is_walkable(map.spawn.0, map.spawn.1),
                 "{}: spawn must be walkable",
                 map.id
             );
         }
+    }
+
+    #[test]
+    fn asset_refuses_traversal() {
+        let maps = Maps::load(Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../maps")));
+        assert!(maps.asset("island", "tiles.png").is_some());
+        assert!(maps.asset("island", "../office/office.json").is_none());
     }
 }

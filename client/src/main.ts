@@ -168,8 +168,8 @@ async function main(): Promise<void> {
       conn.sendLeave();
       window.setTimeout(() => {
         window.location.href =
-          `/?room=${encodeURIComponent(room)}` +
-          `&name=${encodeURIComponent(opts.name)}` +
+          `/play/${room.split("/").map(encodeURIComponent).join("/")}/` +
+          `?name=${encodeURIComponent(opts.name)}` +
           `&color=${encodeURIComponent(opts.color)}`;
       }, 150);
     },

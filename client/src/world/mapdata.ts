@@ -2,11 +2,12 @@
 // See campfire-maps for the server-side parser.
 
 export interface TileLayer {
-  type: "tilelayer";
+  type: "tilelayer" | "group";
   name: string;
   width: number;
   height: number;
-  data: number[];
+  data?: number[];
+  layers?: TileLayer[];
 }
 
 export interface TilesetRef {
@@ -47,11 +48,19 @@ export function parseMap(id: string, raw: TiledMap): MapData {
   const cells = width * height;
   const ground = new Uint32Array(cells);
   const collision = new Uint32Array(cells);
-  for (const layer of raw.layers) {
-    if (layer.type !== "tilelayer" || layer.data.length !== cells) continue;
-    if (layer.name === "ground") ground.set(layer.data);
-    else if (layer.name === "collision") collision.set(layer.data);
-  }
+  // Walk the layer tree; group layers nest their children.
+  const visit = (layers: TileLayer[]): void => {
+    for (const layer of layers) {
+      if (layer.type === "group" && layer.layers) {
+        visit(layer.layers);
+        continue;
+      }
+      if (layer.type !== "tilelayer" || layer.data?.length !== cells) continue;
+      if (layer.name === "ground" || layer.name === "floor1") ground.set(layer.data);
+      else if (layer.name === "collision" || layer.name === "collisions") collision.set(layer.data);
+    }
+  };
+  visit(raw.layers);
   return {
     id,
     width,

@@ -103,7 +103,7 @@ pub enum JoinError {
 /// The whole world: the map registry plus every occupied room.
 #[derive(Clone)]
 pub struct World {
-    maps: Arc<HashMap<String, campfire_maps::MapData>>,
+    maps: Arc<campfire_maps::Maps>,
     rooms: Arc<Mutex<HashMap<String, Room>>>,
     id_counter: Arc<AtomicU64>,
     nonce: Arc<Mutex<[u8; 4]>>,
@@ -114,25 +114,32 @@ pub struct World {
     reconnect_window: Duration,
 }
 
-impl Default for World {
-    fn default() -> Self {
-        Self::new()
-    }
+#[cfg(test)]
+pub(crate) fn test_maps() -> campfire_maps::Maps {
+    campfire_maps::Maps::load(std::path::Path::new(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../maps"
+    )))
 }
 
 impl World {
-    /// A world with all bundled maps registered as rooms.
-    pub fn new() -> Self {
+    /// A world over the loaded maps (each registered as a room).
+    pub fn new(maps: campfire_maps::Maps) -> Self {
         let mut nonce = [0u8; 4];
         rand::thread_rng().fill_bytes(&mut nonce);
         Self {
-            maps: Arc::new(campfire_maps::bundled()),
+            maps: Arc::new(maps),
             rooms: Arc::default(),
             id_counter: Arc::new(AtomicU64::new(0)),
             nonce: Arc::new(Mutex::new(nonce)),
             session_counter: Arc::new(AtomicU64::new(0)),
             reconnect_window: RECONNECT_WINDOW,
         }
+    }
+
+    /// The map registry (room ids and tileset assets, for the HTTP API).
+    pub fn maps(&self) -> &Arc<campfire_maps::Maps> {
+        &self.maps
     }
 
     /// Override the reconnect window (tests use a short one).
@@ -947,7 +954,7 @@ mod tests {
 
     #[test]
     fn join_leave_cycle() {
-        let world = World::new();
+        let world = World::new(test_maps());
         let (tx_a, mut rx_a) = channel();
         let (dtx_a, _) = datagram_channel();
         let (tx_b, mut rx_b) = channel();
@@ -993,7 +1000,7 @@ mod tests {
 
     #[test]
     fn unknown_room_is_rejected() {
-        let world = World::new();
+        let world = World::new(test_maps());
         let (tx, _) = channel();
         let (dtx, _) = datagram_channel();
         assert_eq!(
@@ -1014,7 +1021,7 @@ mod tests {
 
     #[test]
     fn join_spawns_at_the_map_spawn() {
-        let world = World::new();
+        let world = World::new(test_maps());
         let (tx, _) = channel();
         let (dtx, _) = datagram_channel();
         let joined = world
@@ -1034,7 +1041,7 @@ mod tests {
 
     #[tokio::test]
     async fn movement_is_validated_and_batched() {
-        let world = World::new();
+        let world = World::new(test_maps());
         let (tx_a, _) = channel();
         let (dtx_a, mut dgr_a) = datagram_channel();
         let (tx_b, _) = channel();
@@ -1120,7 +1127,7 @@ mod tests {
 
     #[tokio::test]
     async fn movement_rejects_blocked_tiles() {
-        let world = World::new();
+        let world = World::new(test_maps());
         let (tx_a, _) = channel();
         let (dtx_a, mut dgr_a) = datagram_channel();
         let a = world
@@ -1154,7 +1161,7 @@ mod tests {
 
     #[test]
     fn join_becomes_dirty_only_for_nonempty_rooms() {
-        let world = World::new();
+        let world = World::new(test_maps());
         let (tx_a, _) = channel();
         let (dtx_a, mut dgr_a) = datagram_channel();
         world
@@ -1199,7 +1206,7 @@ mod tests {
 
     #[test]
     fn chat_echoes_to_everyone_and_keeps_history() {
-        let world = World::new();
+        let world = World::new(test_maps());
         let (tx_a, mut rx_a) = channel();
         let (dtx_a, _) = datagram_channel();
         let (tx_b, mut rx_b) = channel();
@@ -1249,7 +1256,7 @@ mod tests {
 
     #[test]
     fn typing_not_echoed_to_sender() {
-        let world = World::new();
+        let world = World::new(test_maps());
         let (tx_a, mut rx_a) = channel();
         let (dtx_a, _) = datagram_channel();
         let (tx_b, mut rx_b) = channel();
@@ -1330,7 +1337,7 @@ mod tests {
 
     #[test]
     fn bubble_forms_when_two_users_are_close() {
-        let world = World::new();
+        let world = World::new(test_maps());
         let mut a = join_user(&world, "office", "alice");
         let mut b = join_user(&world, "office", "bob");
         let mut c = join_user(&world, "office", "carol");
@@ -1372,7 +1379,7 @@ mod tests {
 
     #[test]
     fn walking_in_joins_and_walking_out_leaves_after_delay() {
-        let world = World::new();
+        let world = World::new(test_maps());
         let mut a = join_user(&world, "office", "alice");
         let mut b = join_user(&world, "office", "bob");
         world.tick();
@@ -1414,7 +1421,7 @@ mod tests {
 
     #[test]
     fn toggling_bubble_off_drops_immediately() {
-        let world = World::new();
+        let world = World::new(test_maps());
         let mut a = join_user(&world, "office", "alice");
         let mut b = join_user(&world, "office", "bob");
         let mut c = join_user(&world, "office", "carol");
@@ -1458,7 +1465,7 @@ mod tests {
 
     #[test]
     fn call_relay_requires_participation() {
-        let world = World::new();
+        let world = World::new(test_maps());
         let mut a = join_user(&world, "office", "alice");
         let mut b = join_user(&world, "office", "bob");
         let mut c = join_user(&world, "office", "carol");
@@ -1519,7 +1526,7 @@ mod tests {
 
     #[test]
     fn call_mute_is_presence_broadcast_to_others() {
-        let world = World::new();
+        let world = World::new(test_maps());
         let mut a = join_user(&world, "office", "alice");
         let mut b = join_user(&world, "office", "bob");
         let mut c = join_user(&world, "office", "carol");
@@ -1553,7 +1560,7 @@ mod tests {
 
     #[test]
     fn call_leave_and_room_leave_drop_the_call() {
-        let world = World::new();
+        let world = World::new(test_maps());
         let mut a = join_user(&world, "office", "alice");
         let mut b = join_user(&world, "office", "bob");
         world.tick();
@@ -1609,7 +1616,7 @@ mod tests {
 
     #[test]
     fn reconnect_restores_identity_without_flicker() {
-        let world = World::new();
+        let world = World::new(test_maps());
         let (mut a, a_token, a_session) = join_token(&world, "office", "alice", None);
         let (mut b, _, _) = join_token(&world, "office", "bob", None);
         a.rx.try_recv().unwrap(); // alice hears bob join
@@ -1630,7 +1637,7 @@ mod tests {
 
     #[test]
     fn reconnect_while_alive_switches_the_session() {
-        let world = World::new();
+        let world = World::new(test_maps());
         let (mut a_old, a_token, _) = join_token(&world, "office", "alice", None);
         let (b, _, _) = join_token(&world, "office", "bob", None);
         a_old.rx.try_recv().unwrap(); // alice hears bob join
@@ -1651,7 +1658,7 @@ mod tests {
 
     #[tokio::test]
     async fn stale_discard_is_a_noop() {
-        let world = World::new().with_reconnect_window(Duration::from_millis(80));
+        let world = World::new(test_maps()).with_reconnect_window(Duration::from_millis(80));
         let (mut a_old, a_token, a_session1) = join_token(&world, "office", "alice", None);
         let (mut b, _, _) = join_token(&world, "office", "bob", None);
         a_old.rx.try_recv().unwrap();
@@ -1674,7 +1681,7 @@ mod tests {
 
     #[tokio::test]
     async fn gone_member_expires_into_a_real_leave() {
-        let world = World::new().with_reconnect_window(Duration::from_millis(80));
+        let world = World::new(test_maps()).with_reconnect_window(Duration::from_millis(80));
         let (mut a, a_token, a_session) = join_token(&world, "office", "alice", None);
         let (mut b, _, _) = join_token(&world, "office", "bob", None);
         a.rx.try_recv().unwrap();
@@ -1700,7 +1707,7 @@ mod tests {
 
     #[tokio::test]
     async fn gone_member_in_a_call_drops_the_call_on_expiry() {
-        let world = World::new().with_reconnect_window(Duration::from_millis(80));
+        let world = World::new(test_maps()).with_reconnect_window(Duration::from_millis(80));
         let (mut a, _, a_session) = join_token(&world, "office", "alice", None);
         let (mut b, _, _) = join_token(&world, "office", "bob", None);
         world.tick(); // both at spawn: the bubble forms
@@ -1724,7 +1731,7 @@ mod tests {
 
     #[test]
     fn token_mismatch_is_a_fresh_user() {
-        let world = World::new();
+        let world = World::new(test_maps());
         let (mut a, a_token, _) = join_token(&world, "office", "alice", None);
         let (mut b, _, _) = join_token(&world, "office", "bob", None);
         a.rx.try_recv().unwrap();
@@ -1761,7 +1768,7 @@ mod tests {
 
     #[test]
     fn explicit_leave_beats_the_reconnect_window() {
-        let world = World::new();
+        let world = World::new(test_maps());
         let (mut a, a_token, _) = join_token(&world, "office", "alice", None);
         let (mut b, _, _) = join_token(&world, "office", "bob", None);
         a.rx.try_recv().unwrap();

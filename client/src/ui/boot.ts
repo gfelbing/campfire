@@ -23,7 +23,21 @@ export function boot(): Promise<BootOptions> {
   const root = document.getElementById("boot")!;
 
   const params = new URLSearchParams(window.location.search);
-  const urlRoom = params.get("room");
+  // The map id can be in the path: `/play/interiors/office.tmj` →
+  // room `interiors/office` (the file's path under `maps/`, extension
+  // dropped, a repeated directory name removed). `?room=` still works.
+  const pathRoom = (() => {
+    const m = /^\/play\/(.+?)\/?$/.exec(window.location.pathname);
+    if (!m) return undefined;
+    let id = m[1];
+    id = id.replace(/\.(json|tmj)$/, "");
+    const segments = id.split("/");
+    if (segments.length > 1 && segments[segments.length - 1] === segments[segments.length - 2]) {
+      segments.pop();
+    }
+    return segments.join("/");
+  })();
+  const urlRoom = pathRoom ? decodeURIComponent(pathRoom) : params.get("room");
   const urlName = params.get("name")?.trim();
   const urlColor = params.get("color");
   if (urlRoom && urlName && urlColor) {
@@ -82,7 +96,12 @@ export function boot(): Promise<BootOptions> {
     swatches.appendChild(b);
   });
 
-  // Map picker: the bundled maps, with the well-known two as fallback.
+  // Map picker: hidden when the room is already in the path (`/play/…`).
+  const hasPathRoom = pathRoom !== undefined;
+  const mapLabel = root.querySelector<HTMLLabelElement>("label[for='map'], label:nth-of-type(2)")!;
+  if (hasPathRoom) mapLabel.style.display = "none";
+
+  // Map picker: the loaded maps, with the well-known two as fallback.
   const fillMaps = (maps: MapInfo[]): void => {
     for (const m of maps) {
       const opt = document.createElement("option");
@@ -94,6 +113,7 @@ export function boot(): Promise<BootOptions> {
 
   return new Promise<BootOptions>((resolve) => {
     fillMaps([{ id: "office", name: "Office" }, { id: "island", name: "Island" }]);
+    if (hasPathRoom) mapSelect.value = decodeURIComponent(pathRoom);
     void (async () => {
       try {
         const res = await fetch("/api/v1/maps");
@@ -102,6 +122,15 @@ export function boot(): Promise<BootOptions> {
         if (maps.length > 0) {
           mapSelect.replaceChildren();
           fillMaps(maps);
+          if (hasPathRoom) {
+            // The path picks the map; fall back to the picker only if the
+            // path's map is not on the server.
+            if (maps.some((m) => m.id === decodeURIComponent(pathRoom))) {
+              mapSelect.value = decodeURIComponent(pathRoom);
+            } else {
+              mapLabel.style.display = "";
+            }
+          }
         }
       } catch {
         // fetch failed: keep the fallback list
@@ -120,6 +149,14 @@ export function boot(): Promise<BootOptions> {
         localStorage.setItem(NAME_KEY, name);
       } catch {
         // ignore storage failures
+      }
+      // From the landing page, the map id goes into the path (reload keeps
+      // the name and color); with a path room the join happens right here.
+      if (!hasPathRoom) {
+        window.location.href =
+          `/play/${encodeURIComponent(mapSelect.value)}/` +
+          `?name=${encodeURIComponent(name)}&color=${encodeURIComponent(color)}`;
+        return;
       }
       root.style.display = "none";
       resolve({ room: mapSelect.value, name, color });

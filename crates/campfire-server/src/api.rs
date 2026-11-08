@@ -74,7 +74,7 @@ impl AppState {
         metrics: crate::metrics::Metrics,
     ) -> Self {
         Self {
-            world: World::new(),
+            world: World::new(campfire_maps::Maps::load(&cfg.maps_dir)),
             static_dir: cfg.static_dir.clone(),
             turn_secret,
             turn_rate: Arc::new(std::sync::Mutex::new(HashMap::new())),
@@ -109,15 +109,20 @@ pub fn router(state: AppState) -> Router {
         // Prometheus scrape endpoint (README §11 Phase 8).
         .route("/metrics", get(metrics_endpoint))
         .route("/api/v1/maps", get(list_maps))
-        .route("/api/v1/maps/{id}", get(map_by_id))
-        // Map-owned files (tileset images) relative to the map URL, so the
-        // Tiled JSON's relative `image` paths resolve as-is (README §6.1).
-        .route("/api/v1/maps/{id}/{*path}", get(map_asset))
+        // The map id may contain slashes (`interiors/conference`), so
+        // one wildcard serves both the map JSON and map-owned files (tileset
+        // images relative to the map URL, README §6.1): `office`,
+        // `office/tiles.png`.
+        .route("/api/v1/maps/{*rest}", get(map_or_asset))
         .route("/api/v1/rooms", get(list_rooms))
         // TURN REST credentials for the co-located relay (README §6.2).
         .route("/api/v1/turn/credential", post(turn_credential))
         // WebTransport realtime session (README §5).
         .route("/wt", connect(handle_wt))
+        // The map in the URL path: `/play/office/office.json` picks the
+        // office map. The server serves the SPA; the client takes the room
+        // id from the path segment.
+        .route("/play/{*rest}", get(play))
         // Realtime fallback for browsers without WebTransport (README §8).
         .route("/rt/sse", get(sse_stream))
         .route("/rt/event", post(fallback_event))
@@ -150,40 +155,47 @@ async fn healthz(State(state): State<AppState>) -> Json<Health> {
     })
 }
 
-/// `GET /api/v1/maps` → one entry per bundled map, sorted by id.
-async fn list_maps() -> Json<Vec<MapInfo>> {
-    let mut maps: Vec<MapInfo> = campfire_maps::bundled()
-        .values()
+/// `GET /api/v1/maps` → one entry per loaded map, sorted by id.
+async fn list_maps(State(state): State<AppState>) -> Json<Vec<MapInfo>> {
+    Json(state
+        .world
+        .maps()
+        .all()
+        .into_iter()
         .map(|m| MapInfo {
             id: m.id.clone(),
             name: m.name.clone(),
             thumb: None,
         })
-        .collect();
-    maps.sort_by(|a, b| a.id.cmp(&b.id));
-    Json(maps)
+        .collect())
 }
 
-/// `GET /api/v1/maps/{id}` → the Tiled JSON for one bundled map.
-async fn map_by_id(UrlPath(id): UrlPath<String>) -> Result<impl IntoResponse, StatusCode> {
-    campfire_maps::bundled()
-        .get(&id)
-        .map(|m| {
-            (
+/// `GET /api/v1/maps/{*rest}` → the map JSON (`office`,
+/// `interiors/conference`) or a file from the map's own directory
+/// (`office/tiles.png`; tileset images). Content type by extension.
+async fn map_or_asset(
+    State(state): State<AppState>,
+    UrlPath(rest): UrlPath<String>,
+) -> Result<impl IntoResponse, StatusCode> {
+    // A map id (no extension, resolvable) serves the Tiled JSON.
+    if !rest.contains('.') {
+        if let Some(m) = state.world.maps().get(&rest) {
+            return Ok((
                 [(header::CONTENT_TYPE, "application/json")],
                 Bytes::from(m.raw.clone()),
-            )
-        })
-        .ok_or(StatusCode::NOT_FOUND)
-}
-
-/// `GET /api/v1/maps/{id}/{*path}` → a file from the map's own directory
-/// (tileset images). Content type by extension, PNG as the only expected one.
-async fn map_asset(
-    UrlPath((id, path)): UrlPath<(String, String)>,
-) -> Result<impl IntoResponse, StatusCode> {
-    let bytes = campfire_maps::asset(&id, &path).ok_or(StatusCode::NOT_FOUND)?;
-    let mime = match path.rsplit('.').next() {
+            ));
+        }
+    }
+    // Otherwise the last segment is a file of the map's directory.
+    let Some((id, file)) = rest.rsplit_once('/') else {
+        return Err(StatusCode::NOT_FOUND);
+    };
+    let bytes = state
+        .world
+        .maps()
+        .asset(id, file)
+        .ok_or(StatusCode::NOT_FOUND)?;
+    let mime = match file.rsplit('.').next() {
         Some("png") => "image/png",
         Some("jpg" | "jpeg") => "image/jpeg",
         Some("webp") => "image/webp",
@@ -191,7 +203,7 @@ async fn map_asset(
         Some("json") => "application/json",
         _ => "application/octet-stream",
     };
-    Ok(([(header::CONTENT_TYPE, mime)], Bytes::from_static(bytes)))
+    Ok(([(header::CONTENT_TYPE, mime)], Bytes::from(bytes)))
 }
 
 /// `GET /api/v1/rooms` → the active rooms with member counts.
@@ -567,6 +579,12 @@ impl<S: Stream + Unpin> Stream for CleanupOnEnd<S> {
 // ---------------------------------------------------------------------------
 // Static files
 // ---------------------------------------------------------------------------
+
+/// `GET /play/{id}/...` → the SPA; the client takes the map id from the
+/// path's second segment (`/play/office/office.json` → room `office`).
+async fn play(State(state): State<AppState>) -> Response {
+    serve_static(&state, "index.html").unwrap_or_else(|| StatusCode::NOT_FOUND.into_response())
+}
 
 async fn handle_static(State(state): State<AppState>, uri: Uri) -> Response {
     let path = uri.path().trim_start_matches('/');
