@@ -6,6 +6,7 @@ export interface TileLayer {
   name: string;
   width: number;
   height: number;
+  visible?: boolean;
   data?: number[];
   layers?: TileLayer[];
 }
@@ -18,6 +19,15 @@ export interface TilesetRef {
   image: string;
   columns: number;
   count: number;
+  /** Pixels from the sheet edge to the first tile, and between tiles. */
+  margin?: number;
+  spacing?: number;
+}
+
+/** One renderable tile layer, in draw order (bottom first). */
+export interface DrawLayer {
+  name: string;
+  data: Uint32Array;
 }
 
 export interface TiledMap {
@@ -40,6 +50,10 @@ export interface MapData {
   ground: Uint32Array;
   /** Collision GIDs, row-major. 0 = walkable, non-zero = blocked. */
   collision: Uint32Array;
+  /** Tilesets referenced by the map (embedded; images relative to the map). */
+  tilesets: TilesetRef[];
+  /** Visible tile layers in draw order, collision layers excluded. */
+  draw: DrawLayer[];
 }
 
 export function parseMap(id: string, raw: TiledMap): MapData {
@@ -48,7 +62,9 @@ export function parseMap(id: string, raw: TiledMap): MapData {
   const cells = width * height;
   const ground = new Uint32Array(cells);
   const collision = new Uint32Array(cells);
-  // Walk the layer tree; group layers nest their children.
+  const draw: DrawLayer[] = [];
+  // Walk the layer tree; group layers nest their children (depth-first, so
+  // draw order follows the Tiled layer list).
   const visit = (layers: TileLayer[]): void => {
     for (const layer of layers) {
       if (layer.type === "group" && layer.layers) {
@@ -57,10 +73,16 @@ export function parseMap(id: string, raw: TiledMap): MapData {
       }
       if (layer.type !== "tilelayer" || layer.data?.length !== cells) continue;
       if (layer.name === "ground" || layer.name === "floor1") ground.set(layer.data);
-      else if (layer.name === "collision" || layer.name === "collisions") collision.set(layer.data);
+      if (layer.name === "collision" || layer.name === "collisions") {
+        collision.set(layer.data);
+        continue; // collision layers shape walkability, not the picture
+      }
+      if (layer.visible === false) continue;
+      draw.push({ name: layer.name, data: Uint32Array.from(layer.data!) });
     }
   };
   visit(raw.layers);
+  const tilesets: TilesetRef[] = raw.tilesets ?? [];
   return {
     id,
     width,
@@ -68,6 +90,8 @@ export function parseMap(id: string, raw: TiledMap): MapData {
     tileSize: raw.tilewidth,
     ground,
     collision,
+    tilesets,
+    draw,
   };
 }
 

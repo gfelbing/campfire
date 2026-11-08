@@ -151,8 +151,10 @@ fn spawn_point(width: u32, height: u32, walkable: &[bool]) -> Result<(f32, f32),
 /// the local `maps/` folder).
 pub struct Maps {
     /// The maps directory the maps were loaded from (also serves tileset
-    /// assets: `maps_dir/<id>/<path>`).
+    /// assets: `maps_dir/<map file's directory>/<path>`).
     pub dir: PathBuf,
+    /// Each map's file, relative to `dir` (the asset root is its parent).
+    files: HashMap<String, PathBuf>,
     maps: HashMap<String, MapData>,
 }
 
@@ -187,6 +189,7 @@ impl Maps {
     /// take the server down.
     pub fn load(dir: &Path) -> Self {
         let mut maps = HashMap::new();
+        let mut files = HashMap::new();
         let mut walk: Vec<PathBuf> = vec![dir.to_owned()];
         while let Some(path) = walk.pop() {
             let Ok(entries) = std::fs::read_dir(&path) else {
@@ -207,12 +210,13 @@ impl Maps {
                         continue;
                     };
                     if let Ok(map) = MapData::parse(&id, &data) {
+                        files.insert(id.clone(), path.strip_prefix(dir).unwrap_or(&path).to_owned());
                         maps.insert(id, map);
                     }
                 }
             }
         }
-        Self { dir: dir.to_owned(), maps }
+        Self { dir: dir.to_owned(), files, maps }
     }
 
     /// The map with the given id.
@@ -228,8 +232,8 @@ impl Maps {
     }
 
     /// A file belonging to one map's directory (a tileset image, for
-    /// example), read from disk. `path` is relative to `maps_dir/<id>/`;
-    /// `..` segments are refused.
+    /// example), read from disk. `path` is relative to the map file's
+    /// directory; `..` segments are refused.
     pub fn asset(&self, id: &str, path: &str) -> Option<Vec<u8>> {
         if path
             .split('/')
@@ -237,7 +241,11 @@ impl Maps {
         {
             return None;
         }
-        std::fs::read(self.dir.join(id).join(path)).ok()
+        // The map file's directory, not the id: the id may name a file
+        // (`interiors/conference`), the assets sit next to it.
+        let file = self.files.get(id)?;
+        let base = file.parent().unwrap_or(Path::new(""));
+        std::fs::read(self.dir.join(base).join(path)).ok()
     }
 }
 
@@ -360,5 +368,10 @@ mod tests {
         let maps = Maps::load(Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../maps")));
         assert!(maps.asset("island", "tiles.png").is_some());
         assert!(maps.asset("island", "../office/office.json").is_none());
+        // Nested map ids: assets sit next to the map file, not under the id.
+        assert!(
+            maps.asset("interiors/conference", "tilesets/WA_Special_Zones.png")
+                .is_some()
+        );
     }
 }
