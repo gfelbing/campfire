@@ -41,6 +41,7 @@ export interface ConnHandlers {
   onCallAnswer: (from: string, sdp: string) => void;
   onCallIce: (from: string, candidate: string) => void;
   onCallMute: (id: string, audio: boolean, video: boolean) => void;
+  onCallScreen: (id: string, on: boolean) => void;
   onError: (code: string) => void;
   onStatus: (s: ConnStatus) => void;
 }
@@ -165,6 +166,10 @@ export class Connection {
     this.transport?.sendMsg({ t: "call_mute", audio, video });
   }
 
+  sendCallScreen(on: boolean): void {
+    this.transport?.sendMsg({ t: "call_screen", on });
+  }
+
   sendCallLeave(): void {
     this.transport?.sendMsg({ t: "call_leave" });
   }
@@ -263,6 +268,9 @@ export class Connection {
         break;
       case "call_mute":
         this.handlers.onCallMute(msg.id, msg.audio, msg.video);
+        break;
+      case "call_screen":
+        this.handlers.onCallScreen(msg.id, msg.on);
         break;
       case "error":
         console.warn("server error:", msg.code);

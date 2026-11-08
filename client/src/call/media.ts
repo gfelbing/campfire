@@ -23,6 +23,16 @@ export async function getLocalMedia(): Promise<MediaStream> {
   });
 }
 
+/** Acquire the user's screen (or window/tab) for screen sharing (README
+ *  roadmap "UI redesign"): the returned video track replaces the camera
+ *  track in every peer sender — no renegotiation. */
+export async function getScreenMedia(): Promise<MediaStream> {
+  return navigator.mediaDevices.getDisplayMedia({
+    video: { frameRate: { ideal: 15, max: 30 } },
+    audio: false,
+  });
+}
+
 /** The TURN REST credential pair from the server (README §6.2). */
 interface TurnCredential {
   username: string;

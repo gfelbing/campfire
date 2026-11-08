@@ -501,6 +501,34 @@ impl World {
         Ok(())
     }
 
+    /// The sender started/stopped screen sharing; broadcast to the other
+    /// call participants (presence only — the camera video track is
+    /// replaced by the screen, no renegotiation).
+    pub fn call_screen(&self, room: &str, from: &str, on: bool) -> Result<(), ErrorCode> {
+        let mut rooms = self.rooms.lock().unwrap();
+        let Some(entry) = rooms.get_mut(room) else {
+            return Err(ErrorCode::CallNotAllowed);
+        };
+        {
+            let call = entry.call.as_mut().ok_or(ErrorCode::CallNotAllowed)?;
+            let flags = call
+                .participants
+                .get_mut(from)
+                .ok_or(ErrorCode::CallNotAllowed)?;
+            flags.1.screen = on;
+        }
+        let call = entry.call.as_ref().expect("checked above");
+        for (uid, m) in &entry.users {
+            if uid != from && call.participants.contains_key(uid) {
+                let _ = m.tx.send(ServerMsg::CallScreen {
+                    id: from.to_owned(),
+                    on,
+                });
+            }
+        }
+        Ok(())
+    }
+
     /// Relay an SDP offer between two participants of the room's bubble.
     pub fn call_relay_offer(
         &self,
@@ -589,7 +617,12 @@ impl World {
                 .participants
                 .get_mut(from)
                 .ok_or(ErrorCode::CallNotAllowed)?;
-            flags.1 = call::ParticipantFlags { audio, video };
+            let screen = flags.1.screen;
+            flags.1 = call::ParticipantFlags {
+                audio,
+                video,
+                screen,
+            };
         }
         let call = entry.call.as_ref().expect("checked above");
         for (uid, m) in &entry.users {
@@ -845,6 +878,7 @@ fn update_bubbles(room: &str, entry: &mut Room, now: Instant) {
                 call::ParticipantFlags {
                     audio: true,
                     video: true,
+                    screen: false,
                 },
             ),
         );
@@ -1578,6 +1612,39 @@ mod tests {
     }
 
     #[test]
+    fn call_screen_is_presence_broadcast_to_others() {
+        let world = World::new(test_maps());
+        let mut a = join_user(&world, "office", "alice");
+        let mut b = join_user(&world, "office", "bob");
+        let mut c = join_user(&world, "office", "carol");
+        place(&world, "office", &c.id, 20.0, 0.0); // bystander
+        world.tick();
+        for u in [&mut a, &mut b, &mut c] {
+            expect_start(u);
+        }
+        world.call_screen("office", &a.id, true).unwrap();
+        match b.rx.try_recv().unwrap() {
+            ServerMsg::CallScreen { id, on } => {
+                assert_eq!(id, a.id);
+                assert!(on);
+            }
+            other => panic!("expected call_screen, got {other:?}"),
+        }
+        assert!(a.rx.try_recv().is_err(), "no echo to the sender");
+        assert!(
+            c.rx.try_recv().is_err(),
+            "bystanders do not hear call presence"
+        );
+        assert_eq!(
+            world.call_screen("office", &c.id, true),
+            Err(ErrorCode::CallNotAllowed)
+        );
+        // The flag lives on the participant (the next roster keeps it).
+        world.call_screen("office", &a.id, false).unwrap();
+        let _ = b.rx.try_recv().unwrap();
+    }
+
+    #[test]
     fn call_leave_and_room_leave_drop_the_call() {
         let world = World::new(test_maps());
         let mut a = join_user(&world, "office", "alice");
@@ -1683,7 +1750,10 @@ mod tests {
             line.contains(&format!("\"id\":\"{b_id}\"")) || line.contains(&a.id),
             "bob's batch: {line}"
         );
-        assert!(line.contains("21"), "alice's post-reconnect move is in the batch: {line}");
+        assert!(
+            line.contains("21"),
+            "alice's post-reconnect move is in the batch: {line}"
+        );
     }
 
     #[test]

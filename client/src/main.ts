@@ -10,6 +10,7 @@ import { boot } from "./ui/boot";
 import { createChat, type ChatUI } from "./ui/chat";
 import { createPresence, type PresenceUI } from "./ui/presence";
 import { createStatus } from "./ui/status";
+import { createSidebar } from "./ui/sidebar";
 import { isWalkablePoint, parseMap, type MapData } from "./world/mapdata";
 import { createWorld, drawBubble, followCamera } from "./world/render";
 
@@ -106,7 +107,10 @@ async function main(): Promise<void> {
       status.bumpUsers(-1);
       presence.removeUser(id);
     },
-    onChat: (c: ChatMsg) => chat?.add(c, myId),
+    onChat: (c: ChatMsg) => {
+      chat?.add(c, myId);
+      if (c.from !== myId) sidebar.chatActivity(true);
+    },
     onTyping: (id, on) => chat?.typing(id, on),
     onMovement: (batch: MovementBatch) => world.manager.movement(batch.m),
     // Bubble state (README §6.3): the manager owns the state machine;
@@ -131,6 +135,7 @@ async function main(): Promise<void> {
     onCallAnswer: (from, sdp) => manager.onCallAnswer(from, sdp),
     onCallIce: (from, c) => manager.onCallIce(from, c),
     onCallMute: (id, a, v) => manager.onCallMute(id, a, v),
+    onCallScreen: (id, on) => manager.onCallScreen(id, on),
     onError: (code) => {
       chat?.system(`server error: ${code}`);
       manager.onError(code);
@@ -143,23 +148,29 @@ async function main(): Promise<void> {
     },
   });
 
-  const ui = document.getElementById("ui")!;
-  presence = createPresence(ui);
-  chat = createChat(ui, (t) => conn.sendChat(t), (on) => conn.sendTyping(on));
+  // Sidebar next to the map (README roadmap "UI redesign"): Main Menu
+  // (status + media), Players, Chat — each existing component mounts into
+  // its pane. The call theater overlays the map from `#ui`.
+  const sidebar = createSidebar();
+  const ui = document.getElementById("ui")!; // the theater's overlay layer
+  presence = createPresence(sidebar.pane("players"));
+  chat = createChat(sidebar.pane("chat"), (t) => conn.sendChat(t), (on) => conn.sendTyping(on));
   const callUI = createCallUI(ui, {
     onHangup: () => manager.hangup(),
     onToggleMute: () => manager.toggleMute(),
     onToggleCamera: () => manager.toggleCamera(),
+    onToggleScreen: () => manager.toggleScreen(),
   });
   const manager = new CallManager(conn, {
     onPhase: (ph) => callUI.setPhase(ph),
     onLocalStream: (s) => callUI.setLocalStream(s),
     onPeers: (ps) => callUI.setPeers(ps),
     onLocalMute: (a, v) => callUI.setLocalMute(a, v),
+    onLocalScreen: (on) => callUI.setLocalScreen(on),
     onLog: (t) => chat?.system(t),
   });
   const status = createStatus(
-    ui,
+    sidebar.pane("menu"),
     (off) => manager.setBubble(off),
     (room) => {
       // Room switch (README §11 Phase 7): leave this room immediately

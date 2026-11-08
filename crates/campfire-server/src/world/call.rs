@@ -24,6 +24,8 @@ pub struct ParticipantFlags {
     pub audio: bool,
     /// `true` = camera on, `false` = off.
     pub video: bool,
+    /// `true` = the camera video track carries the screen share.
+    pub screen: bool,
 }
 
 /// An in-flight proximity call in one room.
@@ -47,6 +49,7 @@ impl Call {
                     ParticipantFlags {
                         audio: true,
                         video: true,
+                        screen: false,
                     },
                 ),
             );

@@ -77,9 +77,10 @@ impl MapData {
         // First tile layer named "collision" (or "collisions", the Tiled
         // Tiled convention) decides walkability; without one the whole
         // map is walkable.
-        let collision = raw.layers.iter().find(|l| {
-            l.kind == "tilelayer" && (l.name == "collision" || l.name == "collisions")
-        });
+        let collision = raw
+            .layers
+            .iter()
+            .find(|l| l.kind == "tilelayer" && (l.name == "collision" || l.name == "collisions"));
         let walkable = match collision.and_then(|l| l.data.as_ref()) {
             Some(gids) if gids.len() == cells => gids.iter().map(|&gid| gid == 0).collect(),
             Some(_) => return Err(MapError::CollisionSizeMismatch),
@@ -199,10 +200,7 @@ impl Maps {
                 let path = entry.path();
                 if path.is_dir() {
                     walk.push(path);
-                } else if path
-                    .extension()
-                    .is_some_and(|e| e == "json" || e == "tmj")
-                {
+                } else if path.extension().is_some_and(|e| e == "json" || e == "tmj") {
                     let Some(id) = map_id(dir, &path) else {
                         continue;
                     };
@@ -210,13 +208,20 @@ impl Maps {
                         continue;
                     };
                     if let Ok(map) = MapData::parse(&id, &data) {
-                        files.insert(id.clone(), path.strip_prefix(dir).unwrap_or(&path).to_owned());
+                        files.insert(
+                            id.clone(),
+                            path.strip_prefix(dir).unwrap_or(&path).to_owned(),
+                        );
                         maps.insert(id, map);
                     }
                 }
             }
         }
-        Self { dir: dir.to_owned(), files, maps }
+        Self {
+            dir: dir.to_owned(),
+            files,
+            maps,
+        }
     }
 
     /// The map with the given id.
@@ -253,15 +258,13 @@ impl Maps {
 fn valid_id(id: &str) -> bool {
     !id.is_empty()
         && id.len() <= 64
-        && id
-            .split('/')
-            .all(|seg| {
-                !seg.is_empty()
-                    && seg.len() <= 32
-                    && seg
-                        .chars()
-                        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
-            })
+        && id.split('/').all(|seg| {
+            !seg.is_empty()
+                && seg.len() <= 32
+                && seg
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
+        })
 }
 
 #[cfg(test)]
@@ -347,7 +350,10 @@ mod tests {
 
     #[test]
     fn bundled_maps_are_loaded() {
-        let maps = Maps::load(Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../maps")));
+        let maps = Maps::load(Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../maps"
+        )));
         assert!(maps.get("office").is_some(), "office map missing");
         assert!(maps.get("island").is_some(), "island map missing");
         let office = maps.get("office").unwrap();
@@ -365,13 +371,19 @@ mod tests {
 
     #[test]
     fn asset_refuses_traversal() {
-        let maps = Maps::load(Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../maps")));
+        let maps = Maps::load(Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../maps"
+        )));
         assert!(maps.asset("island", "tiles.png").is_some());
         assert!(maps.asset("island", "../office/office.json").is_none());
         // Nested map ids: assets sit next to the map file, not under the id.
         assert!(
-            maps.asset("interiors/conference", "tilesets/WA_Special_Zones.png")
-                .is_some()
+            maps.asset(
+                "interiors/conference",
+                "tilesets/WA_Special_Zones.png"
+            )
+            .is_some()
         );
     }
 }

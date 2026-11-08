@@ -142,6 +142,24 @@ export class RtcPeer {
     }
   }
 
+  /** Screen share (README roadmap "UI redesign"): swap the outgoing video
+   *  sender track to `track` (or back to the camera with null→camera logic
+   *  in the manager) without renegotiation. Returns false when no video
+   *  sender exists (voice-only / camera never added). */
+  replaceVideoTrack(track: MediaStreamTrack | null): boolean {
+    const sender = this.pc.getSenders().find((s) => s.track?.kind === "video");
+    if (!sender) return false;
+    void sender.replaceTrack(track).catch((err) =>
+      console.warn("replaceTrack failed:", err),
+    );
+    return true;
+  }
+
+  /** The camera track we were created with (the screen-share swap-back). */
+  cameraTrack(): MediaStreamTrack | null {
+    return this.localStream.getVideoTracks()[0] ?? null;
+  }
+
   /** Mute / camera off: flip `track.enabled` — presence only, the server
    *  relays `call_mute`, no renegotiation (README §6.3). */
   setAudioEnabled(on: boolean): void {

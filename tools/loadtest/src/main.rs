@@ -21,6 +21,7 @@
 //! Turn OFF cert validation like the test suite: load runs target a dev
 //! server with the local CA.
 
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -96,8 +97,13 @@ async fn main() -> Result<()> {
     // One QUIC config for the whole run; each bot owns its endpoint.
     // Real room ids: the server only accepts joins into map rooms
     // (README §5); `--rooms` caps how many of them the bots spread over.
+    // Maps load from disk (README §6): same default dir as the server.
     let rooms: Vec<String> = {
-        let mut ids: Vec<String> = campfire_maps::bundled().keys().cloned().collect();
+        let mut ids: Vec<String> = campfire_maps::Maps::load(Path::new("maps"))
+            .all()
+            .iter()
+            .map(|m| m.id.clone())
+            .collect();
         ids.sort();
         ids.truncate(args.rooms.max(1) as usize);
         if ids.is_empty() {

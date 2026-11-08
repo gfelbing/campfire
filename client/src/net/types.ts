@@ -65,6 +65,7 @@ export type ServerMsg =
   | { t: "call_answer"; from: string; sdp: string }
   | { t: "call_ice"; from: string; candidate: string }
   | { t: "call_mute"; id: string; audio: boolean; video: boolean }
+  | { t: "call_screen"; id: string; on: boolean }
   | { t: "error"; code: ErrorCode };
 
 // --- client → server -------------------------------------------------------
@@ -90,6 +91,8 @@ export type ClientMsg =
   | { t: "call_answer"; to: string; sdp: string }
   | { t: "call_ice"; to: string; candidate: string }
   | { t: "call_mute"; audio: boolean; video: boolean }
+  /** Presence: we started/stopped screen sharing (camera track replaced). */
+  | { t: "call_screen"; on: boolean }
   | { t: "call_leave" };
 
 // --- datagrams -------------------------------------------------------------

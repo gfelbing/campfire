@@ -157,17 +157,19 @@ async fn healthz(State(state): State<AppState>) -> Json<Health> {
 
 /// `GET /api/v1/maps` → one entry per loaded map, sorted by id.
 async fn list_maps(State(state): State<AppState>) -> Json<Vec<MapInfo>> {
-    Json(state
-        .world
-        .maps()
-        .all()
-        .into_iter()
-        .map(|m| MapInfo {
-            id: m.id.clone(),
-            name: m.name.clone(),
-            thumb: None,
-        })
-        .collect())
+    Json(
+        state
+            .world
+            .maps()
+            .all()
+            .into_iter()
+            .map(|m| MapInfo {
+                id: m.id.clone(),
+                name: m.name.clone(),
+                thumb: None,
+            })
+            .collect(),
+    )
 }
 
 /// `GET /api/v1/maps/{*rest}` → the map JSON (`office`,
@@ -472,6 +474,9 @@ async fn fallback_event(
                 }
                 ClientMsg::CallMute { audio, video } => {
                     let _ = state.world.call_mute(&room, &token, audio, video);
+                }
+                ClientMsg::CallScreen { on } => {
+                    let _ = state.world.call_screen(&room, &token, on);
                 }
                 ClientMsg::CallLeave => {
                     let _ = state.world.call_leave(&room, &token);

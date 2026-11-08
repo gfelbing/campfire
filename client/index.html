@@ -8,7 +8,22 @@
     <link rel="icon" href="data:," />
   </head>
   <body>
-    <div id="app"></div>
+    <div id="layout">
+      <div id="app"></div>
+      <aside id="sidebar">
+        <nav class="sidebar-tabs">
+          <button data-tab="menu" title="main menu">☰</button>
+          <button data-tab="players" title="players">👥</button>
+          <button data-tab="chat" title="chat">💬</button>
+          <button id="sidebar-collapse" title="collapse the sidebar">«</button>
+        </nav>
+        <div class="sidebar-panes">
+          <div class="sidebar-pane" data-pane="menu" id="pane-menu"></div>
+          <div class="sidebar-pane hidden" data-pane="players" id="pane-players"></div>
+          <div class="sidebar-pane hidden" data-pane="chat" id="pane-chat"></div>
+        </div>
+      </aside>
+    </div>
     <div id="boot"></div>
     <div id="ui"></div>
     <script type="module" src="/src/main.ts"></script>

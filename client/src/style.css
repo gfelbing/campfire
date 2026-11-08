@@ -23,15 +23,115 @@ body {
   overflow: hidden;
 }
 
+/* Layout (README roadmap "UI redesign"): map canvas (#app) and the sidebar
+   side by side; #ui holds the call theater overlapping the map. */
+
+#layout {
+  display: flex;
+  height: 100vh;
+}
+
 #app {
-  position: fixed;
-  inset: 0;
+  flex: 1;
+  min-width: 0;
+  position: relative;
+  overflow: hidden;
+}
+
+#app canvas {
+  display: block;
 }
 
 #ui {
   position: fixed;
   inset: 0;
   pointer-events: none;
+  z-index: 5;
+}
+
+/* --- sidebar -------------------------------------------------------------- */
+
+#sidebar {
+  width: 280px;
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  background: var(--panel);
+  border-left: 1px solid var(--line);
+  pointer-events: auto;
+}
+
+#sidebar.collapsed {
+  width: 52px;
+}
+
+#sidebar.collapsed .sidebar-panes {
+  display: none;
+}
+
+.sidebar-tabs {
+  display: flex;
+  gap: 0.3rem;
+  padding: 0.5rem;
+  border-bottom: 1px solid var(--line);
+}
+
+.sidebar-tabs button {
+  position: relative;
+  font: inherit;
+  font-size: 1rem;
+  width: 38px;
+  height: 34px;
+  background: #1a1d22;
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+.sidebar-tabs button:hover {
+  border-color: var(--accent);
+}
+
+.sidebar-tabs button.active {
+  border-color: var(--accent);
+  background: #27212a;
+}
+
+.sidebar-tabs button.dot::after {
+  content: "";
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+
+#sidebar-collapse {
+  margin-left: auto;
+}
+
+#sidebar.collapsed #sidebar-collapse {
+  transform: scaleX(-1);
+}
+
+.sidebar-panes {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+}
+
+.sidebar-pane {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 0.7rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  scrollbar-width: thin;
 }
 
 .hidden {
@@ -135,9 +235,9 @@ body {
 /* --- status panel --------------------------------------------------------- */
 
 .status {
-  position: absolute;
-  top: 12px;
-  right: 12px;
+  position: relative;
+  top: 0;
+  right: 0;
   background: var(--panel);
   border: 1px solid var(--line);
   border-radius: 10px;
@@ -185,21 +285,16 @@ body {
 /* --- chat panel ------------------------------------------------------------ */
 
 .chat {
-  position: absolute;
-  left: 12px;
-  bottom: 12px;
-  width: min(360px, calc(100vw - 24px));
-  background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: 10px;
-  padding: 0.6rem;
+  position: relative;
+  flex: 1;
+  min-height: 0;
   display: grid;
+  grid-template-rows: 1fr auto auto;
   gap: 0.4rem;
-  pointer-events: auto;
 }
 
 .chat-list {
-  max-height: 34vh;
+  min-height: 0;
   overflow-y: auto;
   display: grid;
   gap: 0.25rem;
@@ -396,9 +491,9 @@ body {
 /* --- presence roster (README §8 Phase 7) --------------------------------- */
 
 .presence {
-  position: absolute;
-  top: 12px;
-  left: 12px;
+  position: relative;
+  top: 0;
+  left: 0;
   background: var(--panel);
   border: 1px solid var(--line);
   border-radius: 10px;
@@ -406,7 +501,7 @@ body {
   font-size: 0.8rem;
   max-height: 40vh;
   overflow-y: auto;
-  pointer-events: none;
+  pointer-events: auto;
 }
 
 .presence-title {
@@ -429,12 +524,199 @@ body {
   margin-left: 0.4em;
 }
 
-/* --- call UI (README §6.3) ------------------------------------------------ */
+/* --- call theater (README §6.3 + roadmap "UI redesign") -------------------- */
+/* In a call: a column of remote video tiles on the right, overlapping the
+   map, plus the local PiP and the controls bar. Clicking a tile focuses it
+   large in the center overlay; Escape or a second click unfocuses. */
 
-.call {
+.theater {
   position: absolute;
   inset: 0;
   pointer-events: none;
+}
+
+.theater-col {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  width: min(280px, calc(100vw - 24px));
+  max-height: calc(100vh - 24px);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  padding: 0.5rem;
+  pointer-events: auto;
+}
+
+.theater-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 0.5rem;
+}
+
+.theater-name {
+  font-weight: 700;
+  font-size: 0.9rem;
+}
+
+.theater-state {
+  color: var(--muted);
+  font-size: 0.72rem;
+}
+
+.theater-col[data-state="connected"] .theater-state {
+  color: #58a858;
+}
+
+.theater-col[data-state="failed"] .theater-state {
+  color: #e06060;
+}
+
+.theater-tiles {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  overflow-y: auto;
+  scrollbar-width: thin;
+}
+
+.theater-tiles:empty::after {
+  content: "no one else on the call yet";
+  color: var(--muted);
+  font-size: 0.75rem;
+  text-align: center;
+  padding: 0.8rem 0;
+}
+
+.theater-tile {
+  position: relative;
+  aspect-ratio: 16 / 9;
+  flex: none;
+  background: #000;
+  border-radius: 6px;
+  overflow: hidden;
+  cursor: pointer;
+}
+
+.theater-tile video {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  display: block;
+}
+
+.theater-tile video.speaking {
+  outline: 3px solid #4d9e57;
+  outline-offset: -3px;
+}
+
+.theater-tile-info {
+  position: absolute;
+  left: 4px;
+  bottom: 4px;
+  display: flex;
+  gap: 0.3rem;
+  align-items: baseline;
+  background: rgba(0, 0, 0, 0.55);
+  border-radius: 5px;
+  padding: 0.05rem 0.35rem;
+  max-width: calc(100% - 8px);
+}
+
+.theater-tile-info .tile-name {
+  font-size: 0.68rem;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.theater-tile-info .tile-state {
+  font-size: 0.6rem;
+  color: #9aa0a8;
+  white-space: nowrap;
+}
+
+.theater-pip-wrap {
+  position: relative;
+  flex: none;
+  margin-left: auto;
+  width: 96px;
+  aspect-ratio: 16 / 9;
+  border-radius: 6px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  background: #000;
+}
+
+.theater-pip {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+  transform: scaleX(-1);
+}
+
+.theater-pip-info {
+  position: absolute;
+  left: 4px;
+  bottom: 2px;
+  font-size: 0.62rem;
+  font-weight: 600;
+  background: rgba(0, 0, 0, 0.55);
+  border-radius: 4px;
+  padding: 0.05rem 0.3rem;
+}
+
+/* center focus overlay: the clicked tile's <video> element moves here */
+.theater-focus {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.72);
+  pointer-events: auto;
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+}
+
+.theater-focus-slot {
+  position: relative;
+  width: min(90vw, calc(100vh - 80px) * 16 / 9);
+  max-height: calc(100vh - 80px);
+  aspect-ratio: 16 / 9;
+  background: #000;
+  border-radius: 10px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+}
+
+.theater-focus-slot video {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  display: block;
+}
+
+.theater-focus-slot video.speaking {
+  outline: 3px solid #4d9e57;
+  outline-offset: -3px;
+}
+
+.theater-focus-hint {
+  position: absolute;
+  bottom: 18px;
+  left: 50%;
+  transform: translateX(-50%);
+  color: var(--muted);
+  font-size: 0.78rem;
+  background: rgba(0, 0, 0, 0.5);
+  border-radius: 6px;
+  padding: 0.15rem 0.6rem;
 }
 
 /* incoming: centered card over a dimmed backdrop */
@@ -538,122 +820,7 @@ body {
   cursor: pointer;
 }
 
-/* in-call panel: right side, under the status panel */
-.call-panel {
-  position: absolute;
-  top: 118px;
-  right: 12px;
-  width: min(280px, calc(100vw - 24px));
-  background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: 12px;
-  overflow: hidden;
-  display: grid;
-  gap: 0.4rem;
-  padding: 0.5rem;
-  pointer-events: auto;
-}
-
-.call-panel-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: baseline;
-  gap: 0.5rem;
-}
-
-.call-peer-name {
-  font-weight: 700;
-  font-size: 0.9rem;
-}
-
-.call-peer-state {
-  color: var(--muted);
-  font-size: 0.72rem;
-}
-
-.call-panel[data-state="connected"] .call-peer-state {
-  color: #58a858;
-}
-
-.call-panel[data-state="failed"] .call-peer-state {
-  color: #e06060;
-}
-
-.call-grid {
-  display: grid;
-  gap: 0.35rem;
-  grid-template-columns: 1fr 1fr;
-}
-
-.call-grid:empty::after {
-  content: "no one else on the call yet";
-  grid-column: 1 / -1;
-  color: var(--muted);
-  font-size: 0.75rem;
-  text-align: center;
-  padding: 0.8rem 0;
-}
-
-.call-tile {
-  position: relative;
-  aspect-ratio: 16 / 9;
-  background: #000;
-  border-radius: 6px;
-  overflow: hidden;
-}
-
-.call-tile video {
-  width: 100%;
-  height: 100%;
-  object-fit: contain;
-  display: block;
-}
-
-.call-tile video.speaking {
-  outline: 3px solid #4d9e57;
-  outline-offset: -3px;
-}
-
-.call-tile-info {
-  position: absolute;
-  left: 4px;
-  bottom: 4px;
-  display: flex;
-  gap: 0.3rem;
-  align-items: baseline;
-  background: rgba(0, 0, 0, 0.55);
-  border-radius: 5px;
-  padding: 0.05rem 0.35rem;
-  max-width: calc(100% - 8px);
-}
-
-.call-tile-info .tile-name {
-  font-size: 0.68rem;
-  font-weight: 600;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.call-tile-info .tile-state {
-  font-size: 0.6rem;
-  color: #9aa0a8;
-  white-space: nowrap;
-}
-
-.call-pip {
-  position: absolute;
-  right: 8px;
-  bottom: 56px;
-  width: 72px;
-  aspect-ratio: 16 / 9;
-  object-fit: cover;
-  border-radius: 6px;
-  border: 1px solid var(--line);
-  transform: scaleX(-1);
-  background: #000;
-}
-
+/* per-tile badges */
 .call-badge {
   position: absolute;
   top: 4px;
@@ -663,13 +830,17 @@ body {
   padding: 0.1rem 0.4rem;
 }
 
-.call-tile .tile-mute {
+.theater-tile .tile-mute {
   left: 4px;
 }
 
-.call-tile .tile-cam {
+.theater-tile .tile-cam {
   left: 4px;
   top: 24px;
+}
+
+.theater-tile .tile-screen {
+  right: 4px;
 }
 
 .call-controls {
@@ -696,6 +867,11 @@ body {
 .call-btn.off {
   background: #3a2020;
   border-color: #8a3b3b;
+}
+
+.call-btn.on {
+  background: #20304a;
+  border-color: #4a90d9;
 }
 
 .call-hangup {

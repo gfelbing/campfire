@@ -453,6 +453,12 @@ fn dispatch(
             };
             call_result(world.call_mute(&room, &id, audio, video), tx)
         }
+        Ok(ClientMsg::CallScreen { on }) => {
+            let Some((room, id, _)) = session.clone() else {
+                return send(tx, ErrorCode::BadMessage);
+            };
+            call_result(world.call_screen(&room, &id, on), tx)
+        }
         Ok(ClientMsg::CallLeave) => {
             let Some((room, id, _)) = session.clone() else {
                 return send(tx, ErrorCode::BadMessage);
@@ -466,14 +472,12 @@ fn dispatch(
 /// Room ids: `1..=32` chars of `[a-z0-9_-]`.
 pub(crate) fn valid_room(room: &str) -> bool {
     (1..=MAX_ROOM_CHARS).contains(&room.len())
-        && room
-            .split('/')
-            .all(|seg| {
-                !seg.is_empty()
-                    && seg
-                        .chars()
-                        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-')
-            })
+        && room.split('/').all(|seg| {
+            !seg.is_empty()
+                && seg
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-')
+        })
 }
 
 /// Send one `error` message; `false` means the client is gone.

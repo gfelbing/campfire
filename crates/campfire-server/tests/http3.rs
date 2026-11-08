@@ -141,6 +141,11 @@ async fn map_tileset_asset() {
     assert_eq!(s1, 200);
     let (s2, _) = get(addr, &root, "/api/v1/maps/interiors/conference").await;
     assert_eq!(s2, 200);
-    let (s3, _) = get(addr, &root, "/api/v1/maps/interiors/conference/tilesets/WA_Room_Builder.png").await;
+    let (s3, _) = get(
+        addr,
+        &root,
+        "/api/v1/maps/interiors/conference/tilesets/WA_Room_Builder.png",
+    )
+    .await;
     assert_eq!(s3, 200, "tileset asset");
 }

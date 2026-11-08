@@ -14,7 +14,7 @@
 //! walking close is the user's intent. A user can opt out entirely with
 //! the bubble toggle (`sendBubble`).
 import type { UserBrief } from "../net/types";
-import { getLocalMedia, iceServers } from "./media";
+import { getLocalMedia, getScreenMedia, iceServers } from "./media";
 import { RtcPeer, type PeerState } from "./peer";
 
 /** Participant count at which the call degrades to voice-only (README §6.1:
@@ -38,6 +38,8 @@ export interface PeerView {
   /** Presence from `call_mute` (default on). */
   audioOn: boolean;
   videoOn: boolean;
+  /** Presence from `call_screen`: the camera track carries a screen share. */
+  screenOn: boolean;
 }
 
 /** What the manager tells the UI. */
@@ -49,6 +51,8 @@ export interface CallUiHooks {
   onPeers: (peers: PeerView[]) => void;
   /** Our own mute/camera state changed (button styling). */
   onLocalMute: (audio: boolean, video: boolean) => void;
+  /** Our screen share started/stopped (button styling). */
+  onLocalScreen: (on: boolean) => void;
   /** A local log/system line (errors, ICE errors). */
   onLog: (text: string) => void;
 }
@@ -61,6 +65,7 @@ export interface CallSignaling {
   sendCallAnswer(to: string, sdp: string): void;
   sendCallIce(to: string, candidate: string): void;
   sendCallMute(audio: boolean, video: boolean): void;
+  sendCallScreen(on: boolean): void;
   sendCallLeave(): void;
 }
 
@@ -69,14 +74,18 @@ export class CallManager {
   /** Our mute/camera state (presence, relayed via `call_mute`). */
   audioOn = true;
   videoOn = true;
+  /** True while the camera video track carries our screen. */
+  screenOn = false;
 
   private selfId = "";
   /** One peer per remote participant of *our* call (empty when idle). */
   private peers = new Map<string, RtcPeer>();
   /** Remote media per participant. */
   private streams = new Map<string, MediaStream | null>();
-  /** Per-participant `call_mute` presence. */
-  private presence = new Map<string, { audio: boolean; video: boolean }>();
+  /** Per-participant `call_mute`/`call_screen` presence. */
+  private presence = new Map<string, { audio: boolean; video: boolean; screen: boolean }>();
+  /** Our screen share (when `screenOn`). */
+  private screenStream: MediaStream | null = null;
   /** Per-participant connection state (quality UI). */
   private connState = new Map<string, { state: PeerState; viaRelay: boolean }>();
   /** The call roster including ourselves (from `call_start`/`call_join`). */
@@ -134,6 +143,64 @@ export class CallManager {
     for (const t of this.localStream.getVideoTracks()) t.enabled = this.videoOn;
     this.send.sendCallMute(this.audioOn, this.videoOn);
     this.hooks.onLocalMute(this.audioOn, this.videoOn);
+  }
+
+  /** Screen share (README roadmap "UI redesign"): the camera video track
+   *  is replaced by the screen in every peer sender (`replaceTrack` — no
+   *  renegotiation); toggling off swaps the camera track back. The 🖥 badge
+   *  on the other side comes from `call_screen` presence. */
+  toggleScreen(): void {
+    if (this.phase.p !== "in-call") return;
+    if (this.screenOn) {
+      this.stopScreenShare();
+      return;
+    }
+    void (async () => {
+      let stream: MediaStream;
+      try {
+        stream = await getScreenMedia();
+      } catch {
+        // user dismissed the picker (or it is unavailable): no share
+        return;
+      }
+      if (this.phase.p !== "in-call") {
+        stream.getTracks().forEach((t) => t.stop());
+        return;
+      }
+      this.screenStream = stream;
+      const track = stream.getVideoTracks()[0];
+      // The browser's own "stop sharing" button ends the track: share off.
+      track.addEventListener("ended", () => {
+        if (this.screenOn) this.stopScreenShare();
+      });
+      let ok = false;
+      for (const p of this.peers.values()) {
+        if (p.replaceVideoTrack(track)) ok = true;
+      }
+      if (!ok) {
+        stream.getTracks().forEach((t) => t.stop());
+        this.screenStream = null;
+        this.hooks.onLog("screen share: no video track in the call (camera off?)");
+        return;
+      }
+      this.screenOn = true;
+      this.send.sendCallScreen(true);
+      this.hooks.onLocalScreen(true);
+      this.hooks.onLog("screen share started");
+    })();
+  }
+
+  /** Swap the camera track back and release the screen capture. */
+  private stopScreenShare(): void {
+    if (!this.screenOn) return;
+    this.screenOn = false;
+    const camera = this.localStream?.getVideoTracks()[0] ?? null;
+    for (const p of this.peers.values()) p.replaceVideoTrack(camera);
+    this.screenStream?.getTracks().forEach((t) => t.stop());
+    this.screenStream = null;
+    this.send.sendCallScreen(false);
+    this.hooks.onLocalScreen(false);
+    this.hooks.onLog("screen share stopped");
   }
 
   // --- server messages (README §5) ------------------------------------------
@@ -283,7 +350,16 @@ export class CallManager {
   /** Presence only (call-scoped; the server does not echo it to us). */
   onCallMute(id: string, audio: boolean, video: boolean): void {
     if (id === this.selfId) return;
-    this.presence.set(id, { audio, video });
+    const cur = this.presence.get(id) ?? { audio: true, video: true, screen: false };
+    this.presence.set(id, { ...cur, audio, video });
+    this.pushPeers();
+  }
+
+  /** Presence only (call-scoped): a peer started/stopped screen sharing. */
+  onCallScreen(id: string, on: boolean): void {
+    if (id === this.selfId) return;
+    const cur = this.presence.get(id) ?? { audio: true, video: true, screen: false };
+    this.presence.set(id, { ...cur, screen: on });
     this.pushPeers();
   }
 
@@ -383,7 +459,7 @@ export class CallManager {
       .filter((u) => u.id !== this.selfId)
       .map((u) => {
         const st = this.connState.get(u.id) ?? { state: "new" as PeerState, viaRelay: false };
-        const pres = this.presence.get(u.id) ?? { audio: true, video: true };
+        const pres = this.presence.get(u.id) ?? { audio: true, video: true, screen: false };
         return {
           id: u.id,
           name: u.name,
@@ -392,6 +468,7 @@ export class CallManager {
           viaRelay: st.viaRelay,
           audioOn: pres.audio,
           videoOn: pres.video,
+          screenOn: pres.screen,
         };
       });
     this.hooks.onPeers(views);
@@ -413,6 +490,10 @@ export class CallManager {
     this.roster = [];
     this.localStream?.getTracks().forEach((t) => t.stop());
     this.localStream = null;
+    this.screenStream?.getTracks().forEach((t) => t.stop());
+    this.screenStream = null;
+    this.screenOn = false;
+    this.hooks.onLocalScreen(false);
     this.servers = null;
     this.hooks.onLocalStream(null);
     this.hooks.onPeers([]);

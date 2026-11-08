@@ -150,6 +150,12 @@ pub enum ClientMsg {
         audio: bool,
         video: bool,
     },
+    /// Presence: the sender started/stopped screen sharing (the camera
+    /// video track is replaced by the screen). Broadcast to every other
+    /// call participant.
+    CallScreen {
+        on: bool,
+    },
     /// Leave the current call (1:1 or huddle).
     CallLeave,
 }
@@ -227,6 +233,11 @@ pub enum ServerMsg {
         id: String,
         audio: bool,
         video: bool,
+    },
+    /// `id` started/stopped screen sharing.
+    CallScreen {
+        id: String,
+        on: bool,
     },
     Error {
         code: ErrorCode,

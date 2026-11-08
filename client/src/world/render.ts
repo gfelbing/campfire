@@ -28,7 +28,7 @@ export async function createWorld(
 ): Promise<World> {
   const app = new Application();
   await app.init({
-    resizeTo: window,
+    resizeTo: document.getElementById("app") ?? window,
     background: 0x0d0f12,
     antialias: true,
   });
