@@ -52,6 +52,8 @@ const BACKOFF_MS = [1000, 2000, 4000, 8000, 16000, 30000];
 export class Connection {
   private transport: WTConn | SSEConn | null = null;
   private attempt = 0;
+  /** Generation of the current transport (see `connectOnce`). */
+  private connGen = 0;
   /** Generation counter: cancels a pending reconnect timer when the
    *  connection is closed or the page enters the back/forward cache. */
   private reconnectGen = 0;
@@ -181,25 +183,30 @@ export class Connection {
 
   private connectOnce(): void {
     if (this.closing) return;
+    // Each transport instance gets a generation: events from a stale
+    // transport (killed by close() or the back/forward cache while a newer
+    // connection is already up) must not trigger another reconnect.
+    const gen = ++this.connGen;
     const useWT = typeof WebTransport !== "undefined";
-    this.transport = useWT ? new WTConn(this) : new SSEConn(this);
+    this.transport = useWT ? new WTConn(this, gen) : new SSEConn(this, gen);
     this.transport.connect().catch((err) => {
       console.warn("connection failed:", err);
-      this.onTransportDown();
+      this.onTransportDown(gen);
     });
   }
 
-  /** Called by the transport when the connection died. */
-  onTransportDown(): void {
-    if (this.closing) return;
+  /** Called by the transport when the connection died. Stale transports
+   *  (older generation) are ignored. */
+  onTransportDown(gen: number): void {
+    if (this.closing || gen !== this.connGen) return;
     this.transport = null;
-    const gen = this.reconnectGen;
+    const pending = this.reconnectGen;
     const delay = BACKOFF_MS[Math.min(this.attempt, BACKOFF_MS.length - 1)];
     this.attempt += 1;
     this.handlers.onStatus("reconnecting");
     console.log(`reconnecting in ${delay} ms (attempt ${this.attempt})`);
     window.setTimeout(() => {
-      if (gen !== this.reconnectGen) return; // closed or bfcache-hid since
+      if (pending !== this.reconnectGen) return; // closed or bfcache-hid since
       this.resetMoveSeq();
       this.connectOnce();
     }, delay);
@@ -319,7 +326,7 @@ class WTConn {
   // ourselves so datagram sends don't go out on a dead transport.
   private live = false;
 
-  constructor(private conn: Connection) {}
+  constructor(private conn: Connection, private gen: number) {}
 
   async connect(): Promise<void> {
     // WebTransport requires an absolute URL — relative paths throw on
@@ -330,12 +337,12 @@ class WTConn {
     wt.closed.then(
       () => {
         this.live = false;
-        this.conn.onTransportDown();
+        this.conn.onTransportDown(this.gen);
       },
       (err) => {
         this.live = false;
         console.warn("webtransport closed:", err);
-        this.conn.onTransportDown();
+        this.conn.onTransportDown(this.gen);
       },
     );
     await wt.ready;
@@ -386,9 +393,11 @@ class WTConn {
         if (done) break;
         onLine(value);
       }
-    } finally {
-      this.conn.onTransportDown();
+    } catch {
+      // Read error (page hidden into the bfcache, network drop): the
+      // `closed` promise already reports the death.
     }
+    this.conn.onTransportDown(this.gen);
   }
 
   private async readDatagrams(): Promise<void> {
@@ -403,10 +412,11 @@ class WTConn {
           console.warn("bad datagram:", err);
         }
       }
-    } finally {
-      // Datagram stream ended: the connection is going.
-      this.conn.onTransportDown();
+    } catch {
+      // Read error: see readCommandStream.
     }
+    // Datagram stream ended: the connection is going.
+    this.conn.onTransportDown(this.gen);
   }
 
   sendMsg(msg: ClientMsg): void {
@@ -448,7 +458,7 @@ class SSEConn {
   private es: EventSource | null = null;
   private token: string | null = null;
 
-  constructor(private conn: Connection) {}
+  constructor(private conn: Connection, private gen: number) {}
 
   async connect(): Promise<void> {
     const res = await fetch("/rt/event", {
@@ -478,7 +488,7 @@ class SSEConn {
       // session when the stream ends, so treat any error as "down" and let
       // the Connection reconnect with a fresh join.
       es.close();
-      this.conn.onTransportDown();
+      this.conn.onTransportDown(this.gen);
     };
   }
 
