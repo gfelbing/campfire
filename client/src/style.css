@@ -558,7 +558,7 @@ body {
   top: 12px;
   right: 12px;
   bottom: 12px;
-  width: min(280px, calc(100vw - 24px));
+  width: 280px; /* overridden by the drag handle / saved width */
   background: var(--panel);
   border: 1px solid var(--line);
   border-radius: 12px;
@@ -568,6 +568,22 @@ body {
   gap: 0.4rem;
   padding: 0.5rem;
   pointer-events: auto;
+}
+
+/* drag handle on the column's left edge to adjust its width */
+.theater-resize {
+  position: absolute;
+  top: 0;
+  left: -4px;
+  width: 10px;
+  height: 100%;
+  cursor: ew-resize;
+  touch-action: none;
+  z-index: 1;
+}
+
+.theater-resize:hover {
+  background: linear-gradient(90deg, transparent, rgba(224, 95, 56, 0.25), transparent);
 }
 
 .theater-header {

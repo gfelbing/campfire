@@ -80,6 +80,7 @@ export function createCallUI(container: HTMLElement, actions: CallUiActions): Ca
   root.className = "theater hidden";
   root.innerHTML = `
     <div class="theater-col">
+      <div class="theater-resize" title="drag to resize"></div>
       <div class="theater-header">
         <span class="theater-name"></span>
         <span class="theater-state">connecting…</span>
@@ -256,6 +257,43 @@ export function createCallUI(container: HTMLElement, actions: CallUiActions): Ca
   document.addEventListener("keydown", (e) => {
     if (e.key === "Escape" && focused !== null) unfocus();
   });
+
+  // --- width adjustment -----------------------------------------------------
+  // Drag the left-edge handle; the width persists in the browser. The tiles
+  // follow the width, keeping their 16:9 aspect ratio (pure CSS).
+  col.addEventListener("pointerdown", (e) => {
+    const handle = (e.target as HTMLElement).closest<HTMLElement>(".theater-resize");
+    if (!handle) return;
+    e.preventDefault();
+    handle.setPointerCapture(e.pointerId);
+    const startX = e.clientX;
+    const startW = col.getBoundingClientRect().width;
+    const move = (ev: PointerEvent): void => {
+      // The handle sits on the column's LEFT edge: dragging left widens.
+      const w = Math.round(
+        Math.min(640, Math.max(180, startW + (startX - ev.clientX))),
+      );
+      col.style.width = `${w}px`;
+    };
+    const up = (ev: PointerEvent): void => {
+      handle.releasePointerCapture(ev.pointerId);
+      handle.removeEventListener("pointermove", move);
+      handle.removeEventListener("pointerup", up);
+      try {
+        localStorage.setItem("campfire.theater.width", col.style.width);
+      } catch {
+        // private mode etc.: the width just does not persist
+      }
+    };
+    handle.addEventListener("pointermove", move);
+    handle.addEventListener("pointerup", up);
+  });
+  try {
+    const w = parseInt(localStorage.getItem("campfire.theater.width") ?? "", 10);
+    if (Number.isFinite(w) && w >= 180 && w <= 640) col.style.width = `${w}px`;
+  } catch {
+    // no persistence: stay with the default width
+  }
 
   return {
     setPhase(phase) {
