@@ -33,6 +33,10 @@ pub const RECONNECT_WINDOW: Duration = Duration::from_secs(30);
 /// another player (or from the bubble's center) pulls you in; at the radius
 /// or beyond drops you immediately.
 const BUBBLE_RADIUS: f32 = 1.0;
+/// A member who re-entered via their token is exempt from the bubble-radius
+/// check for this long (their restored position is often outside the
+/// radius; walking out while connected still leaves immediately).
+const BUBBLE_RETURN_GRACE: Duration = Duration::from_secs(2);
 /// Largest movement datagram; bigger batches are split in halves (README §5).
 const MAX_DATAGRAM_BYTES: usize = 1200;
 /// Movement entries per user per second (README §5: client sends ≤15 Hz).
@@ -76,6 +80,11 @@ struct Member {
     /// with this set is never pulled into a bubble and leaves the one they
     /// are in.
     bubble_off: bool,
+    /// Set when a disconnected member re-enters via their token: exempts
+    /// them from the bubble-radius check for [`BUBBLE_RETURN_GRACE`] (the
+    /// restored position is often outside the radius, and the reconnect
+    /// promise is that call membership survives).
+    reentered_at: Option<Instant>,
 }
 
 /// One room (one map): presence + chat history + the in-flight call, if any.
@@ -214,6 +223,7 @@ impl World {
             member.tx = tx;
             member.dtx = dtx;
             member.gone_at = None;
+            member.reentered_at = Some(Instant::now());
             let joined = Joined {
                 you: id,
                 token: member.token.clone(),
@@ -257,6 +267,7 @@ impl World {
                 token: token.clone(),
                 gone_at: None,
                 bubble_off: false,
+                reentered_at: None,
             },
         );
 
@@ -402,7 +413,7 @@ impl World {
             remove_from_room(&mut rooms, room, id);
         }
         for (room, room_entry) in rooms.iter_mut() {
-            update_bubbles(room, room_entry);
+            update_bubbles(room, room_entry, Instant::now());
             if !room_entry.users.values().any(|m| m.dirty) {
                 continue;
             }
@@ -709,17 +720,18 @@ fn leave_call(entry: &mut Room, id: &str) {
 /// pulled in; at the radius or beyond — or toggled off — you drop out
 /// immediately. At most one join per tick keeps the offerer designation
 /// deterministic and the signaling trickle-paced.
-fn update_bubbles(room: &str, entry: &mut Room) {
+fn update_bubbles(room: &str, entry: &mut Room, now: Instant) {
     // Leaves first: gone members keep their seat (reconnect grace), opted
     // out members and participants at or beyond the bubble radius drop out
     // immediately.
     let mut dropped: Vec<String> = Vec::new();
     if let Some(call) = entry.call.as_ref() {
-        // The bubble's center: the centroid of the participants' positions.
+        // The bubble's center: the centroid of the *connected* participants
+        // (a gone member's stale position must not push live ones out).
         let mut center = (0.0f32, 0.0f32);
         let mut n = 0usize;
         for (uid, m) in &entry.users {
-            if call.contains(uid) {
+            if call.contains(uid) && m.gone_at.is_none() {
                 center.0 += m.pos.0;
                 center.1 += m.pos.1;
                 n += 1;
@@ -730,13 +742,23 @@ fn update_bubbles(room: &str, entry: &mut Room) {
             center.1 /= n as f32;
         }
         for id in call.participants.keys() {
-            match entry.users.get(id) {
-                None => {} // gone: stays in the bubble (reconnect grace)
-                Some(m) => {
-                    if m.bubble_off || dist(center, m.pos) >= BUBBLE_RADIUS {
-                        dropped.push(id.clone());
-                    }
-                }
+            let Some(m) = entry.users.get(id) else {
+                continue; // gone: stays in the bubble (reconnect grace)
+            };
+            if m.bubble_off {
+                dropped.push(id.clone());
+                continue;
+            }
+            if m.gone_at.is_some() {
+                continue; // gone: stays in the bubble (reconnect grace)
+            }
+            if let Some(reentered) = m.reentered_at
+                && now.duration_since(reentered) < BUBBLE_RETURN_GRACE
+            {
+                continue; // just re-entered: the radius check comes later
+            }
+            if dist(center, m.pos) >= BUBBLE_RADIUS {
+                dropped.push(id.clone());
             }
         }
     }

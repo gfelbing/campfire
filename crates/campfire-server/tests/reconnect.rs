@@ -240,13 +240,14 @@ async fn reconnect_within_window_keeps_identity_no_flicker() {
     // Alice hears bob join (drain).
     assert!(matches!(a.recv().await, ServerMsg::Joined { .. }));
 
-    // Alice walks two tiles east of spawn (20.5, 15.5 → 22.5, 15.5). The
-    // speed gate (8 tiles/s) needs headroom since the join.
+    // Alice walks half a tile east of spawn (20.5, 15.5 → 21.0, 15.5):
+    // within the one-tile bubble radius. The speed gate (8 tiles/s) needs
+    // headroom since the join.
     tokio::time::sleep(Duration::from_millis(300)).await;
     let batch = MovementBatch {
         m: vec![MovementEntry {
             id: a_id.clone(),
-            x: 22.5,
+            x: 21.0,
             y: 15.5,
             d: Dir::East,
             moving: 1,
@@ -260,7 +261,7 @@ async fn reconnect_within_window_keeps_identity_no_flicker() {
     // server a moment before the connection drop below).
     tokio::time::sleep(Duration::from_millis(250)).await;
 
-    // Alice walked within the join radius (2 tiles < 3.5): the tick forms
+    // Alice walked within the bubble radius (0.5 tiles < 1.0): the tick forms
     // the proximity bubble on its own — no ring, no accept (README §6.3).
     // Call state is room-wide: both hear the roster.
     match a.recv().await {
@@ -319,7 +320,7 @@ async fn reconnect_within_window_keeps_identity_no_flicker() {
         .iter()
         .find(|u| u.id == a_id)
         .expect("alice in her own hello");
-    assert_eq!((me.x, me.y), (22.5, 15.5), "position must survive the drop");
+    assert_eq!((me.x, me.y), (21.0, 15.5), "position must survive the drop");
     // Call membership survived: the hello's call roster includes alice.
     assert_eq!(call.len(), 2, "the huddle still has both participants");
     assert!(

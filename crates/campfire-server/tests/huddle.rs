@@ -411,17 +411,9 @@ async fn bubble_six_members_join_drop_and_walk_away() {
         }
     }
 
-    // Walk-away: dave walks out of the leave radius (5.5 tiles east).
-    // Nothing at once (2 s grace), then the room hears call_leave.
+    // Walk-away: dave walks out of the one-tile bubble — the very next
+    // tick drops him (immediate leave, no grace delay).
     walk_out(&d, &d_id, 5.5).await;
-    for u in [&mut a, &mut c, &mut d, &mut e, &mut f] {
-        assert_quiet(
-            u,
-            Duration::from_millis(300),
-            "grace delay before the leave",
-        )
-        .await;
-    }
     for u in [&mut a, &mut c, &mut d, &mut e, &mut f, &mut g] {
         assert_eq!(as_call_leave(u).await, d_id.clone());
     }
