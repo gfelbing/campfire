@@ -79,14 +79,15 @@ export function createCallUI(container: HTMLElement, actions: CallUiActions): Ca
         <span class="theater-name"></span>
         <span class="theater-state">connecting…</span>
       </div>
-      <div class="theater-tiles"></div>
-      <div class="theater-pip-wrap"><video class="theater-pip" autoplay playsinline muted></video>
-        <div class="theater-pip-info">you</div></div>
       <div class="call-controls">
         <button class="call-btn call-mute" title="mute / unmute (🎤)">🎤</button>
         <button class="call-btn call-camera" title="camera on / off (📷)">📷</button>
         <button class="call-btn call-screen" title="share the screen (🖥)">🖥</button>
         <button class="call-btn call-hangup" title="leave the call">📞</button>
+      </div>
+      <div class="theater-tiles">
+        <div class="theater-tile local"><video class="theater-pip" autoplay playsinline muted></video>
+          <div class="theater-tile-info"><span class="tile-name">you</span></div></div>
       </div>
     </div>
     <div class="theater-focus hidden">
@@ -99,6 +100,7 @@ export function createCallUI(container: HTMLElement, actions: CallUiActions): Ca
   const theaterName = root.querySelector<HTMLElement>(".theater-name")!;
   const theaterState = root.querySelector<HTMLElement>(".theater-state")!;
   const tilesEl = root.querySelector<HTMLElement>(".theater-tiles")!;
+  const localTile = root.querySelector<HTMLElement>(".theater-tile.local")!;
   const pip = root.querySelector<HTMLVideoElement>(".theater-pip")!;
   const focus = root.querySelector<HTMLElement>(".theater-focus")!;
   const focusSlot = root.querySelector<HTMLElement>(".theater-focus-slot")!;
@@ -209,7 +211,8 @@ export function createCallUI(container: HTMLElement, actions: CallUiActions): Ca
       if (focused === p.id) unfocus();
       else focusTile(p.id);
     });
-    tilesEl.appendChild(el);
+    // New tiles go above the local PiP tile (the local one stays last).
+    tilesEl.insertBefore(el, localTile);
     return tile;
   }
 
@@ -291,6 +294,7 @@ export function createCallUI(container: HTMLElement, actions: CallUiActions): Ca
       const agg = aggregateState(peers);
       theaterState.textContent = agg.text;
       col.dataset.state = agg.state;
+      tilesEl.dataset.empty = peers.length === 0 ? "1" : "0";
     },
     setLocalMute(audio, video) {
       muteBtn.classList.toggle("off", !audio);

@@ -57,7 +57,7 @@ body {
   display: flex;
   flex-direction: column;
   background: var(--panel);
-  border-left: 1px solid var(--line);
+  border-right: 1px solid var(--line);
   pointer-events: auto;
 }
 
@@ -539,8 +539,8 @@ body {
   position: absolute;
   top: 12px;
   right: 12px;
+  bottom: 12px;
   width: min(280px, calc(100vw - 24px));
-  max-height: calc(100vh - 24px);
   background: var(--panel);
   border: 1px solid var(--line);
   border-radius: 12px;
@@ -553,6 +553,7 @@ body {
 }
 
 .theater-header {
+  flex: none;
   display: flex;
   justify-content: space-between;
   align-items: baseline;
@@ -577,7 +578,10 @@ body {
   color: #e06060;
 }
 
+/* every stream the same size, the column scrolls when it gets too tall */
 .theater-tiles {
+  flex: 1;
+  min-height: 0;
   display: flex;
   flex-direction: column;
   gap: 0.35rem;
@@ -585,7 +589,7 @@ body {
   scrollbar-width: thin;
 }
 
-.theater-tiles:empty::after {
+.theater-tiles[data-empty="1"]::after {
   content: "no one else on the call yet";
   color: var(--muted);
   font-size: 0.75rem;
@@ -642,35 +646,10 @@ body {
   white-space: nowrap;
 }
 
-.theater-pip-wrap {
-  position: relative;
-  flex: none;
-  margin-left: auto;
-  width: 96px;
-  aspect-ratio: 16 / 9;
-  border-radius: 6px;
-  overflow: hidden;
-  border: 1px solid var(--line);
-  background: #000;
-}
-
-.theater-pip {
-  width: 100%;
-  height: 100%;
+/* the local (own camera) tile: same size as every remote tile */
+.theater-tile.local video {
   object-fit: cover;
-  display: block;
   transform: scaleX(-1);
-}
-
-.theater-pip-info {
-  position: absolute;
-  left: 4px;
-  bottom: 2px;
-  font-size: 0.62rem;
-  font-weight: 600;
-  background: rgba(0, 0, 0, 0.55);
-  border-radius: 4px;
-  padding: 0.05rem 0.3rem;
 }
 
 /* center focus overlay: the clicked tile's <video> element moves here */
@@ -844,6 +823,7 @@ body {
 }
 
 .call-controls {
+  flex: none;
   display: flex;
   justify-content: center;
   gap: 0.5rem;
