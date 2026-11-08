@@ -57,7 +57,11 @@ export class Connection {
   /** Our own user id from the last hello ("" until joined). */
   private selfId = "";
   /** Our reconnect token from the last hello ("" until joined). Sent back in
-   *  every join so a dropped connection restores this identity (README §5). */
+   *  every join so a dropped connection restores this identity (README §5).
+   *  Persisted per room in `sessionStorage`: a page reload re-joins with the
+   *  same token, so the server replaces the old avatar instead of leaving a
+   *  ghost behind for the reconnect window. Session-scoped storage means a
+   *  fresh browser session correctly starts as a new user. */
   private token = "";
 
   constructor(
@@ -65,7 +69,18 @@ export class Connection {
     private name: string,
     private avatarColor: string,
     private handlers: ConnHandlers,
-  ) {}
+  ) {
+    try {
+      this.token = sessionStorage.getItem(this.tokenKey()) ?? "";
+    } catch {
+      // storage unavailable (private mode): reconnect only in-memory
+    }
+  }
+
+  /** sessionStorage key for this room's reconnect token. */
+  private tokenKey(): string {
+    return `campfire.token.${this.room}`;
+  }
 
   /** Connect, join, and keep reconnecting until close() is called. */
   start(): void {
@@ -170,6 +185,11 @@ export class Connection {
       case "hello":
         this.selfId = msg.you;
         this.token = msg.token;
+        try {
+          sessionStorage.setItem(this.tokenKey(), this.token);
+        } catch {
+          // ignore storage failures
+        }
         this.handlers.onHello(msg);
         break;
       case "joined":
