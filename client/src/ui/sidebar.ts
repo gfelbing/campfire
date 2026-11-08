@@ -23,16 +23,36 @@ export function createSidebar(): SidebarUI {
     for (const t of tabs) t.classList.toggle("active", t.dataset.tab === id);
     for (const p of panes) p.classList.toggle("hidden", p.dataset.pane !== id);
     if (id === "chat") chatTab.classList.remove("dot");
+    saveCollapsed(false);
   }
+
+  /** Collapsed state persists in the browser (default: collapsed). */
+  function saveCollapsed(collapsed: boolean): void {
+    try {
+      localStorage.setItem("campfire.sidebar", collapsed ? "collapsed" : "open");
+    } catch {
+      // private mode etc.: the state just does not persist
+    }
+  }
+
+  let collapsed = true; // default: collapsed
+  try {
+    collapsed = localStorage.getItem("campfire.sidebar") !== "open";
+  } catch {
+    // private mode etc.: stay with the default
+  }
+  sidebar.classList.toggle("collapsed", collapsed);
 
   for (const t of tabs) {
     t.addEventListener("click", () => activate(t.dataset.tab!));
   }
   sidebar.querySelector<HTMLButtonElement>("#sidebar-collapse")!.addEventListener("click", () => {
-    sidebar.classList.toggle("collapsed");
+    const now = sidebar.classList.toggle("collapsed");
+    saveCollapsed(now);
   });
 
-  activate("chat"); // chat is the default pane (most often used)
+  // Default pane without un-collapsing (activate() expands the sidebar).
+  for (const t of tabs) t.classList.toggle("active", t.dataset.tab === "chat");
 
   return {
     pane: (id) => sidebar.querySelector<HTMLElement>(`[data-pane="${id}"]`)!,
