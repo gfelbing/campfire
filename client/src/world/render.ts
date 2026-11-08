@@ -2,7 +2,7 @@
 
 import { Application, Assets, Container, Graphics, Rectangle, Sprite, Texture } from "pixi.js";
 
-import type { MapData, TilesetRef } from "./mapdata";
+import type { MapData, TilesetRef, Zone } from "./mapdata";
 import { AvatarManager, AvatarView } from "./avatars";
 
 /** Tiled stores flip flags in the GID's high bits (no diagonal support yet). */
@@ -35,7 +35,13 @@ export async function createWorld(
     background: 0x0d0f12,
     antialias: true,
   });
-  document.getElementById("app")!.appendChild(app.canvas);
+  const appEl = document.getElementById("app")!;
+  appEl.appendChild(app.canvas);
+
+  // Pixi's `resizeTo` only reacts to window resizes; the #app element itself
+  // changes size when the sidebar collapses or the window layout shifts, so
+  // observe it directly and keep the canvas filling the flex column.
+  new ResizeObserver(() => app.resize()).observe(appEl);
 
   const world = new Container();
   app.stage.addChild(world);
@@ -158,10 +164,24 @@ export async function createWorld(
   };
 }
 
-/** Draw the proximity bubble: a one-tile circle around the centroid of the
- *  participants' tile positions (README §6.3). Empty `pts` clears it. */
-export function drawBubble(world: World, pts: Array<[number, number]>): void {
+/** Draw the call areas: every live jitsi zone call highlights its zone
+ *  rectangle (README roadmap "Map enhancements"); our own proximity bubble
+ *  is the one-tile circle around the centroid of its participants (README
+ *  §6.3). Empty `pts` and `rects` clear it. */
+export function drawBubble(
+  world: World,
+  rects: Zone[],
+  pts: Array<[number, number]>,
+): void {
   world.bubble.clear();
+  const ts = world.map.tileSize;
+  for (const z of rects) {
+    const [zx, zy, zw, zh] = z.rect;
+    world.bubble
+      .rect(zx * ts, zy * ts, zw * ts, zh * ts)
+      .fill({ color: 0x58a858, alpha: 0.15 })
+      .stroke({ width: 2, color: 0x58a858, alpha: 0.6 });
+  }
   if (pts.length === 0) return;
   let cx = 0;
   let cy = 0;
@@ -171,7 +191,6 @@ export function drawBubble(world: World, pts: Array<[number, number]>): void {
   }
   cx /= pts.length;
   cy /= pts.length;
-  const ts = world.map.tileSize;
   world.bubble
     .circle(cx * ts, cy * ts, ts)
     .fill({ color: 0x58a858, alpha: 0.15 })

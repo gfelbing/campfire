@@ -87,13 +87,20 @@ struct Member {
     reentered_at: Option<Instant>,
 }
 
-/// One room (one map): presence + chat history + the in-flight call, if any.
+/// One room (one map): presence + chat history + the in-flight calls.
 #[derive(Default)]
 struct Room {
     users: HashMap<UserId, Member>,
     chat: VecDeque<ChatMsg>,
-    /// The room's call (README §7): at most one per room in v1.
-    call: Option<call::Call>,
+    /// The room's calls (README §7): at most one proximity bubble
+    /// (`zone: None`) plus one call per occupied jitsi zone. A user is in
+    /// at most one call at a time.
+    calls: Vec<call::Call>,
+}
+
+/// The index of the (single) call containing `id`, if any.
+fn call_containing(entry: &Room, id: &str) -> Option<usize> {
+    entry.calls.iter().position(|c| c.participants.contains_key(id))
 }
 
 /// Why a join was refused.
@@ -145,6 +152,9 @@ pub(crate) fn zone_maps() -> campfire_maps::Maps {
                 {"name": "meeting", "x": 64, "y": 64, "width": 96, "height": 96,
                  "properties": [{"name": "jitsiRoom", "type": "string",
                                  "value": "team-meeting"}]},
+                {"name": "annex", "x": 192, "y": 64, "width": 64, "height": 96,
+                 "properties": [{"name": "jitsiRoom", "type": "string",
+                                 "value": "team-annex"}]},
                 {"name": "quiet", "x": 0, "y": 0, "width": 64, "height": 64,
                  "properties": [{"name": "silentZone", "type": "bool", "value": true}]},
                 {"name": "start", "x": 32, "y": 32, "width": 64, "height": 64}
@@ -260,15 +270,16 @@ impl World {
             member.seq = 0;
             member.dirty = true;
             let joined = Joined {
-                you: id,
-                token: member.token.clone(),
-                users: user_snapshot(room_entry),
-                chat: room_entry.chat.iter().cloned().collect(),
                 call: room_entry
-                    .call
-                    .as_ref()
+                    .calls
+                    .iter()
+                    .find(|c| c.participants.contains_key(&id))
                     .map(|c| c.participant_list())
                     .unwrap_or_default(),
+                you: id,
+                token: member.token.clone(),
+                users: user_snapshot(room_entry, Some(map)),
+                chat: room_entry.chat.iter().cloned().collect(),
             };
             return Ok(joined);
         }
@@ -309,11 +320,12 @@ impl World {
         let joined = Joined {
             you: id.clone(),
             token,
-            users: user_snapshot(room_entry),
+            users: user_snapshot(room_entry, Some(map)),
             chat: room_entry.chat.iter().cloned().collect(),
             call: room_entry
-                .call
-                .as_ref()
+                .calls
+                .iter()
+                .find(|c| c.participants.contains_key(&id))
                 .map(|c| c.participant_list())
                 .unwrap_or_default(),
         };
@@ -329,19 +341,23 @@ impl World {
                 });
             }
         }
-        // Catch-up (README §6.3): if the room already has a running call,
-        // the new room member gets its current roster so their avatars'
-        // headphone badge is correct from the start.
-        if let Some(call) = &room_entry.call
-            && !call.participants.is_empty()
-            && let Some(m) = room_entry.users.get(&id)
-        {
+        // Catch-up (README §6.3): for every running call, the new room
+        // member gets its current roster so their avatars' headphone badge
+        // is correct from the start.
+        for call in &room_entry.calls {
+            if call.participants.is_empty() {
+                continue;
+            }
+            let Some(m) = room_entry.users.get(&id) else {
+                break;
+            };
             let _ = m.tx.send(ServerMsg::CallStart {
                 room: room.to_owned(),
                 participants: call.participant_list(),
                 // A member joining into an existing bubble (reconnect or
                 // room re-entry) re-offers: their peer connections died.
                 you_offer: call.contains(&id),
+                zone: call.zone.clone(),
             });
         }
         Ok(joined)
@@ -546,14 +562,22 @@ impl World {
             return Err(ErrorCode::CallNotAllowed);
         };
         {
-            let call = entry.call.as_mut().ok_or(ErrorCode::CallNotAllowed)?;
+            let call = entry
+                .calls
+                .iter_mut()
+                .find(|c| c.participants.contains_key(from))
+                .ok_or(ErrorCode::CallNotAllowed)?;
             let flags = call
                 .participants
                 .get_mut(from)
                 .ok_or(ErrorCode::CallNotAllowed)?;
             flags.1.screen = on;
         }
-        let call = entry.call.as_ref().expect("checked above");
+        let call = entry
+            .calls
+            .iter()
+            .find(|c| c.participants.contains_key(from))
+            .expect("checked above");
         for (uid, m) in &entry.users {
             if uid != from && call.participants.contains_key(uid) {
                 let _ = m.tx.send(ServerMsg::CallScreen {
@@ -648,7 +672,11 @@ impl World {
             return Err(ErrorCode::CallNotAllowed);
         };
         {
-            let call = entry.call.as_mut().ok_or(ErrorCode::CallNotAllowed)?;
+            let call = entry
+                .calls
+                .iter_mut()
+                .find(|c| c.participants.contains_key(from))
+                .ok_or(ErrorCode::CallNotAllowed)?;
             let flags = call
                 .participants
                 .get_mut(from)
@@ -660,7 +688,11 @@ impl World {
                 screen,
             };
         }
-        let call = entry.call.as_ref().expect("checked above");
+        let call = entry
+            .calls
+            .iter()
+            .find(|c| c.participants.contains_key(from))
+            .expect("checked above");
         for (uid, m) in &entry.users {
             if uid != from && call.participants.contains_key(uid) {
                 let _ = m.tx.send(ServerMsg::CallMute {
@@ -679,10 +711,7 @@ impl World {
         let Some(entry) = rooms.get_mut(room) else {
             return Err(ErrorCode::CallNotAllowed);
         };
-        let involved = entry
-            .call
-            .as_ref()
-            .is_some_and(|c| c.participants.contains_key(from));
+        let involved = call_containing(entry, from).is_some();
         if !involved {
             return Err(ErrorCode::CallNotAllowed);
         }
@@ -718,7 +747,7 @@ impl World {
             .lock()
             .unwrap()
             .values()
-            .filter(|r| r.call.is_some())
+            .filter(|r| !r.calls.is_empty())
             .count()
     }
 }
@@ -750,40 +779,46 @@ pub fn start_ticking_with(
 /// participants of the room's bubble. Signaling from a bystander is
 /// rejected here.
 fn call_target<'a>(entry: &'a Room, from: &str, to: &str) -> Result<&'a Member, ErrorCode> {
-    let call = entry.call.as_ref().ok_or(ErrorCode::CallNotAllowed)?;
-    if !call.participants.contains_key(from) || !call.participants.contains_key(to) {
+    // Both endpoints must sit in the same call (a user is in at most one).
+    let same = call_containing(entry, from).is_some_and(|i| {
+        entry.calls[i].participants.contains_key(to)
+    });
+    if !same {
         return Err(ErrorCode::CallNotAllowed);
     }
     entry.users.get(to).ok_or(ErrorCode::CallNotAllowed)
 }
 
-/// Drop `id` from the room's bubble, if any, and tell the room (README
-/// §6.3). Used when the leaver toggles out, hangs up, or is gone and
-/// cannot be notified.
+/// Drop `id` from their call, if any, and tell the room (README §6.3).
+/// Used when the leaver toggles out, hangs up, or is gone and cannot be
+/// notified.
 ///
 /// The call state is room-wide (it powers the avatars' headphone badge),
-/// so every remaining member of the room is told. An emptied bubble ends
-/// with `call_end(last_left)`.
+/// so every remaining member of the room is told. A call whose last member
+/// leaves ends with `call_end(last_left)`; a one-on-one whose partner
+/// stays keeps the remaining participant.
 fn leave_call(entry: &mut Room, id: &str) {
-    let Some(mut call) = entry.call.take() else {
+    let Some(index) = call_containing(entry, id) else {
         return;
     };
-    if call.participants.remove(id).is_none() {
-        entry.call = Some(call); // not in the call: nothing happened
-        return;
-    }
+    let mut call = entry.calls.swap_remove(index);
+    call.participants.remove(id);
     let over = call.participants.len() <= 1;
     for m in entry.users.values() {
         let _ = if over {
             m.tx.send(ServerMsg::CallEnd {
                 reason: "last_left".to_owned(),
+                zone: call.zone.clone(),
             })
         } else {
-            m.tx.send(ServerMsg::CallLeave { id: id.to_owned() })
+            m.tx.send(ServerMsg::CallLeave {
+                id: id.to_owned(),
+                zone: call.zone.clone(),
+            })
         };
     }
     if !over {
-        entry.call = Some(call);
+        entry.calls.push(call);
     }
 }
 
@@ -800,39 +835,36 @@ fn update_bubbles(
     now: Instant,
     map: Option<&campfire_maps::MapData>,
 ) {
-    // jitsi zones (README roadmap "Map enhancements"): a zone call takes
-    // precedence over the proximity bubble — one call per room, so a zone
-    // call forms only when no proximity bubble is live, and the zone call
-    // is bounded by the zone rectangle instead of the bubble radius.
-    let jitsi_zone = map.and_then(|map| {
-        map.zones.iter().find(|z| {
-            z.jitsi_room.is_some()
-                && entry
-                    .users
-                    .values()
-                    .any(|m| !m.bubble_off && m.gone_at.is_none() && z.contains(m.pos.0, m.pos.1))
+    // Silent zones (README roadmap "Map enhancements"): silent-zone
+    // occupants never join a proximity bubble (zone calls are separate).
+    let in_silent = |x: f32, y: f32| -> bool {
+        map.is_some_and(|map| {
+            map.zones
+                .iter()
+                .any(|z| z.silent && z.contains(x, y))
         })
-    });
-
-    // Whether a point is inside the active call's area: a zone call is
-    // bounded by its zone rectangle (a zone call whose zone has emptied
-    // out lets everyone drop, ending the call); a proximity bubble is the
-    // one-tile radius around the centroid of connected participants.
-    let inside = |entry: &Room, call: &call::Call, x: f32, y: f32| -> bool {
-        match (&call.zone, jitsi_zone) {
-            (Some(name), Some(z)) if z.jitsi_room.as_deref() == Some(name.as_str()) => {
-                z.contains(x, y)
-            }
-            (Some(_), _) => false,
-            (None, _) => dist(center_of_call(entry, call), (x, y)) < BUBBLE_RADIUS,
-        }
+    };
+    // A call's zone rectangle: a zone call is bounded by its zone rect (a
+    // zone call whose zone has emptied out lets everyone drop, ending the
+    // call); a proximity bubble is the one-tile radius around the centroid
+    // of connected participants.
+    let zone_rect = |zone: &Option<String>| -> Option<&campfire_maps::Zone> {
+        let name = zone.as_ref()?;
+        map.and_then(|map| {
+            map.zones.iter().find(|z| {
+                z.jitsi_room.as_deref() == Some(name.as_str())
+                    || (z.jitsi_room.is_none() && z.name == *name)
+            })
+        })
     };
 
     // Leaves first: gone members keep their seat (reconnect grace), opted
-    // out members and participants at or beyond the bubble radius (or
-    // outside a jitsi zone) drop out immediately.
+    // out members and participants outside their call's area drop out
+    // immediately — for every concurrent call.
     let mut dropped: Vec<String> = Vec::new();
-    if let Some(call) = entry.call.as_ref() {
+    for ci in 0..entry.calls.len() {
+        let call = &entry.calls[ci];
+        let rect = zone_rect(&call.zone);
         for id in call.participants.keys() {
             let Some(m) = entry.users.get(id) else {
                 continue; // gone: stays in the bubble (reconnect grace)
@@ -849,7 +881,18 @@ fn update_bubbles(
             {
                 continue; // just re-entered: the radius check comes later
             }
-            if !inside(entry, call, m.pos.0, m.pos.1) {
+            let inside = match rect {
+                Some(z) if call.zone.is_some() => z.contains(m.pos.0, m.pos.1),
+                None if call.zone.is_some() => false,
+                _ => dist(center_of_call(entry, call), m.pos) < BUBBLE_RADIUS,
+            };
+            if !inside {
+                dropped.push(id.clone());
+                continue;
+            }
+            // A proximity bubble never spans a silent zone: occupants who
+            // walk into one drop out of the bubble.
+            if call.zone.is_none() && in_silent(m.pos.0, m.pos.1) {
                 dropped.push(id.clone());
             }
         }
@@ -858,43 +901,68 @@ fn update_bubbles(
         leave_call(entry, &id);
     }
 
-    // Creation: no bubble yet, and two eligible users within the bubble
-    // radius of each other (id-sorted so the pair — and thus the designated
-    // offerer — is deterministic).
-    if entry.call.is_none() {
-        // Zone call: a jitsi zone with 2+ occupants inside it.
-        if let Some(zone) = jitsi_zone {
-            let inside: Vec<(String, (f32, f32))> = entry
+    // Creation: each occupied jitsi zone can carry its own call (the zone
+    // is the call area, so a lone occupant starts it and everyone who
+    // walks in joins); then, if no proximity bubble is live, two eligible
+    // users within the bubble radius of each other form one (id-sorted so
+    // the pair — and thus the designated offerer — is deterministic).
+    let in_any_call =
+        |entry: &Room, id: &str| entry.calls.iter().any(|c| c.participants.contains_key(id));
+    if let Some(map) = map {
+        for zone in &map.zones {
+            let Some(jitsi) = &zone.jitsi_room else {
+                continue;
+            };
+            if entry
+                .calls
+                .iter()
+                .any(|c| c.zone.as_deref() == Some(jitsi.as_str()))
+            {
+                continue; // this zone's call is already live
+            }
+            let inside: Vec<String> = entry
                 .users
                 .iter()
-                .filter(|(_, m)| {
-                    !m.bubble_off && m.gone_at.is_none() && zone.contains(m.pos.0, m.pos.1)
+                .filter(|(uid, m)| {
+                    !m.bubble_off
+                        && m.gone_at.is_none()
+                        && !in_any_call(entry, uid)
+                        && zone.contains(m.pos.0, m.pos.1)
                 })
-                .map(|(uid, m)| (uid.clone(), m.pos))
+                .map(|(uid, _)| uid.clone())
                 .collect();
-            if inside.len() >= 2 {
-                let mut inside = inside;
-                inside.sort_by(|a, b| a.0.cmp(&b.0));
-                let call = call::Call {
-                    zone: Some(zone.jitsi_room.clone().unwrap_or_else(|| zone.name.clone())),
-                    ..call::Call::new(
-                        entry
-                            .users
-                            .iter()
-                            .filter(|(uid, _)| inside.iter().any(|(i, _)| i == *uid))
-                            .map(|(uid, m)| (uid.clone(), m.name.clone())),
-                    )
-                };
-                let offerer = inside[0].0.clone();
-                entry.call = Some(call);
-                broadcast_call_start(room, entry, Some(&offerer));
-                return;
+            if inside.is_empty() {
+                continue;
             }
+            let mut inside = inside;
+            inside.sort();
+            let call = call::Call::new(
+                entry
+                    .users
+                    .iter()
+                    .filter(|(uid, _)| inside.contains(uid))
+                    .map(|(uid, m)| (uid.clone(), m.name.clone())),
+            );
+            let call = call::Call {
+                zone: Some(jitsi.clone()),
+                ..call
+            };
+            broadcast_call_start(room, entry, call.zone.clone(), call.participant_list(), Some(&inside[0]));
+            entry.calls.push(call);
+            return;
         }
+    }
+    {
+        let mut created = false;
         let mut candidates: Vec<(String, (f32, f32))> = entry
             .users
             .iter()
-            .filter(|(_, m)| !m.bubble_off && m.gone_at.is_none())
+            .filter(|(uid, m)| {
+                !m.bubble_off
+                    && m.gone_at.is_none()
+                    && !in_any_call(entry, uid)
+                    && !in_silent(m.pos.0, m.pos.1)
+            })
             .map(|(uid, m)| (uid.clone(), m.pos))
             .collect();
         candidates.sort_by(|a, b| a.0.cmp(&b.0));
@@ -914,50 +982,68 @@ fn update_bubbles(
                         )
                     };
                     let offerer = [a.0.clone(), b.0.clone()].into_iter().min().unwrap();
-                    entry.call = Some(call);
-                    broadcast_call_start(room, entry, Some(&offerer));
+                    broadcast_call_start(room, entry, call.zone.clone(), call.participant_list(), Some(&offerer));
+                    entry.calls.push(call);
+                    created = true;
                     break 'pair;
                 }
             }
         }
-        return;
+        if created {
+            return;
+        }
     }
 
-    // Joins: at most one per tick — the nearest eligible user within the
-    // bubble radius of the bubble's center (or inside the jitsi zone for a
-    // zone call). The joiner is the offerer (README §6.3: the joiner offers
-    // every existing member; nobody renegotiates).
-    let Some(call) = entry.call.as_ref() else {
-        return;
-    };
-    let mut best: Option<(f32, String)> = None;
-    for (uid, m) in &entry.users {
-        if m.bubble_off || m.gone_at.is_some() || call.contains(uid) {
-            continue;
+    // Joins: at most one per tick — the nearest eligible user inside a
+    // call's area (zone rect or bubble radius) who is not already in
+    // another call. The joiner is the offerer (README §6.3: the joiner
+    // offers every existing member; nobody renegotiates).
+    'calls: for ci in 0..entry.calls.len() {
+        let call = &entry.calls[ci];
+        let rect = zone_rect(&call.zone);
+        let mut best: Option<(f32, String)> = None;
+        for (uid, m) in &entry.users {
+            if m.bubble_off || m.gone_at.is_some() || call.contains(uid) || in_any_call(entry, uid)
+            {
+                continue;
+            }
+            // Silent-zone occupants never join a proximity bubble.
+            if call.zone.is_none() && in_silent(m.pos.0, m.pos.1) {
+                continue;
+            }
+            let inside = match rect {
+                Some(z) if call.zone.is_some() => z.contains(m.pos.0, m.pos.1),
+                None if call.zone.is_some() => false,
+                _ => dist(center_of_call(entry, call), m.pos) < BUBBLE_RADIUS,
+            };
+            if !inside {
+                continue;
+            }
+            let d = dist(center_of_call(entry, call), m.pos);
+            if best.as_ref().is_none_or(|(bd, _)| d < *bd) {
+                best = Some((d, uid.clone()));
+            }
         }
-        if !inside(entry, call, m.pos.0, m.pos.1) {
-            continue;
+        if let Some((_, joiner)) = best {
+            let name = entry.users[&joiner].name.clone();
+            {
+                let call = &mut entry.calls[ci];
+                call.participants.insert(
+                    joiner.clone(),
+                    (
+                        name,
+                        call::ParticipantFlags {
+                            audio: true,
+                            video: true,
+                            screen: false,
+                        },
+                    ),
+                );
+            }
+            let c = &entry.calls[ci];
+            broadcast_call_start(room, entry, c.zone.clone(), c.participant_list(), Some(&joiner));
+            break 'calls;
         }
-        let d = dist(center_of_call(entry, call), m.pos);
-        if best.as_ref().is_none_or(|(bd, _)| d < *bd) {
-            best = Some((d, uid.clone()));
-        }
-    }
-    if let Some((_, joiner)) = best {
-        let name = entry.users[&joiner].name.clone();
-        let call = entry.call.as_mut().expect("checked above");
-        call.participants.insert(
-            joiner.clone(),
-            (
-                name,
-                call::ParticipantFlags {
-                    audio: true,
-                    video: true,
-                    screen: false,
-                },
-            ),
-        );
-        broadcast_call_start(room, entry, Some(&joiner));
     }
 }
 
@@ -982,18 +1068,20 @@ fn center_of_call(entry: &Room, call: &call::Call) -> (f32, f32) {
 /// Broadcast the bubble's roster to the whole room: `CallStart` powers the
 /// headphone badge on everyone, and `you_offer` marks the one recipient
 /// who must send SDP offers to the others.
-fn broadcast_call_start(room: &str, entry: &mut Room, offerer: Option<&str>) {
-    let participants = entry
-        .call
-        .as_ref()
-        .expect("call present")
-        .participant_list();
+fn broadcast_call_start(
+    room: &str,
+    entry: &mut Room,
+    zone: Option<String>,
+    participants: Vec<UserBrief>,
+    offerer: Option<&str>,
+) {
     for (uid, m) in &entry.users {
         let you = offerer == Some(uid.as_str());
         let _ = m.tx.send(ServerMsg::CallStart {
             room: room.to_owned(),
             participants: participants.clone(),
             you_offer: you,
+            zone: zone.clone(),
         });
     }
 }
@@ -1023,7 +1111,7 @@ fn remove_from_room(rooms: &mut HashMap<String, Room>, room: &str, id: &str) {
 
 /// The room's full user snapshot for a `hello` (gone members included —
 /// they are still in the room until the reconnect window elapses).
-fn user_snapshot(entry: &Room) -> Vec<UserState> {
+fn user_snapshot(entry: &Room, map: Option<&campfire_maps::MapData>) -> Vec<UserState> {
     entry
         .users
         .iter()
@@ -1033,6 +1121,11 @@ fn user_snapshot(entry: &Room) -> Vec<UserState> {
             x: m.pos.0,
             y: m.pos.1,
             d: m.dir,
+            sz: map.is_some_and(|map| {
+                map.zones
+                    .iter()
+                    .any(|z| z.silent && z.contains(m.pos.0, m.pos.1))
+            }),
         })
         .collect()
 }
@@ -1167,7 +1260,7 @@ mod tests {
         world.tick();
         for u in [&mut b, &mut c] {
             match u.rx.try_recv().unwrap() {
-                ServerMsg::CallLeave { id } => assert_eq!(id, a.id),
+                ServerMsg::CallLeave { id, .. } => assert_eq!(id, a.id),
                 other => panic!("expected call_leave, got {other:?}"),
             }
         }
@@ -1281,6 +1374,74 @@ mod tests {
         // The `start` area (tiles 1..3, 1..3): its center (2, 2) is the
         // spawn point (README roadmap "Map enhancements").
         assert_eq!(world.map("zonetest").unwrap().spawn, (2.0, 2.0));
+    }
+
+    #[test]
+    fn lone_occupant_starts_a_zone_call() {
+        let world = World::new(zone_maps());
+        let mut a = join_user(&world, "zonetest", "alice");
+        let mut b = join_user(&world, "zonetest", "bob");
+        // Only a stands in the meeting zone (tiles 2..5, 2..5): the zone is
+        // the call area, so one occupant starts it.
+        place(&world, "zonetest", &a.id, 3.5, 3.5);
+        place(&world, "zonetest", &b.id, 7.5, 7.5);
+        world.tick();
+        let (p, you_offer) = expect_start(&mut a);
+        assert_eq!(p.len(), 1);
+        assert!(you_offer);
+        expect_start(&mut b); // room-wide badge
+    }
+
+    #[test]
+    fn two_zone_calls_run_concurrently() {
+        let world = World::new(zone_maps());
+        let mut a = join_user(&world, "zonetest", "alice");
+        let mut b = join_user(&world, "zonetest", "bob");
+        while a.rx.try_recv().is_ok() {}
+        while b.rx.try_recv().is_ok() {}
+        // a in the meeting zone (tiles 2..5, 2..5), b in the annex
+        // (tiles 6..8, 2..5): two independent zone calls at once.
+        place(&world, "zonetest", &a.id, 2.5, 2.5);
+        place(&world, "zonetest", &b.id, 6.5, 3.5);
+        world.tick();
+        let (pa, za) = expect_start_zone(&mut a);
+        assert_eq!(za.as_deref(), Some("team-meeting"));
+        assert_eq!(pa.len(), 1);
+        // One zone call per tick: b's annex call forms on the next tick.
+        // b's tick-1 CallStart was the meeting badge (roster [a]).
+        let (pb, zb) = expect_start_zone(&mut b);
+        assert_eq!(zb.as_deref(), Some("team-meeting"));
+        assert!(!pb.iter().any(|p| p.id == b.id));
+        world.tick();
+        let (pb, zb) = expect_start_zone(&mut b);
+        assert_eq!(zb.as_deref(), Some("team-annex"));
+        assert_eq!(pb.len(), 1);
+        // a hears b's call as a badge (roster update), not his own.
+        let (pa2, za2) = expect_start_zone(&mut a);
+        assert_eq!(za2.as_deref(), Some("team-annex"));
+        assert!(!pa2.iter().any(|p| p.id == a.id));
+    }
+
+    #[test]
+    fn silent_zone_users_never_join_a_proximity_bubble() {
+        let world = World::new(zone_maps());
+        let mut a = join_user(&world, "zonetest", "alice");
+        let mut b = join_user(&world, "zonetest", "bob");
+        while a.rx.try_recv().is_ok() {} // drain join noise
+        while b.rx.try_recv().is_ok() {}
+        // a stands in the silent zone (tiles 0..2, 0..2), b right outside it —
+        // close enough for a bubble if a were eligible.
+        // close enough for a bubble if a were eligible.
+        place(&world, "zonetest", &a.id, 1.5, 1.5);
+        place(&world, "zonetest", &b.id, 3.5, 1.5);
+        world.tick();
+        // No bubble: no CallStart anywhere.
+        assert!(a.rx.try_recv().is_err());
+        // a walks out of the silent zone: the bubble forms now.
+        place(&world, "zonetest", &a.id, 3.4, 1.5);
+        world.tick();
+        let (p, _) = expect_start(&mut a);
+        assert_eq!(p.len(), 2);
     }
 
     #[tokio::test]
@@ -1568,8 +1729,7 @@ mod tests {
         m.dirty = true;
     }
 
-    /// Expect `CallStart` on `u`'s stream; returns (participants, you_offer).
-    /// Skips presence noise (`Hello`, `Joined`, …) in between.
+    /// Expect `CallStart`; returns (participants, you_offer).
     fn expect_start(u: &mut TestUser) -> (Vec<UserBrief>, bool) {
         for _ in 0..20 {
             match u.rx.try_recv().expect("call_start") {
@@ -1578,6 +1738,21 @@ mod tests {
                     you_offer,
                     ..
                 } => return (participants, you_offer),
+                _ => continue,
+            }
+        }
+        panic!("call_start never arrived");
+    }
+
+    /// Expect `CallStart`; returns (participants, zone name).
+    fn expect_start_zone(u: &mut TestUser) -> (Vec<UserBrief>, Option<String>) {
+        for _ in 0..20 {
+            match u.rx.try_recv().expect("call_start") {
+                ServerMsg::CallStart {
+                    participants,
+                    zone,
+                    ..
+                } => return (participants, zone),
                 _ => continue,
             }
         }
@@ -1641,7 +1816,7 @@ mod tests {
         world.tick();
         for u in [&mut a, &mut b] {
             match u.rx.try_recv().unwrap() {
-                ServerMsg::CallEnd { ref reason } => assert_eq!(reason, "last_left"),
+                ServerMsg::CallEnd { ref reason, .. } => assert_eq!(reason, "last_left"),
                 other => panic!("expected call_end, got {other:?}"),
             }
         }
@@ -1672,7 +1847,7 @@ mod tests {
         world.tick();
         for u in [&mut a, &mut b, &mut c] {
             match u.rx.try_recv().unwrap() {
-                ServerMsg::CallEnd { ref reason } => assert_eq!(reason, "last_left"),
+                ServerMsg::CallEnd { ref reason, .. } => assert_eq!(reason, "last_left"),
                 other => panic!("expected call_end, got {other:?}"),
             }
         }
@@ -1839,7 +2014,7 @@ mod tests {
         world.call_leave("office", &a.id).unwrap();
         for u in [&mut a, &mut b] {
             match u.rx.try_recv().unwrap() {
-                ServerMsg::CallEnd { reason } => assert_eq!(reason, "last_left"),
+                ServerMsg::CallEnd { reason, .. } => assert_eq!(reason, "last_left"),
                 other => panic!("expected call_end, got {other:?}"),
             }
         }
@@ -1857,7 +2032,7 @@ mod tests {
         world.leave("office", &b.id);
         assert!(matches!(
             a.rx.try_recv().unwrap(),
-            ServerMsg::CallEnd { ref reason } if reason == "last_left"
+            ServerMsg::CallEnd { ref reason, .. } if reason == "last_left"
         ));
         assert!(matches!(a.rx.try_recv().unwrap(), ServerMsg::Left { .. }));
     }
@@ -2024,7 +2199,7 @@ mod tests {
         assert!(
             matches!(
                 b.rx.try_recv().unwrap(),
-                ServerMsg::CallEnd { ref reason } if reason == "last_left"
+                ServerMsg::CallEnd { ref reason, .. } if reason == "last_left"
             ),
             "the call drops when the gone member expires"
         );

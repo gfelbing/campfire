@@ -32,11 +32,11 @@ export interface ConnHandlers {
   onMovement: (batch: MovementBatch) => void;
   /** A bubble started or grew; `participants` is the full list and
    *  `youOffer` marks us as the designated offerer (README §6.3). */
-  onCallStart: (participants: UserBrief[], youOffer: boolean) => void;
+  onCallStart: (participants: UserBrief[], youOffer: boolean, zone?: string) => void;
   /** A participant left the ongoing bubble (huddles, Phase 6). */
-  onCallLeave: (id: string) => void;
+  onCallLeave: (id: string, zone?: string) => void;
   /** The bubble is over (`last_left`). */
-  onCallEnd: (reason: string) => void;
+  onCallEnd: (reason: string, zone?: string) => void;
   onCallOffer: (from: string, sdp: string) => void;
   onCallAnswer: (from: string, sdp: string) => void;
   onCallIce: (from: string, candidate: string) => void;
@@ -249,13 +249,13 @@ export class Connection {
         this.handlers.onTyping(msg.id, msg.on);
         break;
       case "call_start":
-        this.handlers.onCallStart(msg.participants, msg.you_offer);
+        this.handlers.onCallStart(msg.participants, msg.you_offer, msg.zone);
         break;
       case "call_leave":
-        this.handlers.onCallLeave(msg.id);
+        this.handlers.onCallLeave(msg.id, msg.zone);
         break;
       case "call_end":
-        this.handlers.onCallEnd(msg.reason);
+        this.handlers.onCallEnd(msg.reason, msg.zone);
         break;
       case "call_offer":
         this.handlers.onCallOffer(msg.from, msg.sdp);

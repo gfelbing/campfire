@@ -11,6 +11,9 @@ export interface UserState {
   x: number;
   y: number;
   d: Dir;
+  /** `sz`: the user stands inside a silentZone (README roadmap "Map
+   *  enhancements"). Only sent when true. */
+  sz?: boolean;
 }
 
 export interface UserBrief {
@@ -58,9 +61,17 @@ export type ServerMsg =
   | { t: "left"; id: string }
   | { t: "chat"; from: string; name: string; text: string; ts: number }
   | { t: "typing"; id: string; on: boolean }
-  | { t: "call_start"; room: string; participants: UserBrief[]; you_offer: boolean }
-  | { t: "call_leave"; id: string }
-  | { t: "call_end"; reason: string }
+  | {
+      t: "call_start";
+      room: string;
+      participants: UserBrief[];
+      you_offer: boolean;
+      /** Zone call: the `jitsiRoom` name of the bounding zone (README roadmap
+       *  "Map enhancements"); only present for zone calls. */
+      zone?: string;
+    }
+  | { t: "call_leave"; id: string; zone?: string }
+  | { t: "call_end"; reason: string; zone?: string }
   | { t: "call_offer"; from: string; sdp: string }
   | { t: "call_answer"; from: string; sdp: string }
   | { t: "call_ice"; from: string; candidate: string }

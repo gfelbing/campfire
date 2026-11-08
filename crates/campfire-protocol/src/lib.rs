@@ -58,6 +58,10 @@ pub struct UserState {
     pub x: f32,
     pub y: f32,
     pub d: Dir,
+    /// `sz`: the user stands inside a silentZone (README roadmap "Map
+    /// enhancements"). Only sent when true.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub sz: bool,
 }
 
 /// A chat message (history entries and live events share this shape).
@@ -203,15 +207,26 @@ pub enum ServerMsg {
         participants: Vec<UserBrief>,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         you_offer: bool,
+        /// Zone-call marker: the `jitsiRoom` name of the zone the call is
+        /// bounded by (client highlights the rectangle instead of the
+        /// proximity-bubble circle). Only sent when set.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        zone: Option<String>,
     },
-    /// A participant left an ongoing call.
+    /// A participant left an ongoing call. `zone` marks the call (only
+    /// sent when it is a zone call).
     CallLeave {
         id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        zone: Option<String>,
     },
     /// The call is over (no participants left). `reason` is `last_left`
-    /// (README §5).
+    /// (README §5). `zone` marks the call (only sent when it is a zone
+    /// call); rooms can carry several concurrent calls.
     CallEnd {
         reason: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        zone: Option<String>,
     },
     /// Relayed SDP offer from `from`.
     CallOffer {
@@ -319,6 +334,7 @@ mod tests {
                 x: 40.0,
                 y: 12.0,
                 d: Dir::South,
+                sz: false,
             }],
             chat: vec![ChatMsg {
                 from: "u_77ab".into(),

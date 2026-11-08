@@ -123,10 +123,23 @@ async function main(): Promise<void> {
   // Room roster (id → brief).
   const roster = new Map<string, UserBrief>();
 
-  // Who is in the room's bubble (room-wide call state, README §6.3): powers
-  // the avatars' headphone badge.
-  const inCall = new Set<string>();
+  // Active calls by zone key ("" = the proximity bubble): room-wide call
+  // state, powers the avatars' headphone badge. Rooms can carry several
+  // concurrent calls (one per occupied jitsi zone); a user is in at most
+  // one of them.
+  const calls = new Map<string, Set<string>>();
+  const inCallAll = (): Set<string> => {
+    const all = new Set<string>();
+    for (const s of calls.values()) for (const id of s) all.add(id);
+    return all;
+  };
+  /** Zone key of the call containing us, if any. */
+  const myCallKey = (): string | undefined => {
+    for (const [k, s] of calls) if (s.has(myId)) return k;
+    return undefined;
+  };
   const refreshCallUi = (): void => {
+    const inCall = inCallAll();
     for (const id of roster.keys()) {
       if (id !== myId) world.manager.setInCall(id, inCall.has(id));
     }
@@ -153,11 +166,12 @@ async function main(): Promise<void> {
       manager.setSelfId(h.you);
       presence.setUsers(h.users, new Set(h.call.map((u) => u.id)));
       // Reconnect-with-token (README §5): `hello.call` is the authoritative
-      // call roster. If the call survived our drop and we are in it,
-      // re-establish the media; if it died while we were away, tear down.
-      inCall.clear();
-      for (const u of h.call) inCall.add(u.id);
-      if (inCall.has(myId)) {
+      // roster of the call we were in (if it survived our drop). Zone
+      // catch-up `call_start`s (sent right after) refine the zone key.
+      calls.clear();
+      calls.set("", new Set(h.call.map((u) => u.id)));
+      const mine = calls.get("")!;
+      if (mine.has(myId)) {
         void manager.rejoinCall(h.call);
       } else if (manager.inCall()) {
         manager.onCallEnd("ended while you were disconnected");
@@ -190,25 +204,43 @@ async function main(): Promise<void> {
       // is muted locally.
       for (const e of batch.m) {
         manager.setSilent(e.id, e.sz === true);
+        const dnd = e.sz === true;
+        world.manager.setDnd(e.id, dnd);
+        if (e.id === myId) world.local.setDnd(dnd);
+        presence.setDnd(e.id, dnd);
       }
     },
     // Bubble state (README §6.3): the manager owns the state machine;
     // the room-wide call *state* also drives the headphone badges.
-    onCallStart: (ps, youOffer) => {
-      inCall.clear();
-      for (const p of ps) inCall.add(p.id);
+    onCallStart: (ps, youOffer, zone) => {
+      const key = zone ?? "";
+      calls.set(key, new Set(ps.map((p) => p.id)));
+      // A roster containing us replaces any stale provisional membership
+      // (a user is in at most one call).
+      if (calls.get(key)!.has(myId)) {
+        for (const [k, s] of calls) {
+          if (k !== key && s.has(myId)) calls.delete(k);
+        }
+        manager.onCallStart(ps, youOffer);
+      }
       refreshCallUi();
-      manager.onCallStart(ps, youOffer);
     },
-    onCallLeave: (id) => {
-      inCall.delete(id);
+    onCallLeave: (id, zone) => {
+      const key = zone ?? "";
+      const s = calls.get(key);
+      if (s?.has(id)) {
+        // A leaver from our call also tears down our media state.
+        if (s.has(myId)) manager.onCallLeave(id);
+        s.delete(id);
+        if (s.size === 0) calls.delete(key);
+      }
       refreshCallUi();
-      manager.onCallLeave(id);
     },
-    onCallEnd: (reason) => {
-      inCall.clear();
+    onCallEnd: (reason, zone) => {
+      const key = zone ?? "";
+      if (calls.get(key)?.has(myId)) manager.onCallEnd(reason);
+      calls.delete(key);
       refreshCallUi();
-      manager.onCallEnd(reason);
     },
     onCallOffer: (from, sdp) => manager.onCallOffer(from, sdp),
     onCallAnswer: (from, sdp) => manager.onCallAnswer(from, sdp),
@@ -339,21 +371,35 @@ async function main(): Promise<void> {
     world.manager.update(now, ts);
     followCamera(world, x, y);
 
-    // The bubble: a one-tile circle at the centroid of the call's
+    // The call area: every live zone call highlights its rectangle; the
+    // proximity bubble is a one-tile circle at the centroid of our call's
     // participants (server computes membership from the same geometry).
-    if (inCall.size > 0) {
+    const inCall = inCallAll();
+    const rects: Zone[] = [];
+    for (const [k, s] of calls) {
+      if (k === "" || s.size === 0) continue;
+      const zone = map.zones.find((z) => z.jitsiRoom === k || z.name === k);
+      if (zone) rects.push(zone);
+    }
+    const key = myCallKey();
+    const myRoster = key !== undefined ? calls.get(key)! : undefined;
+    if (inCall.size > 0 || rects.length > 0) {
+      // The circle shows only our own proximity bubble; zone members in
+      // other zones are already covered by their rects.
       const pts: Array<[number, number]> = [];
-      if (myId !== "" && inCall.has(myId)) pts.push([x, y]);
-      const tiles = world.manager.positions();
-      for (const id of inCall) {
-        if (id !== myId) {
-          const p = tiles.get(id);
-          if (p) pts.push(p);
+      if (myRoster && key === "") {
+        if (myId !== "" && myRoster.has(myId)) pts.push([x, y]);
+        const tiles = world.manager.positions();
+        for (const id of myRoster) {
+          if (id !== myId) {
+            const p = tiles.get(id);
+            if (p) pts.push(p);
+          }
         }
       }
-      drawBubble(world, pts);
+      drawBubble(world, rects, pts);
     } else {
-      drawBubble(world, []);
+      drawBubble(world, [], []);
     }
 
     if (now - lastSend >= (moving ? SEND_EVERY_MS : IDLE_EVERY_MS)) {

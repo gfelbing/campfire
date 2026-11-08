@@ -13,6 +13,8 @@ export interface PresenceUI {
   removeUser(id: string): void;
   /** Re-render the 🎧 badges after a call-state change. */
   setInCall(inCall: Set<string>): void;
+  /** Toggle the 🔇 do-not-disturb badge (silentZone occupancy). */
+  setDnd(id: string, on: boolean): void;
 }
 
 export function createPresence(container: HTMLElement): PresenceUI {
@@ -28,9 +30,26 @@ export function createPresence(container: HTMLElement): PresenceUI {
   // v1 roster); the call set only re-renders badges.
   const members = new Map<string, string>(); // id → name
   let inCall = new Set<string>();
+  const dnd = new Set<string>();
 
   function badge(id: string): boolean {
     return inCall.has(id);
+  }
+
+  function decorate(li: HTMLLIElement, id: string): void {
+    li.querySelector(".presence-call, .presence-dnd")?.remove();
+    if (badge(id)) {
+      const b = document.createElement("span");
+      b.className = "presence-call";
+      b.textContent = "🎧";
+      li.appendChild(b);
+    }
+    if (dnd.has(id)) {
+      const b = document.createElement("span");
+      b.className = "presence-dnd";
+      b.textContent = "🔇";
+      li.appendChild(b);
+    }
   }
 
   function row(id: string, name: string): HTMLLIElement {
@@ -40,12 +59,7 @@ export function createPresence(container: HTMLElement): PresenceUI {
     label.className = "presence-name";
     label.textContent = name;
     li.appendChild(label);
-    if (badge(id)) {
-      const b = document.createElement("span");
-      b.className = "presence-call";
-      b.textContent = "🎧";
-      li.appendChild(b);
-    }
+    decorate(li, id);
     return li;
   }
 
@@ -56,13 +70,7 @@ export function createPresence(container: HTMLElement): PresenceUI {
   function renderBadges(): void {
     for (const li of list.children) {
       const id = (li as HTMLElement).dataset.id!;
-      li.querySelector(".presence-call")?.remove();
-      if (badge(id)) {
-        const b = document.createElement("span");
-        b.className = "presence-call";
-        b.textContent = "🎧";
-        li.appendChild(b);
-      }
+      decorate(li as HTMLLIElement, id);
     }
   }
 
@@ -70,7 +78,13 @@ export function createPresence(container: HTMLElement): PresenceUI {
     setUsers: (users, call) => {
       inCall = new Set(call);
       members.clear();
-      for (const u of users) members.set(u.id, u.name);
+      for (const u of users) {
+        members.set(u.id, u.name);
+        // The snapshot carries silentZone occupancy; stale ids fall away
+        // with the roster.
+        if (u.sz) dnd.add(u.id);
+        else dnd.delete(u.id);
+      }
       renderAll();
     },
     addUser: (u) => {
@@ -86,6 +100,13 @@ export function createPresence(container: HTMLElement): PresenceUI {
     setInCall: (call) => {
       inCall = new Set(call);
       renderBadges();
+    },
+    setDnd: (id, on) => {
+      if (on ? dnd.has(id) : !dnd.has(id)) return;
+      if (on) dnd.add(id);
+      else dnd.delete(id);
+      const li = list.querySelector<HTMLElement>(`li[data-id="${CSS.escape(id)}"]`);
+      if (li) decorate(li as HTMLLIElement, id);
     },
   };
 }

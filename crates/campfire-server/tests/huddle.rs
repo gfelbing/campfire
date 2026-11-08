@@ -189,14 +189,14 @@ async fn assert_quiet(c: &mut TestClient, window: Duration, what: &str) {
 
 async fn as_call_leave(c: &mut TestClient) -> String {
     match c.recv().await {
-        ServerMsg::CallLeave { id } => id,
+        ServerMsg::CallLeave { id, .. } => id,
         m => panic!("expected call_leave, got {m:?}"),
     }
 }
 
 async fn as_call_end(c: &mut TestClient) -> String {
     match c.recv().await {
-        ServerMsg::CallEnd { reason } => reason,
+        ServerMsg::CallEnd { reason, .. } => reason,
         m => panic!("expected call_end, got {m:?}"),
     }
 }
@@ -394,7 +394,7 @@ async fn bubble_six_members_join_drop_and_walk_away() {
         ("g", &mut g),
     ] {
         match u.recv().await {
-            ServerMsg::CallLeave { id } => assert_eq!(id, b_id, "call_leave for {name}"),
+            ServerMsg::CallLeave { id, .. } => assert_eq!(id, b_id, "call_leave for {name}"),
             m => panic!("expected call_leave at {name}, got {m:?}"),
         }
     }

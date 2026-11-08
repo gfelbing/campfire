@@ -15,6 +15,8 @@ export class AvatarView {
   label: Text;
   /** 🎧 shown above the label while the user is in a call (README §6.3). */
   private inCallBadge: Text;
+  /** 🔇 shown above the label while the user stands in a silentZone. */
+  private dndBadge: Text;
   private baseX = 0;
   private baseY = 0;
   private bobbing = false;
@@ -42,7 +44,22 @@ export class AvatarView {
     this.inCallBadge.anchor.set(0.5, 1);
     this.inCallBadge.y = -30;
     this.inCallBadge.visible = false;
-    this.container.addChild(this.body, this.facing, this.label, this.inCallBadge);
+    this.dndBadge = new Text({
+      text: "🔇",
+      style: {
+        fontSize: 11,
+      },
+    });
+    this.dndBadge.anchor.set(0.5, 1);
+    this.dndBadge.y = -42;
+    this.dndBadge.visible = false;
+    this.container.addChild(
+      this.body,
+      this.facing,
+      this.label,
+      this.inCallBadge,
+      this.dndBadge,
+    );
     this.setName(name);
     this.setColor(color);
   }
@@ -54,6 +71,11 @@ export class AvatarView {
   /** Toggle the headphone badge (call state is room-wide, README §5). */
   setInCall(on: boolean): void {
     this.inCallBadge.visible = on;
+  }
+
+  /** Toggle the 🔇 do-not-disturb badge (silentZone occupancy). */
+  setDnd(on: boolean): void {
+    this.dndBadge.visible = on;
   }
 
   setColor(color: number): void {
@@ -198,6 +220,11 @@ export class AvatarManager {
   /** Toggle the headphone badge on one remote avatar (README §6.3). */
   setInCall(id: string, on: boolean): void {
     this.remotes.get(id)?.view.setInCall(on);
+  }
+
+  /** Toggle the 🔇 badge on one remote avatar (silentZone occupancy). */
+  setDnd(id: string, on: boolean): void {
+    this.remotes.get(id)?.view.setDnd(on);
   }
 
   /** Apply one movement batch; keep only entries with a newer sequence. */

@@ -236,7 +236,7 @@ async fn call_validation_and_state_errors() {
     // Bob leaves: the bubble ends for alice.
     b.send(&ClientMsg::CallLeave).await;
     match a.recv().await {
-        ServerMsg::CallEnd { reason } => assert_eq!(reason, "last_left"),
+        ServerMsg::CallEnd { reason, .. } => assert_eq!(reason, "last_left"),
         m => panic!("expected call_end, got {m:?}"),
     }
 }
@@ -262,6 +262,7 @@ async fn bubble_forms_and_relays_signaling() {
         room,
         participants,
         you_offer: a_offers,
+        .. 
     } = a.recv().await
     else {
         panic!("expected call_start for alice");
@@ -357,7 +358,7 @@ async fn bubble_forms_and_relays_signaling() {
     // Bob hangs up: with alice the only participant left, the bubble ends.
     b.send(&ClientMsg::CallLeave).await;
     match a.recv().await {
-        ServerMsg::CallEnd { reason } => assert_eq!(reason, "last_left"),
+        ServerMsg::CallEnd { reason, .. } => assert_eq!(reason, "last_left"),
         m => panic!("expected call_end (last_left), got {m:?}"),
     }
 }
