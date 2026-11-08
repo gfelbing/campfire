@@ -186,24 +186,27 @@ async fn map_or_asset(
             ));
         }
     }
-    // Otherwise the last segment is a file of the map's directory.
-    let Some((id, file)) = rest.rsplit_once('/') else {
-        return Err(StatusCode::NOT_FOUND);
-    };
-    let bytes = state
-        .world
-        .maps()
-        .asset(id, file)
-        .ok_or(StatusCode::NOT_FOUND)?;
-    let mime = match file.rsplit('.').next() {
-        Some("png") => "image/png",
-        Some("jpg" | "jpeg") => "image/jpeg",
-        Some("webp") => "image/webp",
-        Some("gif") => "image/gif",
-        Some("json") => "application/json",
-        _ => "application/octet-stream",
-    };
-    Ok(([(header::CONTENT_TYPE, mime)], Bytes::from(bytes)))
+    // Otherwise the remainder after the map id is a file of the map's
+    // directory: longest matching id first (ids may contain slashes).
+    let maps = state.world.maps();
+    for m in maps.all() {
+        let Some(file) = rest.strip_prefix(&m.id).and_then(|r| r.strip_prefix('/')) else {
+            continue;
+        };
+        let Some(bytes) = maps.asset(&m.id, file) else {
+            return Err(StatusCode::NOT_FOUND);
+        };
+        let mime = match file.rsplit('.').next() {
+            Some("png") => "image/png",
+            Some("jpg" | "jpeg") => "image/jpeg",
+            Some("webp") => "image/webp",
+            Some("gif") => "image/gif",
+            Some("json") => "application/json",
+            _ => "application/octet-stream",
+        };
+        return Ok(([(header::CONTENT_TYPE, mime)], Bytes::from(bytes)));
+    }
+    Err(StatusCode::NOT_FOUND)
 }
 
 /// `GET /api/v1/rooms` → the active rooms with member counts.

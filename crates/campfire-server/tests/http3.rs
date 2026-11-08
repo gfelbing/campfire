@@ -132,3 +132,15 @@ async fn api_maps_by_id_and_rooms() {
     let rooms: Vec<serde_json::Value> = serde_json::from_str(&body).unwrap();
     assert!(rooms.is_empty(), "rooms body: {body}");
 }
+
+#[tokio::test]
+async fn map_tileset_asset() {
+    campfire_server::api::mark_start();
+    let (addr, root) = start_server().await;
+    let (s1, _) = get(addr, &root, "/api/v1/maps/office/tiles.png").await;
+    assert_eq!(s1, 200);
+    let (s2, _) = get(addr, &root, "/api/v1/maps/interiors/conference").await;
+    assert_eq!(s2, 200);
+    let (s3, _) = get(addr, &root, "/api/v1/maps/interiors/conference/tilesets/WA_Room_Builder.png").await;
+    assert_eq!(s3, 200, "tileset asset");
+}
