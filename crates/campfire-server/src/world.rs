@@ -27,7 +27,7 @@ const ROOM_CAP: usize = 2048;
 pub const TICK: Duration = Duration::from_millis(50);
 /// How long a disconnected user keeps their identity (README §5 reconnect):
 /// position, call membership and the token all survive a drop for this long.
-pub const RECONNECT_WINDOW: Duration = Duration::from_secs(30);
+pub const RECONNECT_WINDOW: Duration = Duration::from_secs(10);
 /// Proximity call (README §6.3): a bubble has a one-tile radius around the
 /// centroid of its participants. Less than [`BUBBLE_RADIUS`] tiles from
 /// another player (or from the bubble's center) pulls you in; at the radius

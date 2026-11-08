@@ -52,6 +52,11 @@ const BACKOFF_MS = [1000, 2000, 4000, 8000, 16000, 30000];
 export class Connection {
   private transport: WTConn | SSEConn | null = null;
   private attempt = 0;
+  /** Generation counter: cancels a pending reconnect timer when the
+   *  connection is closed or the page enters the back/forward cache. */
+  private reconnectGen = 0;
+  /** Whether the bfcache `pagehide`/`pageshow` hooks are installed. */
+  private bfcacheHooked = false;
   private closing = false;
   private moveSeq = 0;
   /** Our own user id from the last hello ("" until joined). */
@@ -85,12 +90,36 @@ export class Connection {
   /** Connect, join, and keep reconnecting until close() is called. */
   start(): void {
     this.closing = false;
+    if (!this.bfcacheHooked) {
+      this.bfcacheHooked = true;
+      // Back/forward cache: when the page is hidden into the bfcache
+      // (address-bar navigation + Back), the browser kills the
+      // WebTransport and the page later restores frozen. Close cleanly on
+      // hide, and reconnect on the restore — the sessionStorage token
+      // re-joins with the same identity, so movement keeps flowing.
+      window.addEventListener("pagehide", () => {
+        this.reconnectGen += 1; // cancel any pending reconnect timer
+        this.closing = true;
+        this.transport?.close();
+        this.transport = null;
+      });
+      window.addEventListener("pageshow", (e) => {
+        if ((e as PageTransitionEvent).persisted) {
+          this.reconnectGen += 1;
+          this.attempt = 0;
+          this.handlers.onStatus("reconnecting");
+          void this.start();
+        }
+      });
+    }
     this.connectOnce();
   }
 
   close(): void {
+    this.reconnectGen += 1;
     this.closing = true;
     this.transport?.close();
+    this.transport = null;
   }
 
   sendChat(text: string): void {
@@ -164,11 +193,13 @@ export class Connection {
   onTransportDown(): void {
     if (this.closing) return;
     this.transport = null;
+    const gen = this.reconnectGen;
     const delay = BACKOFF_MS[Math.min(this.attempt, BACKOFF_MS.length - 1)];
     this.attempt += 1;
     this.handlers.onStatus("reconnecting");
     console.log(`reconnecting in ${delay} ms (attempt ${this.attempt})`);
     window.setTimeout(() => {
+      if (gen !== this.reconnectGen) return; // closed or bfcache-hid since
       this.resetMoveSeq();
       this.connectOnce();
     }, delay);
