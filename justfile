@@ -88,7 +88,7 @@ spki: certs
 # pasta network stack does not forward IPv6 UDP to the container (TCP only),
 # so QUIC to [::1] dies with ERR_QUIC_PROTOCOL_ERROR while 127.0.0.1 works.
 # The SPKI pin is hostname-independent, so 127.0.0.1 needs nothing extra.
-brave port="443" *args: spki
+brave port="8443" *args: spki
 	brave --origin-to-force-quic-on=127.0.0.1:{{port}} \
 	  --ignore-certificate-errors-spki-list="$(just spki)" \
 	  "https://127.0.0.1:{{port}}/" {{args}}
