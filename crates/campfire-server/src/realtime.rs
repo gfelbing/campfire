@@ -57,7 +57,7 @@ const CHAT_PER_SEC: usize = 1;
 /// A chat line longer than this is refused (README §14).
 pub(crate) const MAX_CHAT_CHARS: usize = 500;
 /// Room id: `1..=32` chars of `[a-z0-9_-]` (README §5).
-pub(crate) const MAX_ROOM_CHARS: usize = 32;
+pub(crate) const MAX_ROOM_CHARS: usize = 64;
 /// Name: trimmed, `1..=24` chars (README §14).
 pub(crate) const MAX_NAME_CHARS: usize = 24;
 /// Avatar color string cap.
@@ -467,8 +467,13 @@ fn dispatch(
 pub(crate) fn valid_room(room: &str) -> bool {
     (1..=MAX_ROOM_CHARS).contains(&room.len())
         && room
-            .chars()
-            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-')
+            .split('/')
+            .all(|seg| {
+                !seg.is_empty()
+                    && seg
+                        .chars()
+                        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-')
+            })
 }
 
 /// Send one `error` message; `false` means the client is gone.
@@ -504,8 +509,15 @@ mod tests {
         assert!(!valid_room("UPPER"));
         assert!(!valid_room("has space"));
         assert!(!valid_room("über"));
-        assert!(!valid_room(&"x".repeat(33)));
-        assert!(valid_room(&"x".repeat(32)));
+        assert!(!valid_room(&"x".repeat(65)));
+        assert!(valid_room(&"x".repeat(64)));
+        // Map ids are file paths under maps/: one slash-separated chain of
+        // directory/file segments (interiors/conference).
+        assert!(valid_room("interiors/conference"));
+        assert!(valid_room("interiors/office"));
+        assert!(!valid_room("interiors/example//conference"));
+        assert!(!valid_room("/office"));
+        assert!(!valid_room("office/"));
     }
 
     #[test]
