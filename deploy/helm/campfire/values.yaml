@@ -15,7 +15,7 @@ domain: campfire.heimdal.vild.zone
 # (--external, an IP:port — the server requires a literal IP).
 # Should be the public IP of the Traefik/LB entrypoint. Empty = omit the
 # flag (fine when clients can reach the pod network directly, e.g. tests).
-external: ""
+external: "192.168.178.200:443"
 
 namespace:
   # The chart creates and uses its own namespace by default. Set
@@ -66,4 +66,6 @@ resources:
     memory: 512Mi
 
 # Optional extra args passed to the campfire binary verbatim.
-extraArgs: []
+extraArgs: 
+- --turn-secret
+- supersecret

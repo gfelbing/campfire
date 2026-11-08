@@ -5,6 +5,7 @@
 # committed as the bootstrap for `include_dir!` (see the `client-build`
 # justfile task — CI and `just build` rebuild it before cargo runs).
 client/node_modules/
+client/dist/
 
 # Local env / secrets
 .env

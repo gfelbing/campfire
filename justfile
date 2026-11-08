@@ -42,7 +42,7 @@ build: client-build
 # npm download cache), so repeat builds only recompile what changed.
 # Extra args pass through: just docker -- -t campfire-test
 docker *args:
-	podman build -t campfire "$@" .
+	podman build -t registry.heimdal.vild.zone/campfire:latest "$@" .
 
 # Dev certs: a local CA plus a localhost server cert signed by it.
 #
