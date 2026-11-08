@@ -1,9 +1,11 @@
 //! Call theater (README roadmap "UI redesign"): while in a bubble, remote
 //! video streams stack in a column on the right side, over the map, with a
-//! local PiP tile and the mic/camera/share/hang-up bar. Clicking a stream
-//! focuses it large in the center overlay; clicking again (or Escape)
-//! unfocuses. Joining is automatic (proximity), so there are no ring or
-//! accept overlays — walking away is how you leave.
+//! local PiP tile and the mic/camera/share/hang-up bar on top. Every
+//! stream is its own tile — a participant can send camera AND screen at
+//! once, so a sharer appears twice. Clicking a stream focuses it large in
+//! the center overlay; clicking again (or Escape) unfocuses. Joining is
+//! automatic (proximity), so there are no ring or accept overlays —
+//! walking away is how you leave.
 
 import type { CallPhase, PeerView } from "./manager";
 import type { PeerState } from "./peer";
@@ -26,7 +28,8 @@ export interface CallUI {
 }
 
 interface Tile {
-  id: string;
+  /** Tile key: `<peerId>:cam` or `<peerId>:scr`. */
+  key: string;
   el: HTMLElement;
   video: HTMLVideoElement;
   nameEl: HTMLElement;
@@ -35,6 +38,8 @@ interface Tile {
   camEl: HTMLElement;
   screenEl: HTMLElement;
   stream: MediaStream | null;
+  /** Only camera tiles get a level meter (the screen stream has no audio). */
+  meter: boolean;
   source: MediaStreamAudioSourceNode | null;
   analyser: AnalyserNode | null;
   data: Uint8Array<ArrayBuffer> | null;
@@ -115,13 +120,13 @@ export function createCallUI(container: HTMLElement, actions: CallUiActions): Ca
     actions.onHangup();
   });
 
-  // --- tiles: one per remote participant, created/updated in place --------
+  // --- tiles: one per stream slot, created/updated in place ---------------
   // --- (rebuilding <video> elements would restart the streams).
   const tiles = new Map<string, Tile>();
   /** Shared AudioContext for the per-tile level meters (README §6.3). */
   let audioCtx: AudioContext | null = null;
   let levelTimer: number | null = null;
-  /** Id of the tile currently shown large in the center overlay. */
+  /** Key of the tile currently shown large in the center overlay. */
   let focused: string | null = null;
 
   function ensureCtx(): AudioContext | null {
@@ -141,11 +146,9 @@ export function createCallUI(container: HTMLElement, actions: CallUiActions): Ca
     t.analyser = null;
     t.data = null;
     t.video.classList.remove("speaking");
-    if (tiles.size === 0) {
-      if (levelTimer !== null) {
-        window.clearInterval(levelTimer);
-        levelTimer = null;
-      }
+    if (levelTimer !== null && ![...tiles.values()].some((x) => x.analyser)) {
+      window.clearInterval(levelTimer);
+      levelTimer = null;
       void audioCtx?.close().catch(() => {});
       audioCtx = null;
     }
@@ -168,7 +171,7 @@ export function createCallUI(container: HTMLElement, actions: CallUiActions): Ca
       // 10 Hz (README §6.3): one pass over all tiles per tick.
       levelTimer = window.setInterval(() => {
         for (const tile of tiles.values()) {
-          if (!tile.analyser || !tile.data) {
+          if (!tile.meter || !tile.analyser || !tile.data) {
             tile.video.classList.remove("speaking");
             continue;
           }
@@ -181,9 +184,9 @@ export function createCallUI(container: HTMLElement, actions: CallUiActions): Ca
     }
   }
 
-  function makeTile(p: PeerView): Tile {
+  function makeTile(key: string, name: string, screen: boolean): Tile {
     const el = document.createElement("div");
-    el.className = "theater-tile";
+    el.className = `theater-tile${screen ? " screen" : ""}`;
     el.innerHTML = `
       <video autoplay playsinline></video>
       <div class="theater-tile-info"><span class="tile-name"></span><span class="tile-state"></span></div>
@@ -192,7 +195,7 @@ export function createCallUI(container: HTMLElement, actions: CallUiActions): Ca
       <span class="call-badge tile-screen hidden">🖥</span>`;
     const video = el.querySelector<HTMLVideoElement>("video")!;
     const tile: Tile = {
-      id: p.id,
+      key,
       el,
       video,
       nameEl: el.querySelector<HTMLElement>(".tile-name")!,
@@ -201,41 +204,43 @@ export function createCallUI(container: HTMLElement, actions: CallUiActions): Ca
       camEl: el.querySelector<HTMLElement>(".tile-cam")!,
       screenEl: el.querySelector<HTMLElement>(".tile-screen")!,
       stream: null,
+      meter: !screen,
       source: null,
       analyser: null,
       data: null,
     };
+    tile.nameEl.textContent = screen ? `${name} · screen` : name;
+    tile.screenEl.classList.toggle("hidden", !screen);
     // Focus toggle: click a tile to show it large in the center; click the
     // focused one again (or Escape) to unfocus.
     el.addEventListener("click", () => {
-      if (focused === p.id) unfocus();
-      else focusTile(p.id);
+      if (focused === key) unfocus();
+      else focusTile(key);
     });
     // New tiles go above the local PiP tile (the local one stays last).
     tilesEl.insertBefore(el, localTile);
     return tile;
   }
 
-  function updateTile(t: Tile, p: PeerView): void {
-    t.nameEl.textContent = p.name;
-    t.stateEl.textContent = stateText(p.state, p.viaRelay);
-    t.muteEl.classList.toggle("hidden", p.audioOn);
-    t.camEl.classList.toggle("hidden", p.videoOn);
-    t.screenEl.classList.toggle("hidden", !p.screenOn);
-    if (p.stream !== t.stream) {
-      t.stream = p.stream;
-      t.video.srcObject = p.stream;
-      if (p.stream) startMeter(t, p.stream);
+  function updateTile(t: Tile, name: string, state: PeerState, viaRelay: boolean, stream: MediaStream | null, audioOn: boolean, videoOn: boolean): void {
+    t.nameEl.textContent = t.key.endsWith(":scr") ? `${name} · screen` : name;
+    t.stateEl.textContent = stateText(state, viaRelay);
+    t.muteEl.classList.toggle("hidden", audioOn);
+    t.camEl.classList.toggle("hidden", videoOn);
+    if (stream !== t.stream) {
+      t.stream = stream;
+      t.video.srcObject = stream;
+      if (stream && t.meter) startMeter(t, stream);
       else stopMeter(t);
     }
   }
 
   // --- focus overlay --------------------------------------------------------
 
-  function focusTile(id: string): void {
-    const t = tiles.get(id);
+  function focusTile(key: string): void {
+    const t = tiles.get(key);
     if (!t) return;
-    focused = id;
+    focused = key;
     focusSlot.appendChild(t.video); // the same element: the stream keeps playing
     focus.classList.remove("hidden");
   }
@@ -273,20 +278,56 @@ export function createCallUI(container: HTMLElement, actions: CallUiActions): Ca
       pip.srcObject = stream;
     },
     setPeers(peers) {
-      const seen = new Set<string>();
-      for (const p of peers) {
-        seen.add(p.id);
-        let t = tiles.get(p.id);
-        if (!t) {
-          t = makeTile(p);
-          tiles.set(p.id, t);
-        }
-        updateTile(t, p);
+      // One view per stream slot: camera always, screen when present.
+      interface View {
+        key: string;
+        name: string;
+        screen: boolean;
+        stream: MediaStream | null;
+        state: PeerState;
+        viaRelay: boolean;
+        audioOn: boolean;
+        videoOn: boolean;
       }
-      for (const [id, t] of tiles) {
-        if (!seen.has(id)) {
-          if (focused === id) unfocus();
-          tiles.delete(id);
+      const views: View[] = [];
+      for (const p of peers) {
+        views.push({
+          key: `${p.id}:cam`,
+          name: p.name,
+          screen: false,
+          stream: p.camera,
+          state: p.state,
+          viaRelay: p.viaRelay,
+          audioOn: p.audioOn,
+          videoOn: p.videoOn,
+        });
+        if (p.screen) {
+          views.push({
+            key: `${p.id}:scr`,
+            name: p.name,
+            screen: true,
+            stream: p.screen,
+            state: p.state,
+            viaRelay: p.viaRelay,
+            audioOn: true,
+            videoOn: true,
+          });
+        }
+      }
+      const seen = new Set<string>();
+      for (const v of views) {
+        seen.add(v.key);
+        let t = tiles.get(v.key);
+        if (!t) {
+          t = makeTile(v.key, v.name, v.screen);
+          tiles.set(v.key, t);
+        }
+        updateTile(t, v.name, v.state, v.viaRelay, v.stream, v.audioOn, v.videoOn);
+      }
+      for (const [key, t] of tiles) {
+        if (!seen.has(key)) {
+          if (focused === key) unfocus();
+          tiles.delete(key);
           stopMeter(t);
           t.el.remove();
         }

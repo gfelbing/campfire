@@ -210,6 +210,7 @@ Treat maps as applications, not just floor plans:
   - `silentZone` areas (drawn as ordinary layers with zone properties) mute proximity audio inside their bounds — position-based, computed in the same tick as bubbles.
 - **Zoom**: scroll-wheel zoom of the map canvas (clamped, centered on the cursor), the camera keeping the local avatar centered unless panned.
 - **Click-to-walk**: clicking a point on the map sends the avatar there along the **shortest walkable path** (BFS/A* over the collision grid on the client; the server's speed/walkability gates already accept the resulting step stream).
+- Currently, there are small gaps rendered between the tiles, these should be cleanly aligned w/o gaps.
 
 ### 3. Custom avatars
 

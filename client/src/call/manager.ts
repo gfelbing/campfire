@@ -32,7 +32,10 @@ export type CallPhase =
 export interface PeerView {
   id: string;
   name: string;
-  stream: MediaStream | null;
+  /** Remote media per slot (README roadmap "UI redesign": a participant
+   *  can send camera AND screen at the same time). */
+  camera: MediaStream | null;
+  screen: MediaStream | null;
   state: PeerState;
   viaRelay: boolean;
   /** Presence from `call_mute` (default on). */
@@ -80,8 +83,8 @@ export class CallManager {
   private selfId = "";
   /** One peer per remote participant of *our* call (empty when idle). */
   private peers = new Map<string, RtcPeer>();
-  /** Remote media per participant. */
-  private streams = new Map<string, MediaStream | null>();
+  /** Remote media per participant (camera slot + screen slot). */
+  private streams = new Map<string, { camera: MediaStream | null; screen: MediaStream | null }>();
   /** Per-participant `call_mute`/`call_screen` presence. */
   private presence = new Map<string, { audio: boolean; video: boolean; screen: boolean }>();
   /** Our screen share (when `screenOn`). */
@@ -145,10 +148,11 @@ export class CallManager {
     this.hooks.onLocalMute(this.audioOn, this.videoOn);
   }
 
-  /** Screen share (README roadmap "UI redesign"): the camera video track
-   *  is replaced by the screen in every peer sender (`replaceTrack` — no
-   *  renegotiation); toggling off swaps the camera track back. The 🖥 badge
-   *  on the other side comes from `call_screen` presence. */
+  /** Screen share (README roadmap "UI redesign"): the screen rides as a
+   *  second video track in every peer — the camera keeps flowing, so
+   *  others see BOTH streams. Adding/removing tracks renegotiates (the
+   *  sharer offers again, the others answer); the 🖥 badge on the other
+   *  side comes from `call_screen` presence. */
   toggleScreen(): void {
     if (this.phase.p !== "in-call") return;
     if (this.screenOn) {
@@ -173,16 +177,7 @@ export class CallManager {
       track.addEventListener("ended", () => {
         if (this.screenOn) this.stopScreenShare();
       });
-      let ok = false;
-      for (const p of this.peers.values()) {
-        if (p.replaceVideoTrack(track)) ok = true;
-      }
-      if (!ok) {
-        stream.getTracks().forEach((t) => t.stop());
-        this.screenStream = null;
-        this.hooks.onLog("screen share: no video track in the call (camera off?)");
-        return;
-      }
+      for (const p of this.peers.values()) p.addScreenTrack(track, stream);
       this.screenOn = true;
       this.send.sendCallScreen(true);
       this.hooks.onLocalScreen(true);
@@ -190,12 +185,11 @@ export class CallManager {
     })();
   }
 
-  /** Swap the camera track back and release the screen capture. */
+  /** Drop the screen track everywhere and release the capture. */
   private stopScreenShare(): void {
     if (!this.screenOn) return;
     this.screenOn = false;
-    const camera = this.localStream?.getVideoTracks()[0] ?? null;
-    for (const p of this.peers.values()) p.replaceVideoTrack(camera);
+    for (const p of this.peers.values()) p.removeScreenTrack();
     this.screenStream?.getTracks().forEach((t) => t.stop());
     this.screenStream = null;
     this.send.sendCallScreen(false);
@@ -412,9 +406,19 @@ export class CallManager {
       // Deterministic politeness: the lexicographically smaller id rolls
       // back on a rejoin glare, the larger keeps its own offer.
       new RtcPeer(stream, servers, {
-        onRemoteStream: (s) => {
-          this.streams.set(user.id, s);
+        onRemoteTrack: (s, kind, videoIndex) => {
+          const cur =
+            this.streams.get(user.id) ?? { camera: null, screen: null };
+          if (kind === "audio" || videoIndex === 0) cur.camera = s;
+          else cur.screen = s;
+          this.streams.set(user.id, cur);
           this.pushPeers();
+        },
+        onNegotiationNeeded: () => {
+          // A screen track was added/removed after the initial round: we
+          // offer again (the other side answers — no glare, only the
+          // sharer renegotiates).
+          void this.offerTo(user);
         },
         onIceCandidate: (c) => this.send.sendCallIce(user.id, c),
         onStateChange: (state, viaRelay) => {
@@ -424,6 +428,11 @@ export class CallManager {
         onIceError: (detail) => this.hooks.onLog(`ICE error (${user.name}): ${detail}`),
       }, user.id < this.selfId),
     );
+    // Sharing already? Then the new peer gets the screen track too.
+    if (this.screenStream) {
+      const t = this.screenStream.getVideoTracks()[0];
+      if (t) this.peers.get(user.id)!.addScreenTrack(t, this.screenStream);
+    }
   }
 
   /** Offer side: create the offer and send it to `user`. */
@@ -463,7 +472,8 @@ export class CallManager {
         return {
           id: u.id,
           name: u.name,
-          stream: this.streams.get(u.id) ?? null,
+          camera: this.streams.get(u.id)?.camera ?? null,
+          screen: this.streams.get(u.id)?.screen ?? null,
           state: st.state,
           viaRelay: st.viaRelay,
           audioOn: pres.audio,

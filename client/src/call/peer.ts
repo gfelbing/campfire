@@ -15,8 +15,12 @@ export type PeerState =
   | "closed";
 
 export interface PeerHooks {
-  /** The remote MediaStream (video + audio), or null when gone. */
-  onRemoteStream?: (stream: MediaStream | null) => void;
+  /** A remote track arrived: `videoIndex` counts video tracks per peer
+   *  (0 = camera, 1 = screen share); audio is reported as index 0. */
+  onRemoteTrack?: (stream: MediaStream, kind: string, videoIndex: number) => void;
+  /** The connection needs renegotiation (a screen track was added or
+   *  removed after the initial offer/answer round). */
+  onNegotiationNeeded?: () => void;
   /** One local ICE candidate, JSON-encoded for the `call_ice` wire field. */
   onIceCandidate?: (candidate: string) => void;
   /** Connection state flipped (drives the "connecting / connected" label). */
@@ -63,7 +67,23 @@ export class RtcPeer {
       );
       hooks.onIceError?.(e.errorText ?? `error code ${e.errorCode}`);
     };
-    this.pc.ontrack = (e) => hooks.onRemoteStream?.(e.streams[0] ?? null);
+    this.pc.ontrack = (e) => {
+      const stream = e.streams[0];
+      if (!stream) return;
+      let videoIndex = 0;
+      if (e.track.kind === "video") {
+        // Video tracks in transceiver-creation order: 0 = camera,
+        // 1 = screen share (both sides create them in that order).
+        videoIndex = Math.max(
+          0,
+          this.pc
+            .getTransceivers()
+            .filter((t) => (t.receiver.track?.kind ?? t.sender.track?.kind) === "video")
+            .indexOf(e.transceiver),
+        );
+      }
+      hooks.onRemoteTrack?.(stream, e.track.kind, videoIndex);
+    };
     this.pc.onconnectionstatechange = () => {
       const state = this.pc.connectionState as PeerState;
       void this.reportState(state);
@@ -142,22 +162,29 @@ export class RtcPeer {
     }
   }
 
-  /** Screen share (README roadmap "UI redesign"): swap the outgoing video
-   *  sender track to `track` (or back to the camera with null→camera logic
-   *  in the manager) without renegotiation. Returns false when no video
-   *  sender exists (voice-only / camera never added). */
-  replaceVideoTrack(track: MediaStreamTrack | null): boolean {
-    const sender = this.pc.getSenders().find((s) => s.track?.kind === "video");
-    if (!sender) return false;
-    void sender.replaceTrack(track).catch((err) =>
-      console.warn("replaceTrack failed:", err),
-    );
-    return true;
+  /** Screen share (README roadmap "UI redesign"): the screen rides as a
+   *  SECOND video track next to the camera (both streams stay up). Adding
+   *  a track renegotiates — `onNegotiationNeeded` drives a fresh offer. */
+  addScreenTrack(track: MediaStreamTrack, stream: MediaStream): void {
+    this.pc.addTrack(track, stream);
+    this.negotiateOnChange();
   }
 
-  /** The camera track we were created with (the screen-share swap-back). */
-  cameraTrack(): MediaStreamTrack | null {
-    return this.localStream.getVideoTracks()[0] ?? null;
+  /** Stop sending the screen (the camera keeps flowing). */
+  removeScreenTrack(): void {
+    const sender = this.pc.getSenders().find(
+      (s) => s.track?.kind === "video" && !this.localStream.getVideoTracks().includes(s.track),
+    );
+    if (!sender) return;
+    this.pc.removeTrack(sender);
+    this.negotiateOnChange();
+  }
+
+  /** Renegotiate only for post-initial changes: the initial tracks are
+   *  covered by the explicit offer/answer round, and an answerer that
+   *  auto-offered would glare with every joiner. */
+  private negotiateOnChange(): void {
+    this.pc.onnegotiationneeded = () => this.hooks.onNegotiationNeeded?.();
   }
 
   /** Mute / camera off: flip `track.enabled` — presence only, the server
