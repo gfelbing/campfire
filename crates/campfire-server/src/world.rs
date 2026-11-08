@@ -224,6 +224,11 @@ impl World {
             member.dtx = dtx;
             member.gone_at = None;
             member.reentered_at = Some(Instant::now());
+            // The rejoining session starts its movement sequence from 0
+            // again; keep the old counter and every batch would be rejected
+            // as stale.
+            member.seq = 0;
+            member.dirty = true;
             let joined = Joined {
                 you: id,
                 token: member.token.clone(),
@@ -1647,6 +1652,38 @@ mod tests {
             b.rx.try_recv().is_err(),
             "no joined broadcast for a restore"
         );
+    }
+
+    #[test]
+    fn reconnect_resets_the_movement_sequence() {
+        let world = World::new(test_maps());
+        let (mut a, a_token, a_session) = join_token(&world, "office", "alice", None);
+        let (dtx_b, mut dgr_b) = datagram_channel();
+        let session_b = world.next_session_id();
+        let joined_b = world
+            .join("office", "bob", None, None, session_b, channel().0, dtx_b)
+            .unwrap();
+        let b_id = joined_b.you;
+        a.rx.try_recv().unwrap();
+
+        // Alice moves with a few batches, then drops.
+        for seq in 1..=5u64 {
+            world.apply_movement("office", &a.id, &[entry(&a.id, 20.5, 15.5, seq)]);
+        }
+        world.discard("office", &a.id, a_session);
+
+        // The restored session starts from sequence 0 again (a fresh page
+        // does): the server must not reject the batches as stale.
+        let (_a2, _, _) = join_token(&world, "office", "alice", Some(&a_token));
+        std::thread::sleep(Duration::from_millis(150)); // speed-gate headroom
+        world.apply_movement("office", &a.id, &[entry(&a.id, 21.0, 15.5, 1)]);
+        world.tick();
+        let line = String::from_utf8(dgr_b.try_recv().unwrap()).unwrap();
+        assert!(
+            line.contains(&format!("\"id\":\"{b_id}\"")) || line.contains(&a.id),
+            "bob's batch: {line}"
+        );
+        assert!(line.contains("21"), "alice's post-reconnect move is in the batch: {line}");
     }
 
     #[test]

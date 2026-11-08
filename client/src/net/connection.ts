@@ -109,6 +109,7 @@ export class Connection {
         if ((e as PageTransitionEvent).persisted) {
           this.reconnectGen += 1;
           this.attempt = 0;
+          this.resetMoveSeq();
           this.handlers.onStatus("reconnecting");
           void this.start();
         }
