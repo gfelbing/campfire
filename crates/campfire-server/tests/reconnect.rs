@@ -252,6 +252,7 @@ async fn reconnect_within_window_keeps_identity_no_flicker() {
             d: Dir::East,
             moving: 1,
             seq: 1,
+            silent: false,
         }],
     };
     a._conn

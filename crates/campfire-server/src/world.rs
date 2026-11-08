@@ -127,6 +127,36 @@ pub(crate) fn test_maps() -> campfire_maps::Maps {
     )))
 }
 
+/// A map with zones for the zone tests (README roadmap "Map enhancements"):
+/// a `jitsiRoom` meeting zone at tiles 2..5, 2..5, a `silentZone` at
+/// tiles 0..2, 0..2, and a `start` area at tiles 1..3, 1..3. The whole
+/// 8x8 grid is walkable.
+pub(crate) fn zone_maps() -> campfire_maps::Maps {
+    let raw = serde_json::json!({
+        "type": "map",
+        "name": "zonetest",
+        "width": 8,
+        "height": 8,
+        "tilewidth": 32,
+        "layers": [
+            {"type": "tilelayer", "name": "collision", "width": 8, "height": 8,
+             "data": vec![0; 64]},
+            {"type": "objectgroup", "name": "zones", "objects": [
+                {"name": "meeting", "x": 64, "y": 64, "width": 96, "height": 96,
+                 "properties": [{"name": "jitsiRoom", "type": "string",
+                                 "value": "team-meeting"}]},
+                {"name": "quiet", "x": 0, "y": 0, "width": 64, "height": 64,
+                 "properties": [{"name": "silentZone", "type": "bool", "value": true}]},
+                {"name": "start", "x": 32, "y": 32, "width": 64, "height": 64}
+            ]}
+        ]
+    });
+    let dir = std::env::temp_dir().join("campfire-zone-maps-test");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("zonetest.json"), serde_json::to_vec(&raw).unwrap()).unwrap();
+    campfire_maps::Maps::load(&dir)
+}
+
 impl World {
     /// A world over the loaded maps (each registered as a room).
     pub fn new(maps: campfire_maps::Maps) -> Self {
@@ -418,7 +448,8 @@ impl World {
             remove_from_room(&mut rooms, room, id);
         }
         for (room, room_entry) in rooms.iter_mut() {
-            update_bubbles(room, room_entry, Instant::now());
+            let map = self.maps.get(room);
+            update_bubbles(room, room_entry, Instant::now(), map);
             if !room_entry.users.values().any(|m| m.dirty) {
                 continue;
             }
@@ -433,6 +464,11 @@ impl World {
                     d: m.dir,
                     moving: m.moving,
                     seq: m.seq,
+                    silent: map.is_some_and(|map| {
+                        map.zones
+                            .iter()
+                            .any(|z| z.silent && z.contains(m.pos.0, m.pos.1))
+                    }),
                 })
                 .collect();
             for chunk in encode_batches(&entries) {
@@ -758,27 +794,45 @@ fn leave_call(entry: &mut Room, id: &str) {
 /// pulled in; at the radius or beyond — or toggled off — you drop out
 /// immediately. At most one join per tick keeps the offerer designation
 /// deterministic and the signaling trickle-paced.
-fn update_bubbles(room: &str, entry: &mut Room, now: Instant) {
+fn update_bubbles(
+    room: &str,
+    entry: &mut Room,
+    now: Instant,
+    map: Option<&campfire_maps::MapData>,
+) {
+    // jitsi zones (README roadmap "Map enhancements"): a zone call takes
+    // precedence over the proximity bubble — one call per room, so a zone
+    // call forms only when no proximity bubble is live, and the zone call
+    // is bounded by the zone rectangle instead of the bubble radius.
+    let jitsi_zone = map.and_then(|map| {
+        map.zones.iter().find(|z| {
+            z.jitsi_room.is_some()
+                && entry
+                    .users
+                    .values()
+                    .any(|m| !m.bubble_off && m.gone_at.is_none() && z.contains(m.pos.0, m.pos.1))
+        })
+    });
+
+    // Whether a point is inside the active call's area: a zone call is
+    // bounded by its zone rectangle (a zone call whose zone has emptied
+    // out lets everyone drop, ending the call); a proximity bubble is the
+    // one-tile radius around the centroid of connected participants.
+    let inside = |entry: &Room, call: &call::Call, x: f32, y: f32| -> bool {
+        match (&call.zone, jitsi_zone) {
+            (Some(name), Some(z)) if z.jitsi_room.as_deref() == Some(name.as_str()) => {
+                z.contains(x, y)
+            }
+            (Some(_), _) => false,
+            (None, _) => dist(center_of_call(entry, call), (x, y)) < BUBBLE_RADIUS,
+        }
+    };
+
     // Leaves first: gone members keep their seat (reconnect grace), opted
-    // out members and participants at or beyond the bubble radius drop out
-    // immediately.
+    // out members and participants at or beyond the bubble radius (or
+    // outside a jitsi zone) drop out immediately.
     let mut dropped: Vec<String> = Vec::new();
     if let Some(call) = entry.call.as_ref() {
-        // The bubble's center: the centroid of the *connected* participants
-        // (a gone member's stale position must not push live ones out).
-        let mut center = (0.0f32, 0.0f32);
-        let mut n = 0usize;
-        for (uid, m) in &entry.users {
-            if call.contains(uid) && m.gone_at.is_none() {
-                center.0 += m.pos.0;
-                center.1 += m.pos.1;
-                n += 1;
-            }
-        }
-        if n > 0 {
-            center.0 /= n as f32;
-            center.1 /= n as f32;
-        }
         for id in call.participants.keys() {
             let Some(m) = entry.users.get(id) else {
                 continue; // gone: stays in the bubble (reconnect grace)
@@ -795,7 +849,7 @@ fn update_bubbles(room: &str, entry: &mut Room, now: Instant) {
             {
                 continue; // just re-entered: the radius check comes later
             }
-            if dist(center, m.pos) >= BUBBLE_RADIUS {
+            if !inside(entry, call, m.pos.0, m.pos.1) {
                 dropped.push(id.clone());
             }
         }
@@ -808,6 +862,35 @@ fn update_bubbles(room: &str, entry: &mut Room, now: Instant) {
     // radius of each other (id-sorted so the pair — and thus the designated
     // offerer — is deterministic).
     if entry.call.is_none() {
+        // Zone call: a jitsi zone with 2+ occupants inside it.
+        if let Some(zone) = jitsi_zone {
+            let inside: Vec<(String, (f32, f32))> = entry
+                .users
+                .iter()
+                .filter(|(_, m)| {
+                    !m.bubble_off && m.gone_at.is_none() && zone.contains(m.pos.0, m.pos.1)
+                })
+                .map(|(uid, m)| (uid.clone(), m.pos))
+                .collect();
+            if inside.len() >= 2 {
+                let mut inside = inside;
+                inside.sort_by(|a, b| a.0.cmp(&b.0));
+                let call = call::Call {
+                    zone: Some(zone.jitsi_room.clone().unwrap_or_else(|| zone.name.clone())),
+                    ..call::Call::new(
+                        entry
+                            .users
+                            .iter()
+                            .filter(|(uid, _)| inside.iter().any(|(i, _)| i == *uid))
+                            .map(|(uid, m)| (uid.clone(), m.name.clone())),
+                    )
+                };
+                let offerer = inside[0].0.clone();
+                entry.call = Some(call);
+                broadcast_call_start(room, entry, Some(&offerer));
+                return;
+            }
+        }
         let mut candidates: Vec<(String, (f32, f32))> = entry
             .users
             .iter()
@@ -820,13 +903,16 @@ fn update_bubbles(room: &str, entry: &mut Room, now: Instant) {
                 if dist(candidates[i].1, candidates[j].1) < BUBBLE_RADIUS {
                     let a = candidates[i].clone();
                     let b = candidates[j].clone();
-                    let call = call::Call::new(
-                        entry
-                            .users
-                            .iter()
-                            .filter(|(uid, _)| uid.as_str() == a.0 || uid.as_str() == b.0)
-                            .map(|(uid, m)| (uid.clone(), m.name.clone())),
-                    );
+                    let call = call::Call {
+                        zone: None,
+                        ..call::Call::new(
+                            entry
+                                .users
+                                .iter()
+                                .filter(|(uid, _)| uid.as_str() == a.0 || uid.as_str() == b.0)
+                                .map(|(uid, m)| (uid.clone(), m.name.clone())),
+                        )
+                    };
                     let offerer = [a.0.clone(), b.0.clone()].into_iter().min().unwrap();
                     entry.call = Some(call);
                     broadcast_call_start(room, entry, Some(&offerer));
@@ -838,33 +924,22 @@ fn update_bubbles(room: &str, entry: &mut Room, now: Instant) {
     }
 
     // Joins: at most one per tick — the nearest eligible user within the
-    // bubble radius of the bubble's center. The joiner is the offerer
-    // (README §6.3: the joiner offers every existing member; nobody
-    // renegotiates).
+    // bubble radius of the bubble's center (or inside the jitsi zone for a
+    // zone call). The joiner is the offerer (README §6.3: the joiner offers
+    // every existing member; nobody renegotiates).
     let Some(call) = entry.call.as_ref() else {
         return;
     };
-    let mut center = (0.0f32, 0.0f32);
-    let mut n = 0usize;
-    for (uid, m) in &entry.users {
-        if call.contains(uid) {
-            center.0 += m.pos.0;
-            center.1 += m.pos.1;
-            n += 1;
-        }
-    }
-    if n == 0 {
-        return;
-    }
-    center.0 /= n as f32;
-    center.1 /= n as f32;
     let mut best: Option<(f32, String)> = None;
     for (uid, m) in &entry.users {
         if m.bubble_off || m.gone_at.is_some() || call.contains(uid) {
             continue;
         }
-        let d = dist(center, m.pos);
-        if d < BUBBLE_RADIUS && best.as_ref().is_none_or(|(bd, _)| d < *bd) {
+        if !inside(entry, call, m.pos.0, m.pos.1) {
+            continue;
+        }
+        let d = dist(center_of_call(entry, call), m.pos);
+        if best.as_ref().is_none_or(|(bd, _)| d < *bd) {
             best = Some((d, uid.clone()));
         }
     }
@@ -884,6 +959,24 @@ fn update_bubbles(room: &str, entry: &mut Room, now: Instant) {
         );
         broadcast_call_start(room, entry, Some(&joiner));
     }
+}
+
+/// The centroid of the call's connected participants.
+fn center_of_call(entry: &Room, call: &call::Call) -> (f32, f32) {
+    let mut center = (0.0f32, 0.0f32);
+    let mut n = 0usize;
+    for (uid, m) in &entry.users {
+        if call.contains(uid) {
+            center.0 += m.pos.0;
+            center.1 += m.pos.1;
+            n += 1;
+        }
+    }
+    if n > 0 {
+        center.0 /= n as f32;
+        center.1 /= n as f32;
+    }
+    center
 }
 
 /// Broadcast the bubble's roster to the whole room: `CallStart` powers the
@@ -1017,7 +1110,82 @@ mod tests {
             d: Dir::East,
             moving: 1,
             seq,
+            silent: false,
         }
+    }
+
+    /// Decode movement batches on `drx` until the entry for `id` arrives;
+    /// return its silent flag — the `sz` flag rides the movement batch (README
+    /// roadmap "Map enhancements").
+    fn first_movement(
+        drx: &mut tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>,
+        id: &str,
+    ) -> bool {
+        use campfire_protocol::from_line;
+        loop {
+            let batch: MovementBatch =
+                from_line(std::str::from_utf8(&drx.try_recv().unwrap()).unwrap()).unwrap();
+            for e in &batch.m {
+                if e.id == id {
+                    return e.silent;
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn jitsi_zone_call_bounded_by_the_zone_rect() {
+        let world = World::new(zone_maps());
+        let mut a = join_user(&world, "zonetest", "alice");
+        let mut b = join_user(&world, "zonetest", "bob");
+        let mut c = join_user(&world, "zonetest", "carol");
+        // a and b inside the meeting zone (tiles 2..5, 2..5); c outside it.
+        place(&world, "zonetest", &a.id, 2.5, 2.5);
+        place(&world, "zonetest", &b.id, 3.5, 3.5);
+        place(&world, "zonetest", &c.id, 7.5, 7.5);
+        world.tick();
+        // The zone call forms (2+ occupants inside the zone rect).
+        for u in [&mut a, &mut b] {
+            let (p, _) = expect_start(u);
+            assert_eq!(p.len(), 2);
+        }
+        // c is outside the zone: not a participant, but the room-wide badge
+        // reaches him (CallStart with the 2 participants, no you_offer).
+        let (p, you_offer) = expect_start(&mut c);
+        assert_eq!(p.len(), 2);
+        assert!(!you_offer);
+        // c walks into the zone: joins the zone call on the next tick.
+        place(&world, "zonetest", &c.id, 3.5, 3.5);
+        world.tick();
+        // The roster re-broadcasts to everyone (badge): c joins, 3 participants.
+        for u in [&mut b, &mut c] {
+            let (p, _) = expect_start(u);
+            assert_eq!(p.len(), 3);
+        }
+        // a leaves the zone: dropped (the call keeps the other two).
+        place(&world, "zonetest", &a.id, 7.5, 7.5);
+        world.tick();
+        for u in [&mut b, &mut c] {
+            match u.rx.try_recv().unwrap() {
+                ServerMsg::CallLeave { id } => assert_eq!(id, a.id),
+                other => panic!("expected call_leave, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn silent_zone_flag_rides_the_movement_batch() {
+        let world = World::new(zone_maps());
+        let mut a = join_user(&world, "zonetest", "alice");
+        let mut b = join_user(&world, "zonetest", "bob");
+        // a in the silent zone (tiles 0..2, 0..2), b outside it.
+        place(&world, "zonetest", &a.id, 0.5, 0.5);
+        place(&world, "zonetest", &b.id, 6.5, 6.5);
+        world.tick();
+        let a_silent = first_movement(&mut a.drx, &a.id);
+        let b_silent = first_movement(&mut b.drx, &b.id);
+        assert!(a_silent, "a is in the silent zone");
+        assert!(!b_silent, "b is outside the silent zone");
     }
 
     #[test]
@@ -1105,6 +1273,14 @@ mod tests {
             .unwrap();
         let (spawn_x, spawn_y) = world.map("office").unwrap().spawn;
         assert_eq!((joined.users[0].x, joined.users[0].y), (spawn_x, spawn_y));
+    }
+
+    #[test]
+    fn start_area_selects_the_spawn_point() {
+        let world = World::new(zone_maps());
+        // The `start` area (tiles 1..3, 1..3): its center (2, 2) is the
+        // spawn point (README roadmap "Map enhancements").
+        assert_eq!(world.map("zonetest").unwrap().spawn, (2.0, 2.0));
     }
 
     #[tokio::test]
@@ -1367,21 +1543,26 @@ mod tests {
     struct TestUser {
         id: String,
         rx: tokio::sync::mpsc::UnboundedReceiver<ServerMsg>,
+        /// The member's datagram receiver (movement batches, `sz` flag).
+        drx: tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>,
     }
 
     fn join_user(world: &World, room: &str, name: &str) -> TestUser {
         let (tx, rx) = channel();
-        let (dtx, _dgr) = datagram_channel();
+        let (dtx, drx) = datagram_channel();
         let joined = world
             .join(room, name, None, None, world.next_session_id(), tx, dtx)
             .unwrap();
-        TestUser { id: joined.you, rx }
+        TestUser {
+            id: joined.you,
+            rx,
+            drx,
+        }
     }
 
     /// Teleport a user (unit tests share the module, so private fields are
     /// reachable): the speed gate would reject a far jump in one entry.
-    fn place(world: &World, room: &str, id: &str, x: f32, y: f32) {
-        let mut rooms = world.rooms.lock().unwrap();
+    fn place(world: &World, room: &str, id: &str, x: f32, y: f32) {        let mut rooms = world.rooms.lock().unwrap();
         let m = rooms.get_mut(room).unwrap().users.get_mut(id).unwrap();
         m.pos = (x, y);
         m.dirty = true;
@@ -1692,12 +1873,12 @@ mod tests {
         token: Option<&str>,
     ) -> (TestUser, String, u64) {
         let (tx, rx) = channel();
-        let (dtx, _dgr) = datagram_channel();
+        let (dtx, drx) = datagram_channel();
         let session = world.next_session_id();
         let joined = world
             .join(room, name, None, token, session, tx, dtx)
             .unwrap();
-        (TestUser { id: joined.you, rx }, joined.token, session)
+        (TestUser { id: joined.you, rx, drx }, joined.token, session)
     }
 
     #[test]

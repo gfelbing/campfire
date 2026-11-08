@@ -39,10 +39,39 @@ pub struct MapData {
     pub height: u32,
     /// Walkability grid, row-major: `walkable[y * width + x]`.
     walkable: Vec<bool>,
-    /// Spawn point in tile coordinates (tile center).
+    /// Spawn point in tile coordinates (tile center). A `start`-marked
+    /// object area (README roadmap "Map enhancements") wins over the map
+    /// center; otherwise the nearest walkable tile to the center.
     pub spawn: (f32, f32),
+    /// Rectangular zones from object layers (README roadmap "Map
+    /// enhancements"): `jitsiRoom` meeting areas, `silentZone` mutes.
+    pub zones: Vec<Zone>,
     /// Original file contents, served verbatim by `GET /api/v1/maps/{id}`.
     pub raw: Vec<u8>,
+}
+
+/// One named rectangular zone (object-layer object) in tile units:
+/// `rect = (x, y, width, height)` of the top-left tile corner.
+#[derive(Debug, Clone)]
+pub struct Zone {
+    /// The Tiled object's name (e.g. the jitsi room label).
+    pub name: String,
+    pub rect: (f32, f32, f32, f32),
+    /// `jitsiRoom` property: a meeting-room call covers this whole zone.
+    pub jitsi_room: Option<String>,
+    /// `silentZone` property (or a truthy `silent`): proximity audio is
+    /// muted inside.
+    pub silent: bool,
+    /// `exitUrl` property: walking onto this zone navigates elsewhere.
+    pub exit_url: Option<String>,
+}
+
+impl Zone {
+    /// Whether the tile point lies inside the zone.
+    pub fn contains(&self, x: f32, y: f32) -> bool {
+        let (zx, zy, zw, zh) = self.rect;
+        x >= zx && y >= zy && x < zx + zw && y < zy + zh
+    }
 }
 
 /// Tiled JSON subset actually read by the parser.
@@ -64,6 +93,68 @@ struct RawLayer {
     name: String,
     #[serde(default)]
     data: Option<Vec<u32>>,
+    #[serde(default)]
+    objects: Vec<RawObject>,
+    /// Group layers only (depth-first walk).
+    #[serde(default)]
+    layers: Vec<RawLayer>,
+}
+
+/// One object-layer object: a named rectangle in pixels with properties
+/// (README roadmap "Map enhancements": zones).
+#[derive(Deserialize)]
+struct RawObject {
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    x: f32,
+    #[serde(default)]
+    y: f32,
+    #[serde(default)]
+    width: f32,
+    #[serde(default)]
+    height: f32,
+    #[serde(default)]
+    properties: Vec<RawProp>,
+}
+
+#[derive(Deserialize)]
+struct RawProp {
+    name: String,
+    #[serde(default)]
+    value: serde_json::Value,
+}
+
+impl RawObject {
+    fn prop(&self, name: &str) -> Option<&serde_json::Value> {
+        self.properties.iter().find(|p| p.name == name).map(|p| &p.value)
+    }
+
+    fn prop_str(&self, name: &str) -> Option<String> {
+        self.prop(name).and_then(|v| v.as_str().map(str::to_owned))
+    }
+
+    fn prop_bool(&self, name: &str) -> bool {
+        self.prop(name).and_then(|v| v.as_bool()).unwrap_or(false)
+    }
+}
+
+impl RawMap {
+    /// All object layers, group layers flattened (depth-first).
+    fn object_layers(&self) -> Vec<&RawLayer> {
+        fn walk<'a>(layers: &'a [RawLayer], out: &mut Vec<&'a RawLayer>) {
+            for l in layers {
+                if l.kind == "group" {
+                    walk(&l.layers, out);
+                } else if l.kind == "objectgroup" {
+                    out.push(l);
+                }
+            }
+        }
+        let mut out = Vec::new();
+        walk(&self.layers, &mut out);
+        out
+    }
 }
 
 impl MapData {
@@ -87,6 +178,23 @@ impl MapData {
             None => vec![true; cells],
         };
         let spawn = spawn_point(raw.width, raw.height, &walkable)?;
+        let zones = zones(&raw, raw.width, raw.height);
+        // A `start`-marked object area selects the spawn point (README
+        // roadmap "Map enhancements"): the area's center, snapped to a
+        // walkable tile when the center itself is blocked.
+        let spawn = zones
+            .iter()
+            .find(|z| z.name == "start")
+            .map(|z| {
+                let (zx, zy, zw, zh) = z.rect;
+                let (cx, cy) = (zx + zw / 2.0, zy + zh / 2.0);
+                if walkable_at(raw.width, raw.height, &walkable, cx, cy) {
+                    (cx, cy)
+                } else {
+                    spawn_point(raw.width, raw.height, &walkable).expect("map has a spawn")
+                }
+            })
+            .unwrap_or(spawn);
         Ok(Self {
             id: id.to_owned(),
             name: raw.name.unwrap_or_else(|| id.to_owned()),
@@ -94,6 +202,7 @@ impl MapData {
             height: raw.height,
             walkable,
             spawn,
+            zones,
             raw: data.to_vec(),
         })
     }
@@ -115,10 +224,44 @@ impl MapData {
     }
 }
 
+/// Walkability of a float point (tile floor), for the start-area snap.
+fn walkable_at(width: u32, height: u32, walkable: &[bool], x: f32, y: f32) -> bool {
+    let (x, y) = (x as u32, y as u32);
+    (x < width && y < height)
+        && walkable[(y as usize) * width as usize + x as usize]
+}
+
+/// Rectangular zones from object layers (README roadmap "Map
+/// enhancements"): `jitsiRoom` meeting areas, `silentZone` mutes, `exitUrl`
+/// portals. Objects at pixel coordinates divide by the tile size (32 px)
+/// into tile units.
+fn zones(raw: &RawMap, _width: u32, _height: u32) -> Vec<Zone> {
+    const TILE: f32 = 32.0;
+    let mut out = Vec::new();
+    for layer in raw.object_layers() {
+        for o in &layer.objects {
+            let jitsi = o.prop_str("jitsiRoom");
+            let silent = o.prop_bool("silentZone") || o.prop_bool("silent");
+            let exit = o.prop_str("exitUrl");
+            let is_start = o.name == "start";
+            if jitsi.is_none() && !silent && exit.is_none() && !is_start {
+                continue;
+            }
+            out.push(Zone {
+                name: o.name.clone(),
+                rect: (o.x / TILE, o.y / TILE, o.width / TILE, o.height / TILE),
+                jitsi_room: jitsi,
+                silent,
+                exit_url: exit,
+            });
+        }
+    }
+    out
+}
+
 /// Center tile if walkable, otherwise the nearest walkable tile in an
 /// expanding ring around the center.
-fn spawn_point(width: u32, height: u32, walkable: &[bool]) -> Result<(f32, f32), MapError> {
-    let cx = width / 2;
+fn spawn_point(width: u32, height: u32, walkable: &[bool]) -> Result<(f32, f32), MapError> {    let cx = width / 2;
     let cy = height / 2;
     let at = |x: u32, y: u32| walkable[(y as usize) * width as usize + x as usize];
     if at(cx, cy) {
@@ -346,6 +489,44 @@ mod tests {
             MapData::parse("t", &tiled_json(&[1; 9])),
             Err(MapError::NoSpawn)
         ));
+    }
+
+    #[test]
+    fn parse_zones_and_start_area() {
+        let raw = serde_json::json!({
+            "type": "map",
+            "width": 8,
+            "height": 8,
+            "layers": [
+                {"type": "tilelayer", "name": "collision", "width": 8, "height": 8,
+                 "data": vec![0; 64]},
+                {"type": "objectgroup", "name": "zones", "objects": [
+                    {"name": "meeting", "x": 64, "y": 0, "width": 96, "height": 64,
+                     "properties": [{"name": "jitsiRoom", "type": "string",
+                                     "value": "team-meeting"}]},
+                    {"name": "quiet", "x": 0, "y": 128, "width": 64, "height": 64,
+                     "properties": [{"name": "silentZone", "type": "bool", "value": true}]},
+                    {"name": "start", "x": 32, "y": 32, "width": 64, "height": 64},
+                    {"name": "exit", "x": 0, "y": 0, "width": 32, "height": 32,
+                     "properties": [{"name": "exitUrl", "type": "string",
+                                     "value": "/play/office"}]}
+                ]}
+            ]
+        });
+        let m = MapData::parse("z", &serde_json::to_vec(&raw).unwrap()).unwrap();
+        // 4 zones found (the start area is a zone marker, not a call zone).
+        assert_eq!(m.zones.len(), 4);
+        let meeting = m.zones.iter().find(|z| z.jitsi_room.is_some()).unwrap();
+        assert_eq!(meeting.jitsi_room.as_deref(), Some("team-meeting"));
+        assert_eq!(meeting.rect, (2.0, 0.0, 3.0, 2.0));
+        assert!(m.zones.iter().find(|z| z.silent).is_some());
+        assert!(m.zones.iter().find(|z| z.exit_url.is_some()).is_some());
+        // The `start` area's center is the spawn point (rect (1,1,2,2) →
+        // center (2,2)).
+        assert_eq!(m.spawn, (2.0, 2.0));
+        // Zone containment: point-in-rect.
+        assert!(meeting.contains(2.5, 1.5));
+        assert!(!meeting.contains(1.0, 1.0));
     }
 
     #[test]

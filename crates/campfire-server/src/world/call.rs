@@ -33,6 +33,10 @@ pub struct ParticipantFlags {
 pub struct Call {
     /// Participants: id → (name, flags).
     pub participants: HashMap<UserId, (String, ParticipantFlags)>,
+    /// `jitsiRoom` zone call (README roadmap "Map enhancements"): the call
+    /// is bounded by the zone's rectangle instead of the one-tile bubble
+    /// radius. `None` = ordinary proximity bubble.
+    pub zone: Option<String>,
 }
 
 impl Call {

@@ -257,6 +257,11 @@ pub struct MovementEntry {
     /// Monotonic sequence number (`s`); the client keeps the newest entry.
     #[serde(rename = "s")]
     pub seq: u64,
+    /// `true` = the sender stands inside a `silentZone` (README roadmap
+    /// "Map enhancements"): remote audio from them is muted. Only sent
+    /// when true.
+    #[serde(rename = "sz", default, skip_serializing_if = "std::ops::Not::not")]
+    pub silent: bool,
 }
 
 /// Batch of movement deltas — one datagram per room per server tick.
@@ -344,6 +349,7 @@ mod tests {
                 d: Dir::East,
                 moving: 1,
                 seq: 4821,
+                silent: false,
             }],
         };
         let line = to_line(&msg);

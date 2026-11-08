@@ -43,6 +43,9 @@ export interface PeerView {
   videoOn: boolean;
   /** Presence from `call_screen`: the camera track carries a screen share. */
   screenOn: boolean;
+  /** `sz` (README roadmap "Map enhancements"): the sender stands inside a
+   *  `silentZone` — their audio is muted locally. */
+  silent: boolean;
 }
 
 /** What the manager tells the UI. */
@@ -91,6 +94,8 @@ export class CallManager {
   private screenStream: MediaStream | null = null;
   /** Per-participant connection state (quality UI). */
   private connState = new Map<string, { state: PeerState; viaRelay: boolean }>();
+  /** `sz` (README roadmap "Map enhancements"): peers inside a silentZone. */
+  private silent = new Set<string>();
   /** The call roster including ourselves (from `call_start`/`call_join`). */
   private roster: UserBrief[] = [];
   private localStream: MediaStream | null = null;
@@ -366,6 +371,14 @@ export class CallManager {
     }
   }
 
+  /** Movement datagram (README roadmap "Map enhancements"): `sz` flags —
+   *  a peer inside a `silentZone` is muted locally. */
+  setSilent(id: string, on: boolean): void {
+    if (id === this.selfId) return;
+    const changed = on ? this.silent.add(id) : this.silent.delete(id);
+    if (changed) this.pushPeers();
+  }
+
   // --- internals ------------------------------------------------------------
 
   /** Acquire local media + ICE servers; log and return null on refusal. */
@@ -479,6 +492,7 @@ export class CallManager {
           audioOn: pres.audio,
           videoOn: pres.video,
           screenOn: pres.screen,
+          silent: this.silent.has(u.id),
         };
       });
     this.hooks.onPeers(views);
@@ -497,6 +511,7 @@ export class CallManager {
     this.streams.clear();
     this.presence.clear();
     this.connState.clear();
+    this.silent.clear();
     this.roster = [];
     this.localStream?.getTracks().forEach((t) => t.stop());
     this.localStream = null;

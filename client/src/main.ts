@@ -3,7 +3,7 @@
 
 import { CallManager } from "./call/manager";
 import { createCallUI } from "./call/callui";
-import { attachKeys, desiredVelocity } from "./input/keys";
+import { attachKeys, desiredVelocity, keys } from "./input/keys";
 import { Connection } from "./net/connection";
 import type { ChatMsg, Dir, MovementBatch, UserBrief } from "./net/types";
 import { boot } from "./ui/boot";
@@ -11,7 +11,7 @@ import { createChat, type ChatUI } from "./ui/chat";
 import { createPresence, type PresenceUI } from "./ui/presence";
 import { createStatus } from "./ui/status";
 import { createSidebar } from "./ui/sidebar";
-import { isWalkablePoint, parseMap, type MapData } from "./world/mapdata";
+import { isWalkablePoint, parseMap, tileAt, zoneContains, type MapData, type Zone } from "./world/mapdata";
 import { createWorld, drawBubble, followCamera } from "./world/render";
 
 /// Local position sends: 10 Hz while moving, 2 Hz while idle (README §5).
@@ -30,6 +30,65 @@ function blocked(map: MapData, x: number, y: number): boolean {
   );
 }
 
+/** Exit `exitUrl` → map id: strip extension, collapse a repeated final
+ *  directory segment (the server's rule, `office/office.json` → `office`). */
+function exitUrlToMapId(exitUrl: string): string {
+  const path = exitUrl.split("#")[0]!;
+  const parts = path.split("/").filter((p) => p !== "");
+  const last = parts[parts.length - 1]!.replace(/\.\w+$/, "");
+  if (parts.length > 1 && parts[parts.length - 2] === last) parts.pop();
+  parts[parts.length - 1] = last;
+  return parts.join("/");
+}
+
+/** BFS path from (sx, sy) to (tx, ty) over the walkable grid (4-neighbour),
+ *  tile centers, or null when unreachable (README roadmap "Map enhancements":
+ *  click-to-walk). */
+function findPath(
+  map: MapData,
+  sx: number,
+  sy: number,
+  tx: number,
+  ty: number,
+): Array<[number, number]> | null {
+  const W = map.width;
+  const H = map.height;
+  const walkable = (x: number, y: number): boolean =>
+    tileAt(map, map.collision, x, y) === 0;
+  const start = Math.floor(sy) * W + Math.floor(sx);
+  const goal = Math.floor(ty) * W + Math.floor(tx);
+  if (!walkable(goal % W, Math.floor(goal / W))) return null;
+  if (start === goal) return [];
+  const prev = new Map<number, number>();
+  const seen = new Set<number>([start]);
+  const queue = [start];
+  while (queue.length) {
+    const cur = queue.shift()!;
+    if (cur === goal) break;
+    const cx = cur % W;
+    const cy = Math.floor(cur / W);
+    for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]] as const) {
+      const nx = cx + dx;
+      const ny = cy + dy;
+      if (nx < 0 || ny < 0 || nx >= W || ny >= H) continue;
+      if (!walkable(nx, ny)) continue;
+      const nk = ny * W + nx;
+      if (seen.has(nk)) continue;
+      seen.add(nk);
+      prev.set(nk, cur);
+      queue.push(nk);
+    }
+  }
+  if (!seen.has(goal)) return null;
+  const path: Array<[number, number]> = [];
+  let cur: number | undefined = goal;
+  while (cur !== undefined && cur !== start) {
+    path.push([cur % W + 0.5, Math.floor(cur / W) + 0.5]);
+    cur = prev.get(cur);
+  }
+  return path.reverse();
+}
+
 async function main(): Promise<void> {
   const opts = await boot();
   attachKeys();
@@ -38,15 +97,28 @@ async function main(): Promise<void> {
   if (!res.ok) throw new Error(`map fetch failed: ${res.status}`);
   const map = parseMap(opts.room, await res.json());
   const world = await createWorld(map, opts.name, opts.color);
+  // Click-to-walk (README roadmap "Map enhancements"): a click on the canvas
+  // pathfinds to the clicked tile (unreachable → ignored).
+  world.onClick.cb = (tx, ty) => {
+    const path = findPath(map, x, y, tx, ty);
+    if (path) walkPath = path;
+  };
 
   // Local state, owned by the game loop below.
-  let x = map.width / 2 + 0.5; // same formula as the server spawn
-  let y = map.height / 2 + 0.5;
+  let x = map.spawn[0];
+  let y = map.spawn[1];
   let dir: Dir = "s";
   let moving = false;
   let myId = "";
   let chat: ChatUI | null = null;
   let presence: PresenceUI;
+
+  // Click-to-walk (README roadmap "Map enhancements"): the path queue the
+  // game loop consumes; keyboard input clears it.
+  let walkPath: Array<[number, number]> = [];
+  // The exitUrl zone we are currently standing in (README roadmap "Map
+  // enhancements"): navigating again needs a fresh entry.
+  let exitArmed: Zone | null = null;
 
   // Room roster (id → brief).
   const roster = new Map<string, UserBrief>();
@@ -112,7 +184,14 @@ async function main(): Promise<void> {
       if (c.from !== myId) sidebar.chatActivity(true);
     },
     onTyping: (id, on) => chat?.typing(id, on),
-    onMovement: (batch: MovementBatch) => world.manager.movement(batch.m),
+    onMovement: (batch: MovementBatch) => {
+      world.manager.movement(batch.m);
+      // `sz` (README roadmap "Map enhancements"): a peer inside a silentZone
+      // is muted locally.
+      for (const e of batch.m) {
+        manager.setSilent(e.id, e.sz === true);
+      }
+    },
     // Bubble state (README §6.3): the manager owns the state machine;
     // the room-wide call *state* also drives the headphone badges.
     onCallStart: (ps, youOffer) => {
@@ -198,8 +277,9 @@ async function main(): Promise<void> {
     prev = now;
 
     const v = desiredVelocity(dt);
-    moving = v.moving;
-    if (moving) {
+    if (v.moving) {
+      walkPath = []; // keyboard input cancels click-to-walk
+      moving = true;
       // Face the dominant axis.
       dir =
         Math.abs(v.vx) >= Math.abs(v.vy)
@@ -214,7 +294,43 @@ async function main(): Promise<void> {
       const ny = y + v.vy;
       if (!blocked(map, nx, y)) x = nx;
       if (!blocked(map, x, ny)) y = ny;
+    } else if (walkPath.length > 0) {
+      // Click-to-walk (README roadmap "Map enhancements"): step toward the
+      // next waypoint at walk speed (run speed with Shift held).
+      const [tx, ty] = walkPath[0]!;
+      const dx = tx - x;
+      const dy = ty - y;
+      const d = Math.hypot(dx, dy);
+      if (d < 0.05) {
+        walkPath.shift();
+      } else {
+        const speed = keys.run ? 8 : 4;
+        const step = Math.min(speed * dt, d);
+        const nx = x + (dx / d) * step;
+        const ny = y + (dy / d) * step;
+        moving = true;
+        if (!blocked(map, nx, y)) x = nx;
+        if (!blocked(map, x, ny)) y = ny;
+        dir = Math.abs(dx) >= Math.abs(dy) ? (dx > 0 ? "e" : "w") : dy > 0 ? "s" : "n";
+      }
     }
+
+    // exitUrl zones (README roadmap "Map enhancements"): walking onto the
+    // tile navigates to the target map (the same name + color).
+    const cur = map.zones.find((z) => z.exitUrl !== undefined && zoneContains(z, x, y));
+    if (cur !== undefined && cur !== exitArmed) {
+      exitArmed = cur;
+      const target = exitUrlToMapId(cur.exitUrl!);
+      conn.sendLeave();
+      window.setTimeout(() => {
+        window.location.href =
+          `/play/${target.split("/").map(encodeURIComponent).join("/")}/` +
+          `?name=${encodeURIComponent(opts.name)}` +
+          `&color=${encodeURIComponent(opts.color)}`;
+      }, 50);
+      return;
+    }
+    if (cur === undefined) exitArmed = null;
 
     const ts = map.tileSize;
     world.local.setPos(x * ts, y * ts);

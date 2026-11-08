@@ -111,6 +111,7 @@ fn move_datagram(id: &str, x: f32, y: f32, seq: u64) -> Bytes {
             d: Dir::East,
             moving: 1,
             seq,
+            silent: false,
         }],
     };
     Bytes::from(serde_json::to_vec(&batch).unwrap())

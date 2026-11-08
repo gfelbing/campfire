@@ -19,6 +19,9 @@ export interface World {
   avatars: Container;
   local: AvatarView;
   manager: AvatarManager;
+  /** Click-to-walk callback (README roadmap "Map enhancements"): set to
+   *  receive the clicked tile coordinates; unset to ignore clicks. */
+  onClick: { cb: ((x: number, y: number) => void) | null };
 }
 
 export async function createWorld(
@@ -93,11 +96,55 @@ export async function createWorld(
   const bubble = new Graphics();
   world.addChild(bubble);
 
+  // Zone overlays (README roadmap "Map enhancements"): jitsi rooms in blue
+  // (meeting rooms), silent zones in gray (muted proximity audio).
+  const zones = new Graphics();
+  for (const z of map.zones) {
+    const [zx, zy, zw, zh] = z.rect;
+    if (z.jitsiRoom !== undefined) {
+      zones
+        .rect(zx * ts, zy * ts, zw * ts, zh * ts)
+        .fill({ color: 0x3f8fd8, alpha: 0.14 })
+        .stroke({ width: 2, color: 0x3f8fd8, alpha: 0.6 });
+    } else if (z.silent) {
+      zones
+        .rect(zx * ts, zy * ts, zw * ts, zh * ts)
+        .fill({ color: 0x777c88, alpha: 0.18 })
+        .stroke({ width: 2, color: 0x9aa0ad, alpha: 0.45 });
+    }
+  }
+  world.addChild(zones);
+
   const avatars = new Container();
   world.addChild(avatars);
 
   const local = new AvatarView(localName, parseHex(localColor));
   avatars.addChild(local.container);
+
+  // Zoom: the wheel scales the world container (1.0 = 1:1 tiles, 0.5–3).
+  const applyZoom = (z: number): void => {
+    const clamped = Math.min(3, Math.max(0.5, z));
+    world.scale.set(clamped);
+  };
+  const onWheel = (e: WheelEvent): void => {
+    e.preventDefault();
+    applyZoom(world.scale.x * (e.deltaY < 0 ? 1.1 : 1 / 1.1));
+  };
+  app.canvas.addEventListener("wheel", onWheel, { passive: false });
+
+  // Click-to-walk (README roadmap "Map enhancements"): the callback returns
+  // the clicked tile coordinates (world-space), or null for a miss.
+  const onClick: { cb: ((x: number, y: number) => void) | null } = { cb: null };
+  app.canvas.addEventListener("pointerdown", (e) => {
+    if (!onClick.cb) return;
+    // Screen → world: the world container's position + scale.
+    const rect = app.canvas.getBoundingClientRect();
+    const sx = e.clientX - rect.left;
+    const sy = e.clientY - rect.top;
+    const wx = (sx - world.position.x) / world.scale.x;
+    const wy = (sy - world.position.y) / world.scale.y;
+    onClick.cb(wx / ts, wy / ts);
+  });
 
   return {
     app,
@@ -107,6 +154,7 @@ export async function createWorld(
     avatars,
     local,
     manager: new AvatarManager(avatars),
+    onClick,
   };
 }
 
@@ -135,9 +183,11 @@ function parseHex(color: string): number {
   return m ? Number.parseInt(m[1], 16) : 0xe05f38;
 }
 
-/** Center the camera on our avatar. */
+/** Center the camera on our avatar (zoom-aware: the world container's
+ *  position is the screen offset, so the scale divides it). */
 export function followCamera(world: World, x: number, y: number): void {
   const ts = world.map.tileSize;
   const { width, height } = world.app.screen;
-  world.world.position.set(width / 2 - x * ts, height / 2 - y * ts);
+  const s = world.world.scale.x;
+  world.world.position.set(width / 2 - x * ts * s, height / 2 - y * ts * s);
 }

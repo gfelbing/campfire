@@ -366,6 +366,7 @@ async fn bot(
                 d: dir,
                 moving: u8::from(group_point.is_none()),
                 seq,
+                silent: false,
             }],
         };
         stats.datagrams_out.fetch_add(1, Ordering::Relaxed);

@@ -71,6 +71,7 @@ impl TestClient {
                 d: Dir::East,
                 moving: 1,
                 seq,
+                silent: false,
             }],
         };
         self.conn

@@ -223,11 +223,14 @@ export function createCallUI(container: HTMLElement, actions: CallUiActions): Ca
     return tile;
   }
 
-  function updateTile(t: Tile, name: string, state: PeerState, viaRelay: boolean, stream: MediaStream | null, audioOn: boolean, videoOn: boolean): void {
+  function updateTile(t: Tile, name: string, state: PeerState, viaRelay: boolean, stream: MediaStream | null, audioOn: boolean, videoOn: boolean, silent: boolean): void {
     t.nameEl.textContent = t.key.endsWith(":scr") ? `${name} · screen` : name;
     t.stateEl.textContent = stateText(state, viaRelay);
     t.muteEl.classList.toggle("hidden", audioOn);
     t.camEl.classList.toggle("hidden", videoOn);
+    // A silentZone (README roadmap "Map enhancements"): the tile's audio
+    // (through the video element) is muted locally.
+    t.video.muted = silent;
     if (stream !== t.stream) {
       t.stream = stream;
       t.video.srcObject = stream;
@@ -326,6 +329,7 @@ export function createCallUI(container: HTMLElement, actions: CallUiActions): Ca
         viaRelay: boolean;
         audioOn: boolean;
         videoOn: boolean;
+        silent: boolean;
       }
       const views: View[] = [];
       for (const p of peers) {
@@ -338,6 +342,7 @@ export function createCallUI(container: HTMLElement, actions: CallUiActions): Ca
           viaRelay: p.viaRelay,
           audioOn: p.audioOn,
           videoOn: p.videoOn,
+          silent: p.silent,
         });
         if (p.screen) {
           views.push({
@@ -349,6 +354,7 @@ export function createCallUI(container: HTMLElement, actions: CallUiActions): Ca
             viaRelay: p.viaRelay,
             audioOn: true,
             videoOn: true,
+            silent: false,
           });
         }
       }
@@ -360,7 +366,7 @@ export function createCallUI(container: HTMLElement, actions: CallUiActions): Ca
           t = makeTile(v.key, v.name, v.screen);
           tiles.set(v.key, t);
         }
-        updateTile(t, v.name, v.state, v.viaRelay, v.stream, v.audioOn, v.videoOn);
+        updateTile(t, v.name, v.state, v.viaRelay, v.stream, v.audioOn, v.videoOn, v.silent);
       }
       for (const [key, t] of tiles) {
         if (!seen.has(key)) {

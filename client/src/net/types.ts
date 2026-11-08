@@ -106,6 +106,9 @@ export interface MovementEntry {
   mv: number;
   /** Monotonic sequence number; the client keeps the newest. */
   s: number;
+  /** `sz` (README roadmap "Map enhancements"): the sender stands inside a
+   *  `silentZone` — remote audio from them is muted. Only sent when true. */
+  sz?: boolean;
 }
 
 export interface MovementBatch {
