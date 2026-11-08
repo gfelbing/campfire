@@ -192,6 +192,7 @@ export class AvatarManager {
     this.layer.removeChild(r.view.container);
     r.view.container.destroy({ children: true });
     this.remotes.delete(id);
+    this.lastTiles.delete(id);
   }
 
   /** Toggle the headphone badge on one remote avatar (README §6.3). */
@@ -218,9 +219,18 @@ export class AvatarManager {
     }
   }
 
+  /** Last interpolated positions in tile coords (filled by `update`). */
+  private lastTiles = new Map<string, [number, number]>();
+
+  /** The avatars' current positions in tile coords (id → [x, y]). */
+  positions(): Map<string, [number, number]> {
+    return this.lastTiles;
+  }
+
   /** Advance all remote avatars to `nowMs`. */
   update(nowMs: number, tileSize: number): void {
-    for (const r of this.remotes.values()) {
+    this.lastTiles.clear();
+    for (const [id, r] of this.remotes) {
       let px: number;
       let py: number;
       if (r.curT === r.prevT || (r.curX === r.prevX && r.curY === r.prevY)) {
@@ -236,6 +246,7 @@ export class AvatarManager {
           py = r.curY;
         }
       }
+      this.lastTiles.set(id, [px, py]);
       r.view.setPos(px * tileSize, py * tileSize);
       r.view.setMoving(r.moving && nowMs - r.curT < SNAP_MAX_LAG_MS + 300, nowMs);
     }

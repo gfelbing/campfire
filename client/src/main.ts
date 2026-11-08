@@ -11,7 +11,7 @@ import { createChat, type ChatUI } from "./ui/chat";
 import { createPresence, type PresenceUI } from "./ui/presence";
 import { createStatus } from "./ui/status";
 import { isWalkablePoint, parseMap, type MapData } from "./world/mapdata";
-import { createWorld, followCamera } from "./world/render";
+import { createWorld, drawBubble, followCamera } from "./world/render";
 
 /// Local position sends: 10 Hz while moving, 2 Hz while idle (README §5).
 const SEND_EVERY_MS = 66; // 15 Hz — the README §5 per-user cap (was 10 Hz)
@@ -211,6 +211,23 @@ async function main(): Promise<void> {
     world.local.setMoving(moving, now);
     world.manager.update(now, ts);
     followCamera(world, x, y);
+
+    // The bubble: a one-tile circle at the centroid of the call's
+    // participants (server computes membership from the same geometry).
+    if (inCall.size > 0) {
+      const pts: Array<[number, number]> = [];
+      if (myId !== "" && inCall.has(myId)) pts.push([x, y]);
+      const tiles = world.manager.positions();
+      for (const id of inCall) {
+        if (id !== myId) {
+          const p = tiles.get(id);
+          if (p) pts.push(p);
+        }
+      }
+      drawBubble(world, pts);
+    } else {
+      drawBubble(world, []);
+    }
 
     if (now - lastSend >= (moving ? SEND_EVERY_MS : IDLE_EVERY_MS)) {
       lastSend = now;

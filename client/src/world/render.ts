@@ -1,6 +1,6 @@
 // PixiJS world: tile map, avatars, camera.
 
-import { Application, Assets, Container, Rectangle, Sprite, Texture } from "pixi.js";
+import { Application, Assets, Container, Graphics, Rectangle, Sprite, Texture } from "pixi.js";
 
 import type { MapData, TilesetRef } from "./mapdata";
 import { AvatarManager, AvatarView } from "./avatars";
@@ -14,6 +14,8 @@ export interface World {
   app: Application;
   map: MapData;
   world: Container;
+  /** The proximity bubble: a one-tile circle at the participants' centroid. */
+  bubble: Graphics;
   avatars: Container;
   local: AvatarView;
   manager: AvatarManager;
@@ -88,6 +90,9 @@ export async function createWorld(
   }
   world.addChild(tiles);
 
+  const bubble = new Graphics();
+  world.addChild(bubble);
+
   const avatars = new Container();
   world.addChild(avatars);
 
@@ -98,10 +103,31 @@ export async function createWorld(
     app,
     map,
     world,
+    bubble,
     avatars,
     local,
     manager: new AvatarManager(avatars),
   };
+}
+
+/** Draw the proximity bubble: a one-tile circle around the centroid of the
+ *  participants' tile positions (README §6.3). Empty `pts` clears it. */
+export function drawBubble(world: World, pts: Array<[number, number]>): void {
+  world.bubble.clear();
+  if (pts.length === 0) return;
+  let cx = 0;
+  let cy = 0;
+  for (const [x, y] of pts) {
+    cx += x;
+    cy += y;
+  }
+  cx /= pts.length;
+  cy /= pts.length;
+  const ts = world.map.tileSize;
+  world.bubble
+    .circle(cx * ts, cy * ts, ts)
+    .fill({ color: 0x58a858, alpha: 0.15 })
+    .stroke({ width: 2, color: 0x58a858, alpha: 0.6 });
 }
 
 function parseHex(color: string): number {

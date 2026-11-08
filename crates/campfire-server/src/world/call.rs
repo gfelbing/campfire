@@ -31,9 +31,6 @@ pub struct ParticipantFlags {
 pub struct Call {
     /// Participants: id → (name, flags).
     pub participants: HashMap<UserId, (String, ParticipantFlags)>,
-    /// Participants currently outside the leave radius (or opted out):
-    /// first-seen instant, for the leave grace delay.
-    pub leaving: HashMap<UserId, std::time::Instant>,
 }
 
 impl Call {
@@ -76,10 +73,8 @@ impl Call {
         out
     }
 
-    /// Remove a participant (and any leave timer); `true` when the call is
-    /// now empty.
+    /// Remove a participant; `true` when the call is now empty.
     pub fn remove(&mut self, id: &str) -> bool {
-        self.leaving.remove(id);
         self.participants.remove(id).is_some() && self.participants.is_empty()
     }
 }

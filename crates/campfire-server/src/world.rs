@@ -28,15 +28,11 @@ pub const TICK: Duration = Duration::from_millis(50);
 /// How long a disconnected user keeps their identity (README §5 reconnect):
 /// position, call membership and the token all survive a drop for this long.
 pub const RECONNECT_WINDOW: Duration = Duration::from_secs(30);
-/// Proximity call (README §6.3): walk within this many tiles of a bubble
-/// participant and you are pulled in.
-const BUBBLE_JOIN_RADIUS: f32 = 3.5;
-/// Walk farther than this from every participant and your leave timer
-/// starts (a small hysteresis over the join radius stops flapping at the
-/// boundary).
-const BUBBLE_LEAVE_RADIUS: f32 = 4.5;
-/// Outside the leave radius for this long → dropped from the bubble.
-const BUBBLE_LEAVE_DELAY: Duration = Duration::from_secs(2);
+/// Proximity call (README §6.3): a bubble has a one-tile radius around the
+/// centroid of its participants. Less than [`BUBBLE_RADIUS`] tiles from
+/// another player (or from the bubble's center) pulls you in; at the radius
+/// or beyond drops you immediately.
+const BUBBLE_RADIUS: f32 = 1.0;
 /// Largest movement datagram; bigger batches are split in halves (README §5).
 const MAX_DATAGRAM_BYTES: usize = 1200;
 /// Movement entries per user per second (README §5: client sends ≤15 Hz).
@@ -406,7 +402,7 @@ impl World {
             remove_from_room(&mut rooms, room, id);
         }
         for (room, room_entry) in rooms.iter_mut() {
-            update_bubbles(room, room_entry, Instant::now());
+            update_bubbles(room, room_entry);
             if !room_entry.users.values().any(|m| m.dirty) {
                 continue;
             }
@@ -707,39 +703,40 @@ fn leave_call(entry: &mut Room, id: &str) {
 }
 
 /// One step of the proximity-call engine (README §6.3), run every tick
-/// before the movement batch: walk within [`BUBBLE_JOIN_RADIUS`] of a
-/// bubble participant and you are pulled in; drift (or toggle) out and you
-/// are dropped. At most one join per tick keeps the offerer designation
+/// before the movement batch: the bubble is the one-tile circle around the
+/// centroid of its participants. Walk within [`BUBBLE_RADIUS`] of the
+/// center (or of another player, when no bubble exists yet) and you are
+/// pulled in; at the radius or beyond — or toggled off — you drop out
+/// immediately. At most one join per tick keeps the offerer designation
 /// deterministic and the signaling trickle-paced.
-fn update_bubbles(room: &str, entry: &mut Room, now: Instant) {
-    // Leaves first: gone members, opted-out members (immediately) and
-    // participants who drifted beyond the leave radius (after the grace
-    // delay) all drop out; someone back in radius gets their timer cleared.
+fn update_bubbles(room: &str, entry: &mut Room) {
+    // Leaves first: gone members keep their seat (reconnect grace), opted
+    // out members and participants at or beyond the bubble radius drop out
+    // immediately.
     let mut dropped: Vec<String> = Vec::new();
-    if let Some(call) = entry.call.as_mut() {
-        let mut in_radius: Vec<(String, (f32, f32))> = Vec::new();
+    if let Some(call) = entry.call.as_ref() {
+        // The bubble's center: the centroid of the participants' positions.
+        let mut center = (0.0f32, 0.0f32);
+        let mut n = 0usize;
         for (uid, m) in &entry.users {
             if call.contains(uid) {
-                in_radius.push((uid.clone(), m.pos));
+                center.0 += m.pos.0;
+                center.1 += m.pos.1;
+                n += 1;
             }
         }
-        let ids: Vec<String> = call.participants.keys().cloned().collect();
-        for id in ids {
-            let Some(m) = entry.users.get(&id) else {
-                continue; // gone: stays in the bubble (reconnect grace)
-            };
-            let near_someone = in_radius
-                .iter()
-                .any(|(other, op)| other.as_str() != id && dist(*op, m.pos) <= BUBBLE_LEAVE_RADIUS);
-            if m.bubble_off {
-                dropped.push(id);
-            } else if !near_someone {
-                let deadline = call.leaving.entry(id.clone()).or_insert(now);
-                if now.duration_since(*deadline) >= BUBBLE_LEAVE_DELAY {
-                    dropped.push(id);
+        if n > 0 {
+            center.0 /= n as f32;
+            center.1 /= n as f32;
+        }
+        for id in call.participants.keys() {
+            match entry.users.get(id) {
+                None => {} // gone: stays in the bubble (reconnect grace)
+                Some(m) => {
+                    if m.bubble_off || dist(center, m.pos) >= BUBBLE_RADIUS {
+                        dropped.push(id.clone());
+                    }
                 }
-            } else {
-                call.leaving.remove(&id);
             }
         }
     }
@@ -747,9 +744,9 @@ fn update_bubbles(room: &str, entry: &mut Room, now: Instant) {
         leave_call(entry, &id);
     }
 
-    // Creation: no bubble yet, and two eligible users within the join
-    // radius (id-sorted so the pair — and thus the designated offerer —
-    // is deterministic).
+    // Creation: no bubble yet, and two eligible users within the bubble
+    // radius of each other (id-sorted so the pair — and thus the designated
+    // offerer — is deterministic).
     if entry.call.is_none() {
         let mut candidates: Vec<(String, (f32, f32))> = entry
             .users
@@ -760,7 +757,7 @@ fn update_bubbles(room: &str, entry: &mut Room, now: Instant) {
         candidates.sort_by(|a, b| a.0.cmp(&b.0));
         'pair: for i in 0..candidates.len() {
             for j in i + 1..candidates.len() {
-                if dist(candidates[i].1, candidates[j].1) <= BUBBLE_JOIN_RADIUS {
+                if dist(candidates[i].1, candidates[j].1) < BUBBLE_RADIUS {
                     let a = candidates[i].clone();
                     let b = candidates[j].clone();
                     let call = call::Call::new(
@@ -781,24 +778,34 @@ fn update_bubbles(room: &str, entry: &mut Room, now: Instant) {
     }
 
     // Joins: at most one per tick — the nearest eligible user within the
-    // join radius of any participant. The joiner is the offerer (README
-    // §6.3: the joiner offers every existing member; nobody renegotiates).
+    // bubble radius of the bubble's center. The joiner is the offerer
+    // (README §6.3: the joiner offers every existing member; nobody
+    // renegotiates).
     let Some(call) = entry.call.as_ref() else {
         return;
     };
+    let mut center = (0.0f32, 0.0f32);
+    let mut n = 0usize;
+    for (uid, m) in &entry.users {
+        if call.contains(uid) {
+            center.0 += m.pos.0;
+            center.1 += m.pos.1;
+            n += 1;
+        }
+    }
+    if n == 0 {
+        return;
+    }
+    center.0 /= n as f32;
+    center.1 /= n as f32;
     let mut best: Option<(f32, String)> = None;
     for (uid, m) in &entry.users {
         if m.bubble_off || m.gone_at.is_some() || call.contains(uid) {
             continue;
         }
-        let nearest = entry
-            .users
-            .iter()
-            .filter(|(pid, _)| call.contains(pid) && pid.as_str() != uid.as_str())
-            .map(|(_, pm)| dist(pm.pos, m.pos))
-            .fold(f32::INFINITY, f32::min);
-        if nearest <= BUBBLE_JOIN_RADIUS && best.as_ref().is_none_or(|(d, _)| nearest < *d) {
-            best = Some((nearest, uid.clone()));
+        let d = dist(center, m.pos);
+        if d < BUBBLE_RADIUS && best.as_ref().is_none_or(|(bd, _)| d < *bd) {
+            best = Some((d, uid.clone()));
         }
     }
     if let Some((_, joiner)) = best {
@@ -1378,7 +1385,7 @@ mod tests {
     }
 
     #[test]
-    fn walking_in_joins_and_walking_out_leaves_after_delay() {
+    fn walking_out_leaves_immediately() {
         let world = World::new(test_maps());
         let mut a = join_user(&world, "office", "alice");
         let mut b = join_user(&world, "office", "bob");
@@ -1386,30 +1393,9 @@ mod tests {
         expect_start(&mut a);
         expect_start(&mut b);
 
-        // Bob walks away: nothing at once (grace delay), then a call_leave
-        // and the call ends (only alice remains → last_left).
+        // Bob walks beyond the bubble radius: the very next tick drops him
+        // (no grace delay — the bubble is a hard one-tile circle).
         place(&world, "office", &b.id, 10.0, 0.0);
-        world.tick();
-        assert!(a.rx.try_recv().is_err(), "grace delay, no immediate leave");
-
-        // Coming back inside the leave radius clears the timer.
-        place(&world, "office", &b.id, 1.0, 0.0);
-        world.tick();
-        assert!(a.rx.try_recv().is_err(), "back in radius: no leave");
-        place(&world, "office", &b.id, 10.0, 0.0);
-        world.tick(); // timer starts
-        world.tick(); // within the delay
-        assert!(a.rx.try_recv().is_err(), "still within the delay");
-
-        // Time-travel the timer past the delay: the next tick drops bob.
-        {
-            let mut rooms = world.rooms.lock().unwrap();
-            let call = rooms.get_mut("office").unwrap().call.as_mut().unwrap();
-            let past = Instant::now() - BUBBLE_LEAVE_DELAY - Duration::from_millis(1);
-            for t in call.leaving.values_mut() {
-                *t = past;
-            }
-        }
         world.tick();
         for u in [&mut a, &mut b] {
             match u.rx.try_recv().unwrap() {
@@ -1417,6 +1403,12 @@ mod tests {
                 other => panic!("expected call_end, got {other:?}"),
             }
         }
+
+        // Walking back within the radius of alice's spawn reforms it.
+        place(&world, "office", &b.id, 21.0, 15.5);
+        world.tick();
+        expect_start(&mut a);
+        expect_start(&mut b);
     }
 
     #[test]
