@@ -187,13 +187,36 @@ campfire/
 - **E2E** (`tools/e2e`, headless Chromium with fake media over HTTP/3): two pages join via URL, chat broadcasts, a bubble forms and tears down on walk-away.
 - **Load** (`tools/loadtest`): ramped QUIC bots; verified 50 users / 2 rooms / 2 live bubbles with mean tick 0.16 ms.
 
-Ops in brief: one release binary or the Docker image (`-p 443:443/udp -p 443:443/tcp`, certs mounted); Prometheus scrapes `/metrics` over HTTP/3; `RUST_LOG` + `--log-json` for logs; graceful shutdown on SIGINT/SIGTERM. Production TLS via Let's Encrypt **DNS-01** (HTTP-01 is impossible without a plaintext listener). Chromium trusts only built-in roots for QUIC — dev uses `just brave` with SPKI pinning; production needs a publicly-trusted cert.
+Ops in brief: one release binary or the Docker image (`-p 443:443/udp -p 443:443/tcp`, certs mounted); Prometheus scrapes `/metrics` over HTTP/3; `RUST_LOG` + `--log-json` for logs; graceful shutdown on SIGINT/SIGTERM. Production TLS via Let's Encrypt **DNS-01** (HTTP-01 is impossible without a plaintext listener). Chromium trusts only built-in roots for QUIC — dev uses `just brave` with SPKI pinning; production needs a publicly-trusted cert. On Kubernetes, use the [Helm chart](#kubernetes-helm).
 
 ## 11. Security & limits
 
 TLS 1.3 only, `h3`-only ALPN on UDP. Per-session limits: movement 30/s, chat 1/s, stream messages 50/s, inbound 256 KB/s, datagram ≤ 1200 B, SDP ≤ 64 KB, ICE ≤ 1 KB, name ≤ 24 chars, room cap 2048. The server is authoritative for movement, membership and call state. TURN credentials are HMAC-signed, 1 h TTL, mint-limited per IP. No persistence, no accounts, identity-free logs (random user ids).
 
 ---
+
+### Kubernetes (Helm)
+
+Deploy the chart from GHCR (published with every version tag):
+
+```sh
+helm install campfire \
+  oci://ghcr.io/gfelbing/helm/campfire --version 0.1.0 \
+  --set domain=campfire.example.com \
+  --set certificate.issuerRef.name=letsencrypt-prod
+```
+
+The chart's default image is `ghcr.io/gfelbing/campfire` with an empty tag —
+that resolves to the chart's `appVersion`, which follows the release tag. If
+the GHCR package is private, log in first (`helm registry login ghcr.io` with
+a token holding `read:packages`; the cluster also needs `imagePullSecrets`).
+
+The chart deploys a single instance on port 443 TCP + UDP, fronted by Traefik
+(TCP TLS-passthrough on SNI + raw UDP forwarding) and expecting either
+cert-manager or an existing TLS secret — see
+[`deploy/helm/campfire/README.md`](deploy/helm/campfire/README.md) for the
+requirements, key values and local (`helm install deploy/helm/campfire …`)
+instructions.
 
 ## License
 
