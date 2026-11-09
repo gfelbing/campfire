@@ -235,6 +235,12 @@ areas, `exitUrl` navigation, zoom, click-to-walk) are shipped — see
 [§6 Maps](#6-maps), [§7 Voice & video calls](#7-voice--video-calls) and
 [§8 The web client](#8-the-web-client). What is left:
 
+### Media: SFU via MoQ (current focus)
+
+Rebuild the media stack: drop WebRTC + TURN, every client streams once to a
+server-side SFU speaking MoQ (Media-over-QUIC) over the existing
+WebTransport/443 path. Full plan: [`docs/moq-sfu.md`](docs/moq-sfu.md).
+
 ### Map rendering polish
 
 Small gaps between adjacent tiles are visible; tiles should align seamlessly.
