@@ -165,8 +165,8 @@ impl MapData {
             return Err(MapError::EmptyGrid);
         }
         let cells = (raw.width * raw.height) as usize;
-        // First tile layer named "collision" (or "collisions", the Tiled
-        // Tiled convention) decides walkability; without one the whole
+        // First tile layer named "collision" (or "collisions", the
+        // convention some Tiled maps use) decides walkability; without one the whole
         // map is walkable.
         let collision = raw
             .layers

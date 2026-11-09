@@ -18,7 +18,7 @@ Then open `https://localhost:8443/`. The landing page asks for a name and a map;
 Examples:
 
 - `https://localhost:8443/play/office/office.json` — the office map
-- `https://localhost:8443/play/interiors/conference.tmj` — a Tiled map
+- `https://localhost:8443/play/interiors/conference.tmj` — a map from a local `maps/` subdirectory
 
 Other tasks: `just check` (fmt + clippy + tests), `just build` (release binary with embedded client), `just docker`, `just test`.
 
@@ -121,7 +121,7 @@ Maps live on disk, mounted at runtime — never bundled into the binary:
 - `--maps-dir` (default `maps/`) is scanned **recursively**; every `*.json`/`*.tmj` file that parses as a Tiled orthogonal map becomes a map. Files that fail to parse are skipped, so a bad map cannot take the server down.
 - **Map id = the file's path under `maps/`, minus the extension, minus a final segment that repeats its parent** (`office/office.json` → `office`, `interiors/conference.tmj` → `interiors/conference`). The id is the room id and the URL path segment.
 - Tileset images are served next to the map JSON, so Tiled's relative `image` paths resolve as-is.
-- The parser accepts the `collision` *and* `collisions` layer names (the latter is the Tiled convention) and the client flattens Tiled **group layers** in draw order.
+- The parser accepts the `collision` *and* `collisions` layer names (the latter is the convention some Tiled maps use) and the client flattens Tiled **group layers** in draw order.
 
 In deployment, mount a directory of map folders with `--maps-dir /mnt/maps`; for development the repo's `maps/` is used. `maps/interiors/example/` is vendored with its own license files.
 
