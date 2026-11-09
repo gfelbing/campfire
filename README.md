@@ -2,7 +2,7 @@
 
 A virtual office — avatars walking around 2D tile maps **talking and video-calling in real time** — with the entire backend in **Rust**, deployed as **one binary** listening on **one port number** (UDP for QUIC/HTTP/3 + STUN, TCP for the Alt-Svc bootstrap and the TURN media relay).
 
-> **Status: working MVP.** Walking avatars on tileset-rendered maps, proximity-video bubbles, chat, reconnect across reloads and the browser back/forward cache, metrics, a QUIC load harness and a headless E2E suite. See the [roadmap](#roadmap) for what is next.
+> **Status: working MVP.** Walking avatars on tileset-rendered maps, proximity-video bubbles and zone-based meeting-room calls, silent zones with do-not-disturb, chat, map navigation between rooms, zoom and click-to-walk, a collapsible sidebar with a call theater, reconnect across reloads and the browser back/forward cache, metrics, a QUIC load harness and a headless E2E suite. See the [roadmap](#roadmap) for what is next.
 
 ---
 
@@ -98,21 +98,22 @@ Reliable stream (JSON lines): join/leave, chat, typing, call signaling, errors. 
 {"t":"join", "room":"office", "name":"georg", "avatar":{"color":"#e05f38"}}
              // "token":"…" restores the previous identity on reconnect
 {"t":"leave"} {"t":"chat","text":"hi"} {"t":"typing","on":true}
-{"t":"bubble","off":true}                    // opt out of proximity calls
+{"t":"bubble","off":true}                    // opt out of calls
 {"t":"call_offer"/"call_answer"/"call_ice"/"call_mute"/"call_leave", …}
 
 // server → client (stream)
 {"t":"hello", "you":"u_…", "room":"office", "token":"…", "users":[…], "chat":[…], "call":[…]}
 {"t":"joined"/"left"} {"t":"chat", …} {"t":"typing", …} {"t":"error","code":"…"}
-{"t":"call_start", "participants":[…], "you_offer":true}
-{"t":"call_leave","id":"u_…"} {"t":"call_end","reason":"last_left"}
+{"t":"call_start", "participants":[…], "you_offer":true, "zone":"MeetingRoom"}
+{"t":"call_leave","id":"u_…", "zone":"…"} {"t":"call_end","reason":"last_left","zone":"…"}
 {"t":"call_offer"/"call_answer"/"call_ice"/"call_mute", …}   // relayed
 
 // datagrams (both directions)
-{"m":[{"id":"u_…","x":41.5,"y":12.75,"d":"e","mv":1,"s":4821}, …]}
+{"m":[{"id":"u_…","x":41.5,"y":12.75,"d":"e","mv":1,"s":4821,"sz":true}, …]}
+                                     // "sz": inside a silentZone (only when true)
 ```
 
-Call *state* (`call_start`/`call_leave`/`call_end`) is room-wide (it powers the headphone badge); call *signaling* is relayed only between participants of the same room's bubble. The **joiner is always the offerer**; `you_offer` marks the designated offerer. Movement is server-validated: tile space, max 8 tiles/s, walkable tiles only, ≤ 30 moves/s per user.
+Call *state* (`call_start`/`call_leave`/`call_end`) is room-wide (it powers the headphone badge and the zone-rectangle highlight); `zone` marks a zone call (a room can carry several concurrent calls — one per occupied jitsi zone plus the proximity bubble). Call *signaling* is relayed only between participants of the same call. The **joiner is always the offerer**; `you_offer` marks the designated offerer. Movement is server-validated: tile space, max 8 tiles/s, walkable tiles only, ≤ 30 moves/s per user.
 
 ## 6. Maps
 
@@ -123,25 +124,34 @@ Maps live on disk, mounted at runtime — never bundled into the binary:
 - Tileset images are served next to the map JSON, so Tiled's relative `image` paths resolve as-is.
 - The parser accepts the `collision` *and* `collisions` layer names (the latter is the convention some Tiled maps use) and the client flattens Tiled **group layers** in draw order.
 
-In deployment, mount a directory of map folders with `--maps-dir /mnt/maps`; for development the repo's `maps/` is used. `maps/interiors/example/` is vendored with its own license files.
+**Zones** — objects in Tiled *object layers*, rectangles in pixel coordinates divided by the tile size:
+
+- `jitsiRoom` (string): a **meeting room** — everyone inside the rectangle is in the zone's call (it forms with the first occupant; walking in joins). The call area is the zone rectangle, not a circle.
+- `silentZone` (or a truthy `silent`): **do not disturb** — occupants never form or join a proximity bubble, drop out of one they were in, are marked with a 🔇 badge, and their audio is muted for everyone nearby.
+- `exitUrl` (string): walking onto the object navigates to another map. The URL is **relative to the current map's directory** (`conference.tmj` from `interiors/office` targets `interiors/conference`); a leading `/` targets from the `maps/` root, `..` climbs. A `#fragment` is allowed and ignored. Name and color survive the hop.
+- An object named `start` marks the **spawn area**: the nearest walkable tile to its center (falling back outward in a ring) is the spawn point, used identically by server and client.
+
+In deployment, mount a directory of map folders with `--maps-dir /mnt/maps`; for development the repo's `maps/` is used. Map folders you add locally are ignored by git and are yours to manage.
 
 ## 7. Voice & video calls
 
 P2P mesh — one `RTCPeerConnection` per pair of participants, no SFU. The server relays signaling only; media is DTLS-SRTP end-to-end (even our TURN relay cannot decrypt it). NAT traversal: STUN co-located on the QUIC socket; TURN (`turns:` over 443/TCP, embedded turn-rs) as the last ICE tier.
 
-**Proximity bubbles**, computed by the server in the 50 ms tick:
+**Calls**, computed by the server in the 50 ms tick — a room carries **at most one proximity bubble plus one call per occupied jitsi zone**; a user is in at most one call at a time:
 
-- A bubble is the **one-tile-radius circle around the centroid of its participants** (the client draws exactly that circle).
-- **Creation:** two opted-in users closer than one tile.
-- **Joining:** automatic — closer than one tile to the bubble's center pulls you in (at most one join per tick; the joiner is the offerer). The mic permission prompt happens on the first auto-join: walking close *is* the intent.
-- **Leaving:** at the radius or beyond (or the bubble toggle) drops you **immediately** — no grace delay, no hysteresis. One bubble per room; the last leave ends it (`call_end {reason:"last_left"}`).
+- **Zone calls**: every occupied `jitsiRoom` zone runs its own call bounded by the zone rectangle — a lone occupant starts it, anyone who walks in joins. The client highlights each live zone's rectangle (visible to bystanders too).
+- **Proximity bubbles**: the one-tile-radius circle around the centroid of the participants (the client draws exactly that circle). **Creation:** two opted-in users closer than one tile. **Joining:** automatic — closer than one tile to the center pulls you in (at most one join per tick across all calls; the joiner is the offerer). The mic permission prompt happens on the first auto-join: walking close *is* the intent.
+- **Leaving:** outside your call's area (the zone rect or the bubble radius — or the bubble toggle) drops you **immediately** — no grace delay, no hysteresis. The last leave ends that call (`call_end {reason:"last_left","zone":…}`).
+- **Silent zones**: occupants of a `silentZone` are excluded from proximity bubbles entirely — they never form or join one, and walking into the zone drops them out of a bubble they were in. Zone calls are unaffected (the two zone types are meant to be disjoint).
 - A disconnected member keeps their seat for the reconnect window; their stale position is excluded from the centroid. A member who re-enters via their token gets a 2 s re-entry grace before the radius check applies again, so the reconnect promise (call membership survives) holds.
 - Voice-only degradation at 9+ participants (UI-enforced); mute/camera toggles flip `track.enabled` and broadcast `call_mute` — no renegotiation.
 
 ## 8. The web client
 
 - **TypeScript + Vite + PixiJS** (WebGL/WebGPU). Tilesets are rendered as sprites: the client loads each tileset sheet from `/api/v1/maps/<id>/<image>`, cuts per-tile frames (`firstgid`, `columns`, `margin`, `spacing`) and draws every visible tile layer in Tiled draw order, honoring horizontal/vertical tile flips. Collision layers shape walkability, not the picture.
-- Local movement (WASD/arrows) with client-side prediction; remote avatars interpolated between batches; name labels; headphone badge on in-call avatars; the proximity bubble drawn as a translucent one-tile circle.
+- **Layout**: a collapsible sidebar next to the map (Main Menu / Players / Chat tabs) and a call theater overlapping the map while in a video call — remote streams stack in a column, screen sharing adds a tile, clicking a stream focuses it. The canvas resizes with the sidebar (`ResizeObserver`), not beneath it.
+- **Local movement** (WASD/arrows) with client-side prediction; remote avatars interpolated between batches; name labels. **Click-to-walk**: a click routes the avatar along the shortest walkable path (BFS over the collision grid); keyboard input cancels. **Zoom**: scroll-wheel scaling of the map canvas, camera keeping the local avatar centered.
+- **Zone visuals**: live call zones drawn as translucent green rectangles, proximity bubbles as a translucent one-tile circle, silent zones tinted gray; 🔇 do-not-disturb badge on avatars inside a `silentZone` (mirrored in the sidebar's presence list); audio from silent-zone peers muted locally.
 - Boot overlay: name, map picker, avatar color. A map named in the URL path suppresses the picker; joining from the landing page navigates to `/play/<map>/?name=…&color=…`.
 - Realtime: WebTransport when available, otherwise the SSE+POST fallback on the same port. Reconnect-with-token survives page reloads (`sessionStorage`) and back/forward-cache navigation (the transport is closed on `pagehide` and rebuilt on `pageshow`; transport generations keep stale death callbacks from racing the live one).
 - The built client is embedded into the binary; `just dev` serves `client/dist` from disk instead.
@@ -194,37 +204,19 @@ may not sell a product whose value derives entirely or substantially from the
 software itself. Note that Commons Clause software is not open source by the
 OSI definition.
 
-The vendored `maps/interiors/example/` ships with its own license files and is
-not covered by this license.
-
 ## Roadmap
 
-### 1. UI redesign
+The UI redesign (collapsible sidebar + call theater with screen sharing) and the
+map enhancements (zones: `jitsiRoom` meeting rooms, `silentZone`, `start` spawn
+areas, `exitUrl` navigation, zoom, click-to-walk) are shipped — see
+[§6 Maps](#6-maps), [§7 Voice & video calls](#7-voice--video-calls) and
+[§8 The web client](#8-the-web-client). What is left:
 
-Replace the floating panels with a structured layout:
+### Map rendering polish
 
-- **Collapsible sidebar next to the map** (not overlapping it), with tabs:
-  - *Main Menu* — what the status panel shows today (bubble toggle, room switcher), mic/camera toggles, device settings, bubble on/off.
-  - *Players* — everyone on the map, with in-call badges,
-  - *Chat* — the existing chat UI, moved in,
-  The map canvas resizes with the sidebar instead of being covered.
-- **Call theater overlapping the map**: while in a video call, remote video streams stack in a column on the right side, over the map. **Screen sharing** creates an additional video tile in that column (`getDisplayMedia` added to the mesh as one more local track). Clicking a stream **focuses** it: the selected stream shows large in the center overlay, the rest stay in the column; clicking again (or Escape) unfocuses.
+Small gaps between adjacent tiles are visible; tiles should align seamlessly.
 
-### 2. Map enhancements
-
-Treat maps as applications, not just floor plans:
-
-- **Map properties**: honor Tiled map/layer properties
-  - `jitsiRoom`: when entering, the player enters a rectangular bubble that has the size of the zone with that property, emulating a meeting room.
-  - `start`: spawn area selection
-  - `exitUrl` (walking onto the tile navigates to another map/URL, composing with the `/play/…` scheme).
-- **Special zones**:
-  - `silentZone` areas (drawn as ordinary layers with zone properties) mute proximity audio inside their bounds — position-based, computed in the same tick as bubbles.
-- **Zoom**: scroll-wheel zoom of the map canvas (clamped, centered on the cursor), the camera keeping the local avatar centered unless panned.
-- **Click-to-walk**: clicking a point on the map sends the avatar there along the **shortest walkable path** (BFS/A* over the collision grid on the client; the server's speed/walkability gates already accept the resulting step stream).
-- Currently, there are small gaps rendered between the tiles, these should be cleanly aligned w/o gaps.
-
-### 3. Custom avatars
+### Custom avatars
 
 Players pick an avatar instead of a flat color:
 
