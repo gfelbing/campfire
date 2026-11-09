@@ -77,19 +77,17 @@ async fn http3_healthz_index_and_maps() {
     assert_eq!(status, 200);
     assert!(body.contains("Campfire"));
 
-    // /api/v1/maps — the two bundled maps, sorted by id.
+    // /api/v1/maps — every map on disk, sorted by id; the two bundled maps
+    // (island, office) must be present.
     let (status, body) = get(addr, &root, "/api/v1/maps").await;
     assert_eq!(status, 200);
     let maps: Vec<serde_json::Value> = serde_json::from_str(&body).unwrap();
     let ids: Vec<&str> = maps.iter().map(|m| m["id"].as_str().unwrap()).collect();
-    assert_eq!(
-        ids,
-        vec![
-            "island",
-            "interiors/conference",
-            "interiors/office",
-            "office"
-        ],
+    let mut sorted = ids.clone();
+    sorted.sort_unstable();
+    assert_eq!(ids, sorted, "maps body: {body}");
+    assert!(
+        ids.contains(&"island") && ids.contains(&"office"),
         "maps body: {body}"
     );
 
@@ -104,13 +102,12 @@ async fn api_maps_by_id_and_rooms() {
     campfire_server::api::mark_start();
     let (addr, root) = start_server().await;
 
-    // GET /api/v1/maps/interiors/conference — the raw Tiled JSON for
-    // one map (id with a slash: the file's path under `maps/`).
-    let (status, body) = get(addr, &root, "/api/v1/maps/interiors/conference").await;
+    // GET /api/v1/maps/office — the raw Tiled JSON for one map.
+    let (status, body) = get(addr, &root, "/api/v1/maps/office").await;
     assert_eq!(status, 200, "map body: {body}");
     let map: serde_json::Value = serde_json::from_str(&body).unwrap();
-    assert_eq!(map["width"], 24);
-    assert_eq!(map["height"], 14);
+    assert_eq!(map["width"], 40);
+    assert_eq!(map["height"], 30);
     let layer_names: Vec<&str> = map["layers"]
         .as_array()
         .unwrap()
@@ -118,12 +115,14 @@ async fn api_maps_by_id_and_rooms() {
         .map(|l| l["name"].as_str().unwrap())
         .collect();
     assert!(
-        layer_names.contains(&"collisions"),
+        layer_names.contains(&"collision"),
         "layers: {layer_names:?}"
     );
 
-    // Unknown map → 404.
+    // Unknown map → 404 (including a slash id, which the router accepts).
     let (status, _) = get(addr, &root, "/api/v1/maps/nope").await;
+    assert_eq!(status, 404);
+    let (status, _) = get(addr, &root, "/api/v1/maps/nope/office").await;
     assert_eq!(status, 404);
 
     // GET /api/v1/rooms — nobody has joined yet, so no room exists.
@@ -139,13 +138,8 @@ async fn map_tileset_asset() {
     let (addr, root) = start_server().await;
     let (s1, _) = get(addr, &root, "/api/v1/maps/office/tiles.png").await;
     assert_eq!(s1, 200);
-    let (s2, _) = get(addr, &root, "/api/v1/maps/interiors/conference").await;
+    let (s2, _) = get(addr, &root, "/api/v1/maps/office").await;
     assert_eq!(s2, 200);
-    let (s3, _) = get(
-        addr,
-        &root,
-        "/api/v1/maps/interiors/conference/tilesets/WA_Room_Builder.png",
-    )
-    .await;
+    let (s3, _) = get(addr, &root, "/api/v1/maps/island/tiles.png").await;
     assert_eq!(s3, 200, "tileset asset");
 }

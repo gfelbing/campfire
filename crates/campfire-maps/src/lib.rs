@@ -558,13 +558,27 @@ mod tests {
         )));
         assert!(maps.asset("island", "tiles.png").is_some());
         assert!(maps.asset("island", "../office/office.json").is_none());
-        // Nested map ids: assets sit next to the map file, not under the id.
-        assert!(
-            maps.asset(
-                "interiors/conference",
-                "tilesets/WA_Special_Zones.png"
-            )
-            .is_some()
-        );
+    }
+
+    /// Nested map ids: a map in a subdirectory is keyed by its relative
+    /// path, and its assets sit next to the map file, not under the id.
+    #[test]
+    fn nested_map_ids_and_assets() {
+        let dir = std::env::temp_dir().join("campfire-nested-maps-test");
+        std::fs::create_dir_all(dir.join("interiors")).unwrap();
+        let raw = serde_json::json!({
+            "type": "map", "width": 2, "height": 2, "tilewidth": 32,
+            "layers": [{"type": "tilelayer", "name": "collision",
+                        "width": 2, "height": 2, "data": [0, 0, 0, 0]}]
+        });
+        std::fs::write(
+            dir.join("interiors").join("conference.json"),
+            serde_json::to_vec(&raw).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(dir.join("interiors").join("tiles.png"), b"png").unwrap();
+        let maps = Maps::load(&dir);
+        assert!(maps.get("interiors/conference").is_some());
+        assert!(maps.asset("interiors/conference", "tiles.png").is_some());
     }
 }
