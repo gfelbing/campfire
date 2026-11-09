@@ -2,8 +2,8 @@
 
 # The Docker image to run. `tag` empty = the chart's appVersion.
 image:
-  repository: github.com/gfelbing/campfire
-  tag: "latest"
+  repository: ghcr.io/gfelbing/campfire
+  tag: ""
   pullPolicy: IfNotPresent
 
 # The public DNS name of the deployment. Used for:

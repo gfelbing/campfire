@@ -53,3 +53,27 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  publish-chart:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: azure/setup-helm@v4
+        with:
+          version: latest
+
+      - name: Log in to GHCR
+        run: helm registry login ghcr.io -u "${{ github.actor }}" -p "${{ secrets.GITHUB_TOKEN }}"
+
+      # Chart version and appVersion follow the tag (v1.2.3 → 1.2.3); the
+      # appVersion doubles as the default image tag in values.yaml.
+      - name: Package the chart
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          mkdir -p out
+          helm package deploy/helm/campfire \
+            --version "$version" --app-version "$version" --destination out
+
+      - name: Push the chart to GHCR
+        run: helm push out/*.tgz "oci://${{ env.REGISTRY }}/${{ github.repository_owner }}/helm"
