@@ -30,15 +30,29 @@ function blocked(map: MapData, x: number, y: number): boolean {
   );
 }
 
-/** Exit `exitUrl` → map id: strip extension, collapse a repeated final
- *  directory segment (the server's rule, `office/office.json` → `office`). */
-function exitUrlToMapId(exitUrl: string): string {
+/** Exit `exitUrl` → map id. The URL is **relative to the current map's
+ *  directory** (`conference.tmj` from `interiors/office` targets
+ *  `interiors/conference`); a leading `/` targets from the `maps/` root.
+ *  The result strips the extension and collapses a repeated final directory
+ *  segment (the server's rule, `office/office.json` → `office`). */
+function exitUrlToMapId(exitUrl: string, mapId: string): string {
   const path = exitUrl.split("#")[0]!;
-  const parts = path.split("/").filter((p) => p !== "");
-  const last = parts[parts.length - 1]!.replace(/\.\w+$/, "");
-  if (parts.length > 1 && parts[parts.length - 2] === last) parts.pop();
-  parts[parts.length - 1] = last;
-  return parts.join("/");
+  let parts: string[];
+  if (path.startsWith("/")) {
+    parts = path.split("/").filter((p) => p !== "" && p !== ".");
+  } else {
+    const base = mapId.split("/").slice(0, -1); // the current map's directory
+    parts = [...base, ...path.split("/").filter((p) => p !== "" && p !== ".")];
+  }
+  const resolved: string[] = [];
+  for (const part of parts) {
+    if (part === "..") resolved.pop();
+    else resolved.push(part);
+  }
+  const last = resolved[resolved.length - 1]!.replace(/\.\w+$/, "");
+  if (resolved.length > 1 && resolved[resolved.length - 2] === last) resolved.pop();
+  resolved[resolved.length - 1] = last;
+  return resolved.join("/");
 }
 
 /** BFS path from (sx, sy) to (tx, ty) over the walkable grid (4-neighbour),
@@ -352,7 +366,7 @@ async function main(): Promise<void> {
     const cur = map.zones.find((z) => z.exitUrl !== undefined && zoneContains(z, x, y));
     if (cur !== undefined && cur !== exitArmed) {
       exitArmed = cur;
-      const target = exitUrlToMapId(cur.exitUrl!);
+      const target = exitUrlToMapId(cur.exitUrl!, opts.room);
       conn.sendLeave();
       window.setTimeout(() => {
         window.location.href =
