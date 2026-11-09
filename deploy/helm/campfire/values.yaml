@@ -2,20 +2,21 @@
 
 # The Docker image to run. `tag` empty = the chart's appVersion.
 image:
-  repository: registry.heimdal.vild.zone/campfire
+  repository: github.com/gfelbing/campfire
   tag: "latest"
-  pullPolicy: Always
+  pullPolicy: IfNotPresent
 
 # The public DNS name of the deployment. Used for:
 #  - the cert-manager Certificate's dnsName
 #  - the TCP ingress route's SNI match (TLS passes through to the pod)
-domain: campfire.heimdal.vild.zone
+domain: example.com
 
 # Public address advertised to peers for TURN relayed allocations
 # (--external, an IP:port — the server requires a literal IP).
 # Should be the public IP of the Traefik/LB entrypoint. Empty = omit the
 # flag (fine when clients can reach the pod network directly, e.g. tests).
-external: "192.168.178.200:443"
+# external: "1.2.3.4:443"
+external: ""
 
 namespace:
   # The chart creates and uses its own namespace by default. Set
