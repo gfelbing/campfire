@@ -22,6 +22,9 @@ spec:
       labels:
         {{- include "campfire.selectorLabels" . | nindent 8 }}
     spec:
+      {{- if not (or (eq .Values.maps.kind "persistentVolume") (eq .Values.maps.kind "hostPath")) }}
+      {{- fail (printf "maps.kind must be persistentVolume or hostPath, got %q" .Values.maps.kind) }}
+      {{- end }}
       containers:
         - name: campfire
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
@@ -37,6 +40,8 @@ spec:
             - --external
             - {{ .Values.external | quote }}
             {{- end }}
+            - --maps-dir
+            - {{ .Values.maps.mountPath | quote }}
             {{- range .Values.extraArgs }}
             - {{ . | quote }}
             {{- end }}
@@ -64,7 +69,19 @@ spec:
             - name: certs
               mountPath: /certs
               readOnly: true
+            - name: maps
+              mountPath: {{ .Values.maps.mountPath | quote }}
       volumes:
         - name: certs
           secret:
             secretName: {{ .Values.certificate.secretName }}
+        {{- if eq .Values.maps.kind "hostPath" }}
+        - name: maps
+          hostPath:
+            path: {{ .Values.maps.hostPath.path | quote }}
+            type: {{ .Values.maps.hostPath.type | default "Directory" }}
+        {{- else }}
+        - name: maps
+          persistentVolumeClaim:
+            claimName: {{ include "campfire.fullname" . }}-maps
+        {{- end }}

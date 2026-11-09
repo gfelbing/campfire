@@ -1,0 +1,24 @@
+{{/*
+The maps directory. Default backing store: a PersistentVolumeClaim (the
+server scans the directory recursively and serves tileset images from it,
+so the content outlives the pod). `maps.kind: hostPath` swaps it for a
+node-local directory instead — the PVC is not created in that case.
+*/}}
+{{- if ne .Values.maps.kind "hostPath" }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "campfire.fullname" . }}-maps
+  namespace: {{ include "campfire.namespace" . }}
+  labels:
+    {{- include "campfire.labels" . | nindent 4 }}
+spec:
+  accessModes:
+    {{- toYaml .Values.maps.accessModes | nindent 4 }}
+  {{- if .Values.maps.storageClass }}
+  storageClassName: {{ .Values.maps.storageClass | quote }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.maps.size }}
+{{- end }}

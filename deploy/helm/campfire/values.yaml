@@ -27,6 +27,27 @@ namespace:
 
 replicaCount: 1  # single instance by design (in-memory state + stateful TURN)
 
+maps:
+  # The server scans the maps directory (--maps-dir) recursively at startup;
+  # every Tiled *.json/*.tmj file becomes a map, tilesets are served from
+  # files next to the map JSON. Two backings:
+  #
+  #  1. persistentVolume (default) — the chart creates a PVC and mounts it.
+  #  2. hostPath — a node-local directory (put map folders there yourself).
+  #     The PVC is not created in that case; the pod must land on the node
+  #     that has the directory (add nodeSelector via podLabels or similar).
+  kind: persistentVolume  # or "hostPath"
+  mountPath: /maps
+  # persistentVolume settings:
+  size: 1Gi
+  accessModes:
+  - ReadWriteOnce
+  storageClass: ""        # empty = the cluster's default StorageClass
+  # hostPath settings:
+  hostPath:
+    path: /srv/campfire/maps
+    type: Directory       # "" = unspecified; also DirectoryOrCreate
+
 certificate:
   # Two ways to get TLS material into the pod (the secret is mounted
   # read-only at /certs AND the server serves TLS itself — Traefik must not

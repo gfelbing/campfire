@@ -50,6 +50,21 @@ helm install campfire deploy/helm/campfire \
   --set certificate.issuerRef.name=letsencrypt-prod
 ```
 
+## Maps storage
+
+The server scans its maps directory (`--maps-dir`) recursively at startup;
+every Tiled `*.json`/`*.tmj` becomes a map and tileset images are served
+from files next to the map JSON. The chart mounts the directory and always
+passes `--maps-dir` explicitly:
+
+- Default `maps.kind: persistentVolume` — the chart creates a PVC
+  (`maps.size`, `maps.accessModes`, `maps.storageClass`) and mounts it at
+  `maps.mountPath` (default `/maps`). Put your map folders there
+  (`kubectl cp` / rsync / a git-sync sidecar).
+- `maps.kind: hostPath` — mounts a node-local directory
+  (`maps.hostPath.path`, default `/srv/campfire/maps`) instead; the PVC is
+  not created. Pin the pod to the node that has the directory.
+
 ## Key values
 
 ```yaml
@@ -74,6 +89,7 @@ traefik:
 service: { type: ClusterIP }
 resources: {}
 extraArgs: []                      # extra campfire CLI args, e.g. [--log-json]
+maps: { kind: persistentVolume }   # or hostPath: { path: /srv/campfire/maps }
 ```
 
 Note: the Traefik CRDs (routes) live in the chart's namespace and reference
