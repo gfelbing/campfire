@@ -110,7 +110,6 @@ pub fn start(
                     // the reload must keep it, or the browser loses its query
                     // parameters (the ?alt=1 marker would otherwise replace them).
                     let target = line
-                        .as_deref()
                         .and_then(|l| std::str::from_utf8(l).ok())
                         .and_then(|l| {
                             l.split(' ')

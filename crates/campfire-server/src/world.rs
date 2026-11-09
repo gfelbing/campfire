@@ -100,7 +100,10 @@ struct Room {
 
 /// The index of the (single) call containing `id`, if any.
 fn call_containing(entry: &Room, id: &str) -> Option<usize> {
-    entry.calls.iter().position(|c| c.participants.contains_key(id))
+    entry
+        .calls
+        .iter()
+        .position(|c| c.participants.contains_key(id))
 }
 
 /// Why a join was refused.
@@ -138,6 +141,7 @@ pub(crate) fn test_maps() -> campfire_maps::Maps {
 /// a `jitsiRoom` meeting zone at tiles 2..5, 2..5, a `silentZone` at
 /// tiles 0..2, 0..2, and a `start` area at tiles 1..3, 1..3. The whole
 /// 8x8 grid is walkable.
+#[cfg(test)]
 pub(crate) fn zone_maps() -> campfire_maps::Maps {
     let raw = serde_json::json!({
         "type": "map",
@@ -780,9 +784,8 @@ pub fn start_ticking_with(
 /// rejected here.
 fn call_target<'a>(entry: &'a Room, from: &str, to: &str) -> Result<&'a Member, ErrorCode> {
     // Both endpoints must sit in the same call (a user is in at most one).
-    let same = call_containing(entry, from).is_some_and(|i| {
-        entry.calls[i].participants.contains_key(to)
-    });
+    let same =
+        call_containing(entry, from).is_some_and(|i| entry.calls[i].participants.contains_key(to));
     if !same {
         return Err(ErrorCode::CallNotAllowed);
     }
@@ -838,11 +841,7 @@ fn update_bubbles(
     // Silent zones (README roadmap "Map enhancements"): silent-zone
     // occupants never join a proximity bubble (zone calls are separate).
     let in_silent = |x: f32, y: f32| -> bool {
-        map.is_some_and(|map| {
-            map.zones
-                .iter()
-                .any(|z| z.silent && z.contains(x, y))
-        })
+        map.is_some_and(|map| map.zones.iter().any(|z| z.silent && z.contains(x, y)))
     };
     // A call's zone rectangle: a zone call is bounded by its zone rect (a
     // zone call whose zone has emptied out lets everyone drop, ending the
@@ -947,7 +946,13 @@ fn update_bubbles(
                 zone: Some(jitsi.clone()),
                 ..call
             };
-            broadcast_call_start(room, entry, call.zone.clone(), call.participant_list(), Some(&inside[0]));
+            broadcast_call_start(
+                room,
+                entry,
+                call.zone.clone(),
+                call.participant_list(),
+                Some(&inside[0]),
+            );
             entry.calls.push(call);
             return;
         }
@@ -982,7 +987,13 @@ fn update_bubbles(
                         )
                     };
                     let offerer = [a.0.clone(), b.0.clone()].into_iter().min().unwrap();
-                    broadcast_call_start(room, entry, call.zone.clone(), call.participant_list(), Some(&offerer));
+                    broadcast_call_start(
+                        room,
+                        entry,
+                        call.zone.clone(),
+                        call.participant_list(),
+                        Some(&offerer),
+                    );
                     entry.calls.push(call);
                     created = true;
                     break 'pair;
@@ -1041,7 +1052,13 @@ fn update_bubbles(
                 );
             }
             let c = &entry.calls[ci];
-            broadcast_call_start(room, entry, c.zone.clone(), c.participant_list(), Some(&joiner));
+            broadcast_call_start(
+                room,
+                entry,
+                c.zone.clone(),
+                c.participant_list(),
+                Some(&joiner),
+            );
             break 'calls;
         }
     }
@@ -1210,10 +1227,7 @@ mod tests {
     /// Decode movement batches on `drx` until the entry for `id` arrives;
     /// return its silent flag — the `sz` flag rides the movement batch (README
     /// roadmap "Map enhancements").
-    fn first_movement(
-        drx: &mut tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>,
-        id: &str,
-    ) -> bool {
+    fn first_movement(drx: &mut tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>, id: &str) -> bool {
         use campfire_protocol::from_line;
         loop {
             let batch: MovementBatch =
@@ -1723,7 +1737,8 @@ mod tests {
 
     /// Teleport a user (unit tests share the module, so private fields are
     /// reachable): the speed gate would reject a far jump in one entry.
-    fn place(world: &World, room: &str, id: &str, x: f32, y: f32) {        let mut rooms = world.rooms.lock().unwrap();
+    fn place(world: &World, room: &str, id: &str, x: f32, y: f32) {
+        let mut rooms = world.rooms.lock().unwrap();
         let m = rooms.get_mut(room).unwrap().users.get_mut(id).unwrap();
         m.pos = (x, y);
         m.dirty = true;
@@ -1749,9 +1764,7 @@ mod tests {
         for _ in 0..20 {
             match u.rx.try_recv().expect("call_start") {
                 ServerMsg::CallStart {
-                    participants,
-                    zone,
-                    ..
+                    participants, zone, ..
                 } => return (participants, zone),
                 _ => continue,
             }
@@ -2053,7 +2066,15 @@ mod tests {
         let joined = world
             .join(room, name, None, token, session, tx, dtx)
             .unwrap();
-        (TestUser { id: joined.you, rx, drx }, joined.token, session)
+        (
+            TestUser {
+                id: joined.you,
+                rx,
+                drx,
+            },
+            joined.token,
+            session,
+        )
     }
 
     #[test]

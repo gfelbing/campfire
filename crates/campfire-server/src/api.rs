@@ -180,13 +180,13 @@ async fn map_or_asset(
     UrlPath(rest): UrlPath<String>,
 ) -> Result<impl IntoResponse, StatusCode> {
     // A map id (no extension, resolvable) serves the Tiled JSON.
-    if !rest.contains('.') {
-        if let Some(m) = state.world.maps().get(&rest) {
-            return Ok((
-                [(header::CONTENT_TYPE, "application/json")],
-                Bytes::from(m.raw.clone()),
-            ));
-        }
+    if !rest.contains('.')
+        && let Some(m) = state.world.maps().get(&rest)
+    {
+        return Ok((
+            [(header::CONTENT_TYPE, "application/json")],
+            Bytes::from(m.raw.clone()),
+        ));
     }
     // Otherwise the remainder after the map id is a file of the map's
     // directory: longest matching id first (ids may contain slashes).

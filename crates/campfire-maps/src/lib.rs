@@ -127,7 +127,10 @@ struct RawProp {
 
 impl RawObject {
     fn prop(&self, name: &str) -> Option<&serde_json::Value> {
-        self.properties.iter().find(|p| p.name == name).map(|p| &p.value)
+        self.properties
+            .iter()
+            .find(|p| p.name == name)
+            .map(|p| &p.value)
     }
 
     fn prop_str(&self, name: &str) -> Option<String> {
@@ -227,8 +230,7 @@ impl MapData {
 /// Walkability of a float point (tile floor), for the start-area snap.
 fn walkable_at(width: u32, height: u32, walkable: &[bool], x: f32, y: f32) -> bool {
     let (x, y) = (x as u32, y as u32);
-    (x < width && y < height)
-        && walkable[(y as usize) * width as usize + x as usize]
+    (x < width && y < height) && walkable[(y as usize) * width as usize + x as usize]
 }
 
 /// Rectangular zones from object layers (README roadmap "Map
@@ -261,7 +263,8 @@ fn zones(raw: &RawMap, _width: u32, _height: u32) -> Vec<Zone> {
 
 /// Center tile if walkable, otherwise the nearest walkable tile in an
 /// expanding ring around the center.
-fn spawn_point(width: u32, height: u32, walkable: &[bool]) -> Result<(f32, f32), MapError> {    let cx = width / 2;
+fn spawn_point(width: u32, height: u32, walkable: &[bool]) -> Result<(f32, f32), MapError> {
+    let cx = width / 2;
     let cy = height / 2;
     let at = |x: u32, y: u32| walkable[(y as usize) * width as usize + x as usize];
     if at(cx, cy) {
@@ -317,10 +320,10 @@ pub fn map_id(dir: &Path, file: &Path) -> Option<String> {
         .collect();
     let stem = rel.file_stem()?.to_string_lossy().into_owned();
     segments.pop();
-    if let Some(parent) = segments.last() {
-        if *parent == stem {
-            segments.pop();
-        }
+    if let Some(parent) = segments.last()
+        && *parent == stem
+    {
+        segments.pop();
     }
     segments.push(stem);
     let id = segments.join("/");

@@ -262,7 +262,7 @@ async fn bubble_forms_and_relays_signaling() {
         room,
         participants,
         you_offer: a_offers,
-        .. 
+        ..
     } = a.recv().await
     else {
         panic!("expected call_start for alice");
