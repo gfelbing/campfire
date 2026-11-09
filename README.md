@@ -185,6 +185,18 @@ TLS 1.3 only, `h3`-only ALPN on UDP. Per-session limits: movement 30/s, chat 1/s
 
 ---
 
+## License
+
+Campfire is licensed under the **GNU Affero General Public License v3** with the
+**Commons Clause** license condition — see [`LICENSE`](LICENSE). In short: you
+may use, study, modify, and redistribute the code under AGPL-3.0 terms, but you
+may not sell a product whose value derives entirely or substantially from the
+software itself. Note that Commons Clause software is not open source by the
+OSI definition.
+
+The vendored `maps/interiors/example/` ships with its own license files and is
+not covered by this license.
+
 ## Roadmap
 
 ### 1. UI redesign

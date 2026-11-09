@@ -4,7 +4,7 @@ description = "Campfire map model: Tiled JSON parsing + walkability grid + bound
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-license.workspace = true
+license-file.workspace = true
 repository.workspace = true
 
 [dependencies]

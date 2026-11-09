@@ -4,7 +4,7 @@ description = "Campfire: a virtual office. One binary, one port (443 UDP+TCP), H
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-license.workspace = true
+license-file.workspace = true
 repository.workspace = true
 
 [[bin]]

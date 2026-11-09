@@ -4,7 +4,7 @@ description = "Campfire load harness (README §11 Phase 9): walking users + call
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-license.workspace = true
+license-file.workspace = true
 
 [[bin]]
 name = "loadtest"
