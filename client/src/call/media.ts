@@ -69,9 +69,9 @@ export async function iceServers(): Promise<RTCIceServer[]> {
     cached = { servers, expires: cred.expires };
     return servers;
   } catch (err) {
-    // The relay is a fallback tier: if credential minting fails, STUN-only
-    // still works on open networks.
-    console.warn("TURN credential unavailable, using STUN only:", err);
+    // TURN is mandatory (calls are relay-only, never P2P): without the
+    // credential the peer connection has no relay server and cannot connect.
+    console.warn("TURN credential unavailable; the call cannot connect (relay-only):", err);
     return [stun];
   }
 }

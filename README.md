@@ -29,9 +29,9 @@ Other tasks: `just check` (fmt + clippy + tests), `just build` (release binary w
 | Written in Rust | Server is 100% Rust |
 | Single service | One binary, in-memory state, no sidecars, no database. The web client is embedded into the binary at compile time; `--static-dir` overrides it at runtime for the dev loop. STUN and TURN are embedded in the same process |
 | One port number | Exactly two sockets: UDP (QUIC/HTTP/3 + WebTransport + STUN, demuxed) and TCP (a TLS front that serves the `Alt-Svc` bootstrap page and splices TURN media). Everything else — page, assets, API, realtime, call signaling — is HTTP/3 on UDP |
-| Media is P2P | WebRTC flows browser-to-browser; the server relays only when P2P fails (TURN) and can never decrypt it |
+| Media is relayed | All WebRTC media transits the embedded TURN relay (never direct P2P); it is DTLS-SRTP end-to-end, so the server can never decrypt it |
 
-Consequences of the HTTP/3-only data path: no WebSockets (WebTransport instead), TLS everywhere, `curl --http3` for debugging, and the honest limitation that a network blocking all UDP cannot reach the app at all — the TCP port rescues *media* on networks that allow 443/TCP but not peer-to-peer UDP.
+Consequences of the HTTP/3-only data path: no WebSockets (WebTransport instead), TLS everywhere, `curl --http3` for debugging, and the honest limitation that a network blocking all UDP cannot reach the app at all — the TCP port carries *all* call media through the TURN relay, so media works on any network that allows 443/TCP (no UDP required).
 
 ## 3. Architecture
 
@@ -135,7 +135,7 @@ In deployment, mount a directory of map folders with `--maps-dir /mnt/maps`; for
 
 ## 7. Voice & video calls
 
-P2P mesh — one `RTCPeerConnection` per pair of participants, no SFU. The server relays signaling only; media is DTLS-SRTP end-to-end (even our TURN relay cannot decrypt it). NAT traversal: STUN co-located on the QUIC socket; TURN (`turns:` over 443/TCP, embedded turn-rs) as the last ICE tier.
+Relayed mesh — one `RTCPeerConnection` per pair of participants, no SFU. The server relays signaling, and **all media transits the embedded TURN relay** (`turns:` over 443/TCP, turn-rs): each connection is configured `iceTransportPolicy: "relay"`, so ICE uses only relay candidates and calls never go direct P2P. Media stays DTLS-SRTP end-to-end — even the relay cannot decrypt it. STUN is co-located on the QUIC socket but unused under relay-only.
 
 **Calls**, computed by the server in the 50 ms tick — a room carries **at most one proximity bubble plus one call per occupied jitsi zone**; a user is in at most one call at a time:
 

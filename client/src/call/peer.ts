@@ -48,7 +48,12 @@ export class RtcPeer {
      *  its offer and ignores the incoming one (its answer is in flight). */
     private polite = false,
   ) {
-    this.pc = new RTCPeerConnection({ iceServers: servers });
+    // All media is forced through the TURN relay: iceTransportPolicy "relay"
+    // makes the ICE engine gather and use only relay candidates, so calls
+    // never go direct P2P (no host / server-reflexive candidates). The
+    // trade-off: if the relay is unreachable the call cannot connect —
+    // there is no P2P fallback by design.
+    this.pc = new RTCPeerConnection({ iceServers: servers, iceTransportPolicy: "relay" });
     for (const track of localStream.getTracks()) this.pc.addTrack(track, localStream);
 
     this.pc.onicecandidate = (e) => {
