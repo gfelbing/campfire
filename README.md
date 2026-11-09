@@ -1,6 +1,6 @@
 # Campfire
 
-A virtual-office-style virtual office — avatars walking around 2D tile maps **talking and video-calling in real time** — with the entire backend in **Rust**, deployed as **one binary** listening on **one port number** (UDP for QUIC/HTTP/3 + STUN, TCP for the Alt-Svc bootstrap and the TURN media relay).
+A virtual office — avatars walking around 2D tile maps **talking and video-calling in real time** — with the entire backend in **Rust**, deployed as **one binary** listening on **one port number** (UDP for QUIC/HTTP/3 + STUN, TCP for the Alt-Svc bootstrap and the TURN media relay).
 
 > **Status: working MVP.** Walking avatars on tileset-rendered maps, proximity-video bubbles, chat, reconnect across reloads and the browser back/forward cache, metrics, a QUIC load harness and a headless E2E suite. See the [roadmap](#roadmap) for what is next.
 
@@ -121,7 +121,7 @@ Maps live on disk, mounted at runtime — never bundled into the binary:
 - `--maps-dir` (default `maps/`) is scanned **recursively**; every `*.json`/`*.tmj` file that parses as a Tiled orthogonal map becomes a map. Files that fail to parse are skipped, so a bad map cannot take the server down.
 - **Map id = the file's path under `maps/`, minus the extension, minus a final segment that repeats its parent** (`office/office.json` → `office`, `interiors/conference.tmj` → `interiors/conference`). The id is the room id and the URL path segment.
 - Tileset images are served next to the map JSON, so Tiled's relative `image` paths resolve as-is.
-- The parser accepts the `collision` *and* `collisions` layer names (the latter is the virtual-office/Tiled convention) and the client flattens Tiled **group layers** in draw order.
+- The parser accepts the `collision` *and* `collisions` layer names (the latter is the Tiled convention) and the client flattens Tiled **group layers** in draw order.
 
 In deployment, mount a directory of map folders with `--maps-dir /mnt/maps`; for development the repo's `maps/` is used. `maps/interiors/example/` is vendored with its own license files.
 

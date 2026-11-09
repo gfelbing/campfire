@@ -1,6 +1,6 @@
 [package]
 name = "campfire-server"
-description = "Campfire: virtual-office-style virtual office. One binary, one port (443 UDP+TCP), HTTP/3 + WebTransport + STUN/TURN."
+description = "Campfire: a virtual office. One binary, one port (443 UDP+TCP), HTTP/3 + WebTransport + STUN/TURN."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

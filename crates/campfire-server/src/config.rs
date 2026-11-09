@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use clap::Parser;
 
-/// Campfire: virtual-office-style virtual office.
+/// Campfire: virtual office.
 /// One binary, one port (UDP), HTTP/3 + WebTransport.
 #[derive(Parser, Debug, Clone)]
 #[command(version, about)]
