@@ -492,14 +492,31 @@ JSON, and generates `docs/moq-spike-results.md`.
 - **Tab refresh.** The sessionStorage token re-join restores the
   identity; `hello` carries `call` plus a fresh ticket, `rejoinCall`
   re-acquires the media (no new prompt — the permission persisted) and
-  re-establishes the session. The peer's downlink needs no help:
+  re-establishes the session. A re-join while a media prompt is still
+  open (phase "joining") only updates the roster — tickets are multi-use
+  for 60 s.
+- **Known issue: the peer's downlink after a tab refresh.** The design
+  assumption is that the peer's downlink needs no help:
   `Watch.Broadcast` resolves its path through
   `request(path, {announced: true})`, whose active consumer follows the
   table, so when A's old session retracts the route and the re-join
-  re-announces it, the subscription comes back on its own (verified in
-  the e2e's reload step). A re-join while a media prompt is still open
-  (phase "joining") only updates the roster — tickets are multi-use
-  for 60 s.
+  re-announces it, B's subscription should come back on its own. It
+  does not. `moq.js` step 10 fails consistently: after A reloads, A's
+  *own* downlink (A receives B) recovers, but B never re-receives A's
+  re-announced broadcast (45 s timeout, `last: undefined`). Ruled out:
+  machine load (fails on a quiet machine), accumulated server state
+  (fresh server), and regressions (a clean Phase 3 build fails the
+  identical step). Server log for a failing run: A's re-joined session
+  is admitted to the SFU, but no re-announce activity follows and B
+  stays dark until both sessions tear down. Break candidates, in order:
+  (a) A's new session does not re-announce its hang on the call origin,
+  (b) the SFU retracts the hang route on session end and does not
+  re-route it when the hang is re-announced, (c) B's
+  `Watch.Broadcast {announced: true}` consumer does not re-resolve
+  after the route retraction. Diagnose with the
+  `__campfire_moq` / `__campfire_moq_down` hooks and the step 6 spike
+  subscriber command (probe A's broadcast out-of-band right after the
+  reload).
 - **E2E.** `tools/e2e/moq.js` is now the full Phase 2+3 suite (11
   steps): uplinks, then downlinks both ways via the
   `window.__campfire_moq_down` hook (status / frames / screenFrames /
@@ -512,7 +529,9 @@ JSON, and generates `docs/moq-spike-results.md`.
   playback delay and jitter buffer (≤ 1 s); the glass-to-glass
   acceptance figure stays the spike's. Silent zone and the 9-person
   auto voice-only are not automatable here (they need map zones and a
-  crowd) and ride the manual §7 checklist.
+  crowd) and ride the manual §7 checklist. Step 10 (the peer's
+  downlink after the reload) is the documented known issue above and
+  fails consistently; steps 1–9 and 11 must pass.
 - **WebRTC gone client-side.** `client/src/call/peer.ts` is deleted;
   the manager is roster-driven (one downlink per other participant,
   synced from the server's `call_start`/`call_leave`), and the
