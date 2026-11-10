@@ -120,6 +120,13 @@ loadtest *args:
 e2e *args:
 	node tools/e2e/e2e.js --browser "$(command -v brave || command -v chromium || echo chromium)" "$@"
 
+# MoQ uplink E2E (docs/moq-sfu.md §9 Phase 2): two real browser clients
+# publish their media to the SFU; the spike subscribes. Needs a running
+# server, the release spike build, and one-time `npm i` in tools/e2e.
+moq-e2e *args:
+	cargo build --release -p moq-spike
+	node tools/e2e/moq.js --browser "$(command -v brave || command -v chromium || echo chromium)" "$@"
+
 # MoQ SFU spike, Tier 1 (docs/moq-sfu.md Phase 0): build the spike, run the
 # fan-out / fast-start / loss matrix (fast, no soak), and generate
 # docs/moq-spike-results.md. Loss runs in a private `unshare -rn` netns, so

@@ -56,6 +56,9 @@ export type ServerMsg =
        *  authoritative catch-up so a reconnected client knows whether the
        *  call survived the drop. */
       call: UserBrief[];
+      /** The user's media ticket when they are in an active call
+       *  (reconnect catch-up, docs/moq-sfu.md §7). Present only then. */
+      ticket?: string;
     }
   | { t: "joined"; user: UserBrief }
   | { t: "left"; id: string }
@@ -69,6 +72,9 @@ export type ServerMsg =
       /** Zone call: the `jitsiRoom` name of the bounding zone (README roadmap
        *  "Map enhancements"); only present for zone calls. */
       zone?: string;
+      /** The recipient's media ticket when they are a participant of this
+       *  call (docs/moq-sfu.md §7); bystanders get the roster but no ticket. */
+      ticket?: string;
     }
   | { t: "call_leave"; id: string; zone?: string }
   | { t: "call_end"; reason: string; zone?: string }

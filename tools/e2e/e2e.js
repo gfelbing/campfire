@@ -10,7 +10,8 @@
  *      engine pulls them into a call — the WebRTC half runs on Chromium's
  *      fake device, and the assertion is `connectionState === "connected"`
  *      (README §6.3: the joiner offers, existing members answer);
- *   5. B walks away — the bubble tears down (walk-away leave).
+ *   5. B walks away and leaves the room — the bubble tears down
+ *      (walk-away leave).
  *
  * Usage: node tools/e2e/e2e.js [--url https://localhost:8443] [--browser /path]
  */
@@ -112,12 +113,19 @@ const badgeFor = (page, name) =>
     }, "B sees A in presence");
     // The first load joins over the TCP bootstrap, then the client reloads
     // over HTTP/3 (`?alt=1`); the stale session sits in the server's
-    // reconnect window for a while. Wait until our own row has settled
-    // (exactly one entry with our name on our own page).
+    // reconnect window for a while, as do any users of a run that ended
+    // seconds ago (their avatars would share our spawn tile and join our
+    // bubble; a headless close can hold a QUIC connection open for up to
+    // ~90 s before the server notices). Wait until each page sees exactly
+    // A + B.
     await waitUntil(async () => {
       const names = await presenceNames(pageA);
-      return names.filter((n) => n?.includes(NAME_A)).length === 1;
-    }, "settled own roster entry", 40_000);
+      return names.length === 2 && names.filter((n) => n?.includes(NAME_A)).length === 1;
+    }, "A sees exactly A + B", 90_000);
+    await waitUntil(async () => {
+      const names = await presenceNames(pageB);
+      return names.length === 2 && names.filter((n) => n?.includes(NAME_B)).length === 1;
+    }, "B sees exactly A + B", 90_000);
     console.log("   presence ok");
 
     console.log("3. chat broadcast A → B…");
@@ -156,10 +164,16 @@ const badgeFor = (page, name) =>
     await pageB.keyboard.down("ArrowRight");
     await sleep(4_000);
     await pageB.keyboard.up("ArrowRight");
+    // B then leaves the room entirely: with B gone no new bubble can
+    // re-form, so the badge stays gone (a B that rejoined within bubble
+    // radius would legitimately re-enter the call). It also covers a lost
+    // walk-away (datagrams are unreliable): B's seat then drains with its
+    // 10 s reconnect window and the call ends at the purge.
+    await pageB.close();
     await waitUntil(
       async () => !(await badgeFor(pageA, NAME_B)),
       "B's 🎧 badge gone from A after walk-away",
-      30_000,
+      40_000,
     );
     console.log("   bubble torn down after walk-away");
 

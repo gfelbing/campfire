@@ -106,6 +106,12 @@ impl TicketRegistry {
     }
 }
 
+impl Default for TicketRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Drop expired entries (called on mint, so the map stays bounded even
 /// when nobody presents tickets).
 fn sweep_expired(map: &mut HashMap<String, Entry>, ttl: Duration) {

@@ -178,7 +178,12 @@ export class RtcPeer {
   /** Stop sending the screen (the camera keeps flowing). */
   removeScreenTrack(): void {
     const sender = this.pc.getSenders().find(
-      (s) => s.track?.kind === "video" && !this.localStream.getVideoTracks().includes(s.track),
+      (s) =>
+        s.track &&
+        s.track.kind === "video" &&
+        !this.localStream
+          .getVideoTracks()
+          .includes(s.track as MediaStreamVideoTrack),
     );
     if (!sender) return;
     this.pc.removeTrack(sender);

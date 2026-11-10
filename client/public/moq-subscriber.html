@@ -1,0 +1,85 @@
+<!doctype html>
+<!--
+  MoQ subscriber (dev/ops tool, docs/moq-sfu.md §9 Phase 2): render a call
+  broadcast in the browser — the decode proof the Rust spike cannot give
+  (Phase 3 G3 risk: AudioDecoder → WebAudio).
+
+  Served from the SFU's own origin (WebTransport is same-origin). Open it
+  with a media ticket and a broadcast name:
+
+    /moq-subscriber.html?ticket=<64 hex>&name=call/<room>/<user-id>.hang
+
+  `@moq/watch` loads from esm.sh at runtime (no build step); a machine
+  without internet will not render.
+-->
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>moq subscriber</title>
+    <style>
+      body {
+        background: #111;
+        color: #ddd;
+        font-family: system-ui, sans-serif;
+        margin: 1rem;
+      }
+      canvas {
+        width: 640px;
+        max-width: 100%;
+        background: #000;
+        border: 1px solid #444;
+      }
+      #status {
+        margin: 0.5rem 0;
+        min-height: 1.4em;
+        white-space: pre-wrap;
+      }
+    </style>
+  </head>
+  <body>
+    <h3>moq subscriber</h3>
+    <pre id="status">loading…</pre>
+    <moq-watch id="watch">
+      <canvas></canvas>
+    </moq-watch>
+    <script type="module">
+      const status = document.getElementById("status");
+      const params = new URLSearchParams(location.search);
+      const ticket = params.get("ticket");
+      const name = params.get("name");
+      if (!ticket || !name) {
+        status.textContent =
+          "usage: /moq-subscriber.html?ticket=…&name=call/<room>/<user-id>.hang";
+        throw new Error("missing ticket or name");
+      }
+      // The page is served by the SFU, so the session is same-origin.
+      const url = location.origin + "/moq?ticket=" + encodeURIComponent(ticket);
+      status.textContent = `loading @moq/watch…`;
+
+      // esm.sh serves the package (and its bare-import dependencies) as
+      // browser-ready ESM; the pinned version keeps the API stable.
+      await import("https://esm.sh/@moq/watch@0.6.6/element");
+      const watch = document.getElementById("watch");
+      watch.setAttribute("url", url);
+      watch.setAttribute("name", name);
+
+      // The element has no load/error events; poll its internals for a
+      // status line: connection state, catalog, decoded video frames.
+      setInterval(() => {
+        try {
+          const lines = [
+            `session:  ${watch.connection.status.peek?.() ?? watch.connection.status}`,
+            `catalog:  ${watch.catalog ? "yes" : "no"}`,
+            `video:    ${watch.video?.out.stats.peek()?.frameCount ?? 0} frames decoded`,
+            `audio:    ${watch.audio?.out.stats.peek() ? "pumping" : "waiting"}`,
+          ];
+          const err = watch.connection.error.peek?.();
+          if (err) lines.push(`error:    ${err.message ?? err}`);
+          status.textContent = lines.join("\n");
+        } catch (e) {
+          status.textContent = `status: ${e}`;
+        }
+      }, 500);
+    </script>
+  </body>
+</html>

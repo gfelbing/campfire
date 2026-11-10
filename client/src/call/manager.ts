@@ -14,6 +14,7 @@
 //! walking close is the user's intent. A user can opt out entirely with
 //! the bubble toggle (`sendBubble`).
 import type { UserBrief } from "../net/types";
+import { MoqUplink } from "./moq";
 import { getLocalMedia, getScreenMedia, iceServers } from "./media";
 import { RtcPeer, type PeerState } from "./peer";
 
@@ -101,11 +102,22 @@ export class CallManager {
   private localStream: MediaStream | null = null;
   /** ICE servers for the current call (fetched with the local media). */
   private servers: RTCIceServer[] | null = null;
+  /** MoQ uplink (docs/moq-sfu.md §9 Phase 2): publishes `localStream` to
+   *  the SFU while in a call. */
+  private moq: MoqUplink | null = null;
+  /** Monotonic guard for in-flight uplink starts (a reset must not let a
+   *  late start attach). */
+  private uplinkSeq = 0;
+  /** Room name (broadcast path `call/<room>/<user-id>.hang`). */
+  private room: string;
 
   constructor(
     private send: CallSignaling,
     private hooks: CallUiHooks,
-  ) {}
+    room: string,
+  ) {
+    this.room = room;
+  }
 
   /** Our own user id (from `hello`). */
   setSelfId(id: string): void {
@@ -211,7 +223,7 @@ export class CallManager {
    *  `youOffer` marks us as the designated offerer: a fresh joiner offers
    *  every existing member; on a join catch-up after a reconnect our old
    *  peer connections are dead, so we re-offer. */
-  onCallStart(participants: UserBrief[], youOffer: boolean): void {
+  onCallStart(participants: UserBrief[], youOffer: boolean, ticket?: string): void {
     const selfIn = participants.some((u) => u.id === this.selfId);
     if (!selfIn) {
       // Bystander: badge only (the avatar layer reads the roster from
@@ -247,7 +259,7 @@ export class CallManager {
         this.reset();
         return;
       }
-      this.enterCall(participants, youOffer);
+      this.enterCall(participants, youOffer, ticket);
     })();
   }
 
@@ -280,7 +292,7 @@ export class CallManager {
    *  from scratch: we act as the fresh joiner and offer every existing
    *  member a direct connection (they answer; their stale peers are
    *  replaced by `onCallOffer`). */
-  async rejoinCall(participants: UserBrief[]): Promise<void> {
+  async rejoinCall(participants: UserBrief[], ticket?: string): Promise<void> {
     if (!this.localStream) {
       // Media was released while we were away (e.g. the tab slept): we
       // cannot rejoin without a fresh mic prompt (explicit join, README
@@ -289,6 +301,9 @@ export class CallManager {
       this.reset();
       return;
     }
+    // The MoQ session died with the dropped connection; the fresh ticket
+    // from `hello` re-admits a new one (docs/moq-sfu.md §9 Phase 2).
+    this.stopUplink();
     for (const p of this.peers.values()) p.close();
     this.peers.clear();
     this.streams.clear();
@@ -305,6 +320,7 @@ export class CallManager {
     this.maybeAutoVoiceOnly();
     this.pushPeers();
     this.hooks.onLog("rejoined the call");
+    this.startUplink(ticket);
   }
 
   /** A relayed offer from a call participant.
@@ -397,7 +413,7 @@ export class CallManager {
   /** We are in the bubble with `participants` (including us): open a peer
    *  to every other member, and (when `offer`) send each of them our
    *  offer (the joiner offers, README §6.3). */
-  private enterCall(participants: UserBrief[], offer: boolean): void {
+  private enterCall(participants: UserBrief[], offer: boolean, ticket?: string): void {
     this.roster = participants;
     const others = participants.filter((u) => u.id !== this.selfId);
     for (const u of others) {
@@ -407,6 +423,40 @@ export class CallManager {
     this.setPhase({ p: "in-call", participants: others });
     this.maybeAutoVoiceOnly();
     this.pushPeers();
+    this.startUplink(ticket);
+  }
+
+  /** (Re)start the MoQ uplink with the call's fresh ticket. No ticket
+   *  (server predates Phase 2) means uplink off — the WebRTC mesh still
+   *  carries the call. */
+  private startUplink(ticket?: string): void {
+    this.stopUplink();
+    if (!ticket) return;
+    if (!this.localStream) return;
+    const seq = ++this.uplinkSeq;
+    const url = `${location.origin}/moq?ticket=${encodeURIComponent(ticket)}`;
+    const name = `call/${this.room}/${this.selfId}.hang`;
+    void MoqUplink.start({
+      url,
+      name,
+      stream: this.localStream,
+      onLog: (t) => this.hooks.onLog(t),
+    })
+      .then((u) => {
+        // A reset raced the async start: drop the orphaned session.
+        if (seq !== this.uplinkSeq) u.stop();
+        else this.moq = u;
+      })
+      .catch((err) => {
+        this.hooks.onLog(String(err));
+      });
+  }
+
+  /** Stop the MoQ uplink (idempotent). */
+  private stopUplink(): void {
+    this.uplinkSeq++;
+    this.moq?.stop();
+    this.moq = null;
   }
 
   /** Open (or reuse) the peer to `user`; tracks are added once per peer. */
@@ -506,6 +556,7 @@ export class CallManager {
   /** Tear everything down with zero leftovers (README §11 Phase 6: "no
    *  leaked peer connections" — every peer is closed, every track stopped). */
   private reset(reason?: string): void {
+    this.stopUplink();
     for (const p of this.peers.values()) p.close();
     this.peers.clear();
     this.streams.clear();
