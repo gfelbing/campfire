@@ -232,7 +232,16 @@ export class AvatarManager {
     const now = performance.now();
     for (const e of entries) {
       const r = this.remotes.get(e.id);
-      if (!r || e.s <= r.lastSeq) continue;
+      if (!r) continue;
+      if (e.s < r.lastSeq) {
+        // Downward jump: the sender's sequence restarted. A rejoin with
+        // the token starts the movement sequence at 0 again, and the
+        // server resets its own counter to match (world.rs `join`); its
+        // stale guard rejects any older-epoch batch before broadcast, so
+        // a lower sequence can only be a new epoch. Reset the guard.
+        r.lastSeq = 0;
+      }
+      if (e.s <= r.lastSeq) continue;
       r.lastSeq = e.s;
       r.prevX = r.curX;
       r.prevY = r.curY;
@@ -252,6 +261,18 @@ export class AvatarManager {
   /** The avatars' current positions in tile coords (id → [x, y]). */
   positions(): Map<string, [number, number]> {
     return this.lastTiles;
+  }
+
+  /**
+   * Last *received* positions in tile coords (id → [x, y]). Unlike
+   * `positions` (interpolated, filled each frame by `update`), this is
+   * refreshed by `movement` as datagrams arrive — so it stays current on
+   * background tabs whose requestAnimationFrame loop is throttled.
+   */
+  latestPositions(): Map<string, [number, number]> {
+    const out = new Map<string, [number, number]>();
+    for (const [id, r] of this.remotes) out.set(id, [r.curX, r.curY]);
+    return out;
   }
 
   /** Advance all remote avatars to `nowMs`. */

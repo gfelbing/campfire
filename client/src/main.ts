@@ -14,6 +14,13 @@ import { createSidebar } from "./ui/sidebar";
 import { isWalkablePoint, parseMap, tileAt, zoneContains, type MapData, type Zone } from "./world/mapdata";
 import { createWorld, drawBubble, followCamera } from "./world/render";
 
+declare global {
+  interface Window {
+    /** id → { name, x, y } — current tile position of every user (e2e). */
+    __campfire_users?: Record<string, { name: string; x: number; y: number }>;
+  }
+}
+
 /// Local position sends: 10 Hz while moving, 2 Hz while idle (README §5).
 const SEND_EVERY_MS = 66; // 15 Hz — the README §5 per-user cap (was 10 Hz)
 const IDLE_EVERY_MS = 500;
@@ -137,6 +144,33 @@ async function main(): Promise<void> {
   // Room roster (id → brief).
   const roster = new Map<string, UserBrief>();
 
+  // Debug hook (tools/e2e/e2e.js): `window.__campfire_users` = id → { name,
+  // x, y } in tile coords. A plain object — page.evaluate JSON-serializes
+  // Maps to {}. Refreshed from the connection callbacks (below) as well as
+  // the render loop, so it stays current on background tabs whose rAF loop
+  // is throttled; the positions are the last *received* ones (movement()),
+  // not the interpolated ones (update()).
+  const refreshUsersHook = (): void => {
+    const out: Record<string, { name: string; x: number; y: number }> = {};
+    const tiles = world.manager.latestPositions();
+    for (const [id, u] of roster) {
+      let px = 0;
+      let py = 0;
+      if (id === myId) {
+        px = x;
+        py = y;
+      } else {
+        const p = tiles.get(id);
+        if (p) {
+          px = p[0];
+          py = p[1];
+        }
+      }
+      out[id] = { name: u.name, x: px, y: py };
+    }
+    window.__campfire_users = out;
+  };
+
   // Active calls by zone key ("" = the proximity bubble): room-wide call
   // state, powers the avatars' headphone badge. Rooms can carry several
   // concurrent calls (one per occupied jitsi zone); a user is in at most
@@ -175,6 +209,7 @@ async function main(): Promise<void> {
       for (const u of h.users) roster.set(u.id, u);
       world.local.setDir(dir);
       world.manager.hello(h.users, h.you);
+      refreshUsersHook();
       chat?.history(h.chat, h.you);
       status.setUsers(h.users.length);
       manager.setSelfId(h.you);
@@ -200,12 +235,14 @@ async function main(): Promise<void> {
       roster.set(u.id, u);
       status.bumpUsers(1);
       presence.addUser(u);
+      refreshUsersHook();
     },
     onLeft: (id) => {
       world.manager.left(id);
       roster.delete(id);
       status.bumpUsers(-1);
       presence.removeUser(id);
+      refreshUsersHook();
     },
     onChat: (c: ChatMsg) => {
       chat?.add(c, myId);
@@ -214,6 +251,7 @@ async function main(): Promise<void> {
     onTyping: (id, on) => chat?.typing(id, on),
     onMovement: (batch: MovementBatch) => {
       world.manager.movement(batch.m);
+      refreshUsersHook();
       // `sz` (README roadmap "Map enhancements"): a peer inside a silentZone
       // is muted locally.
       for (const e of batch.m) {
@@ -386,6 +424,7 @@ async function main(): Promise<void> {
     world.local.setDir(dir);
     world.local.setMoving(moving, now);
     world.manager.update(now, ts);
+    refreshUsersHook();
     followCamera(world, x, y);
 
     // The call area: every live zone call highlights its rectangle; the
