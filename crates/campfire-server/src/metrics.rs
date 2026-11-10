@@ -49,6 +49,29 @@ struct Counters {
     turn_splice_total: AtomicU64,
     turn_bytes_in: AtomicU64,
     turn_bytes_out: AtomicU64,
+    /// MoQ SFU media sessions (docs/moq-sfu.md §5): currently open,
+    /// all-time admitted, and rejected at CONNECT (missing/bad ticket or
+    /// the ticket's call no longer active with the user in it).
+    moq_sessions: AtomicU64,
+    moq_session_total: AtomicU64,
+    moq_session_rejected: AtomicU64,
+}
+
+/// MoQ SFU gauges that live outside [`Counters`]: the per-call media
+/// origins and the media traffic, read from the SFU's moq-net stats
+/// registry at scrape time (docs/moq-sfu.md §5).
+#[derive(Clone, Copy, Default)]
+pub struct MoqGauges {
+    /// Live per-call media origins.
+    pub origins: u64,
+    /// Media objects published into the SFU.
+    pub objects_in: u64,
+    /// Media bytes published into the SFU.
+    pub bytes_in: u64,
+    /// Media objects served out to subscribers.
+    pub objects_out: u64,
+    /// Media bytes served out to subscribers.
+    pub bytes_out: u64,
 }
 
 impl Metrics {
@@ -116,9 +139,25 @@ impl Metrics {
             .fetch_add(from_turn as u64, Ordering::Relaxed);
     }
 
+    pub fn moq_session_open(&self) {
+        self.inner.moq_sessions.fetch_add(1, Ordering::Relaxed);
+        self.inner.moq_session_total.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn moq_session_close(&self) {
+        self.inner.moq_sessions.fetch_sub(1, Ordering::Relaxed);
+    }
+
+    pub fn moq_session_reject(&self) {
+        self.inner
+            .moq_session_rejected
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
     /// Render the exposition format. `world_gauges` is
-    /// `(users, rooms, calls)` from the world at scrape time.
-    pub fn render(&self, world_gauges: (u64, u64, u64)) -> String {
+    /// `(users, rooms, calls)` from the world at scrape time; `moq` carries
+    /// the SFU's gauges (live origins + media traffic, docs/moq-sfu.md §5).
+    pub fn render(&self, world_gauges: (u64, u64, u64), moq: &MoqGauges) -> String {
         let (users, rooms, calls) = world_gauges;
         let g = |a: &AtomicU64| a.load(Ordering::Relaxed);
         let f = |a: &AtomicU64| a.load(Ordering::Relaxed) as f64;
@@ -255,6 +294,62 @@ impl Metrics {
             "Bytes relayed TURN → client (TLS front view).",
             f(&self.inner.turn_bytes_out),
         );
+        metric(
+            &mut out,
+            "gauge",
+            "campfire_moq_sessions",
+            "MoQ media sessions currently open (docs/moq-sfu.md §5).",
+            g(&self.inner.moq_sessions) as f64,
+        );
+        metric(
+            &mut out,
+            "counter",
+            "campfire_moq_sessions_total",
+            "MoQ media sessions admitted (all-time).",
+            f(&self.inner.moq_session_total),
+        );
+        metric(
+            &mut out,
+            "counter",
+            "campfire_moq_sessions_rejected_total",
+            "MoQ CONNECTs rejected (missing/bad ticket or call no longer active).",
+            f(&self.inner.moq_session_rejected),
+        );
+        metric(
+            &mut out,
+            "gauge",
+            "campfire_moq_origins",
+            "Live per-call media origins.",
+            moq.origins as f64,
+        );
+        metric(
+            &mut out,
+            "counter",
+            "campfire_moq_objects_in_total",
+            "Media objects published into the SFU.",
+            moq.objects_in as f64,
+        );
+        metric(
+            &mut out,
+            "counter",
+            "campfire_moq_bytes_in_total",
+            "Media bytes published into the SFU.",
+            moq.bytes_in as f64,
+        );
+        metric(
+            &mut out,
+            "counter",
+            "campfire_moq_objects_out_total",
+            "Media objects served out to subscribers.",
+            moq.objects_out as f64,
+        );
+        metric(
+            &mut out,
+            "counter",
+            "campfire_moq_bytes_out_total",
+            "Media bytes served out to subscribers.",
+            moq.bytes_out as f64,
+        );
         out
     }
 }
@@ -274,7 +369,16 @@ mod tests {
         m.tick(15_000);
         m.turn_splice_open();
         m.turn_bytes(100, 200);
-        let text = m.render((7, 2, 1));
+        m.moq_session_open();
+        m.moq_session_reject();
+        let moq = MoqGauges {
+            origins: 1,
+            objects_in: 42,
+            bytes_in: 5_000,
+            objects_out: 84,
+            bytes_out: 9_000,
+        };
+        let text = m.render((7, 2, 1), &moq);
         assert!(text.contains("campfire_users 7"));
         assert!(text.contains("campfire_rooms 2"));
         assert!(text.contains("campfire_calls 1"));
@@ -284,9 +388,15 @@ mod tests {
         assert!(text.contains("campfire_tick_seconds_total 0.015"));
         assert!(text.contains("campfire_ticks_total 1"));
         assert!(text.contains("campfire_turn_bytes_in_total 100"));
+        assert!(text.contains("campfire_moq_sessions 1"));
+        assert!(text.contains("campfire_moq_sessions_total 1"));
+        assert!(text.contains("campfire_moq_sessions_rejected_total 1"));
+        assert!(text.contains("campfire_moq_origins 1"));
+        assert!(text.contains("campfire_moq_objects_in_total 42"));
+        assert!(text.contains("campfire_moq_bytes_out_total 9000"));
         assert!(text.contains("# TYPE campfire_connections gauge"));
         // Counters go down too (gauges, not monotonic):
         m.conn_close();
-        assert!(m.render((0, 0, 0)).contains("campfire_connections 0"));
+        assert!(m.render((0, 0, 0), &MoqGauges::default()).contains("campfire_connections 0"));
     }
 }

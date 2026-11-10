@@ -36,6 +36,13 @@ struct Args {
     #[arg(long, default_value = "call/spike/p0")]
     path: String,
 
+    /// Path the subscriber sessions subscribe to (default: `--path`).
+    /// Against the app server (docs/moq-sfu.md Phase 1) point this at the
+    /// `call/<room>/<user-id>` namespace another client publishes, while
+    /// `--path` keeps this client's own publish unique.
+    #[arg(long)]
+    sub_path: Option<String>,
+
     /// PEM file of the CA that signed the server certificate.
     #[arg(long, default_value = "certs/ca.pem")]
     ca: PathBuf,
@@ -192,7 +199,7 @@ async fn main() -> Result<()> {
     for i in 0..args.subscribers {
         let subscriber = connect_session(&endpoint, &wt_url).await?;
         info!(subscriber = i, "connected");
-        let path = path.clone();
+        let path = args.sub_path.clone().unwrap_or_else(|| path.clone());
         handles.push(tokio::spawn(async move {
             // The session handle must live until the task ends: dropping it
             // aborts the session (moq-net treats it as the app giving up).

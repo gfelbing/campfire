@@ -9,6 +9,7 @@ pub mod bootstrap;
 pub mod config;
 pub mod demux;
 pub mod metrics;
+pub mod moq;
 pub mod realtime;
 pub mod stun;
 pub mod tls;
