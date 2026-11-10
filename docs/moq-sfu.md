@@ -436,6 +436,90 @@ JSON, and generates `docs/moq-spike-results.md`.
 - **Accept:** the §7 feature checklist passes on the dev loop; latency
   matches the spike within tolerance.
 
+  Implemented (client only; no server changes):
+- **One session, both directions.** `MoqCall` (client/src/call/moq.ts)
+  opens a single `@moq/net` connection on `/moq?ticket=…` with
+  `publish: origin.consume()` and `consume: origin` on a local
+  `Origin.Producer`, plus `discovery: true`: the session serves our
+  uplink and feeds the peers' announced hangs into the same table the
+  downlinks read. The uplink keeps the Phase 2 renditions (`v` camera,
+  `a` mic) and gains a dynamic `s` (screen) rendition; the keyframe
+  interval is 1 s so a late-joining downlink fast-starts at the next
+  keyframe (T7).
+- **Downlinks are composed, not `Player`'d.** One pipeline per
+  participant: `Watch.Broadcast {announced: true}` → `Watch.Sync
+  {delay: "auto", probe: session.probe}` → `Watch.Video.Source/Decoder/
+  Renderer` for the camera canvas and the screen canvas (both created
+  detached, the theater moves the element into its tile in place —
+  rebuilding it would restart the decode) and `Watch.Audio.Source/
+  Decoder` into our own WebAudio graph: `root → gain → destination`
+  plus `root → MediaStreamDestination`, the stream feeding the tile's
+  level meter. The gain is the silent zone (README §7: meter keeps
+  showing, output is muted); the meter tap is pre-gain on purpose.
+- **Two `@moq/watch` traps.** (1) The sources' `supported` input is
+  optional, and omitted means *no support probing at all*: the
+  availability effect returns early, no rendition is ever selected and
+  the decoders sit at zero frames with no error. Pass
+  `Video/Audio.Decoder.supported` (the WebCodecs probe). (2) When the
+  target rendition name is not in the catalog, a source silently falls
+  back to another rendition — the screen source decodes the camera
+  while the peer does not share. Each video decoder is therefore
+  gated on the track its source actually resolved (`enabled` follows
+  `out.track === "v" | "s"`), so a missing rendition downloads nothing.
+- **Mute / camera.** Both flip `track.enabled` on the local stream (the
+  PiP and the uplink capture follow). The camera additionally gates the
+  uplink's `v` rendition with a live signal, so an off camera is
+  *omitted from the catalog*: subscribers stop receiving frames instead
+  of decoding black ones (the downlink gate above keeps their canvas
+  put). Presence still rides `call_mute`.
+- **AudioContext budget.** The library creates one `AudioContext` per
+  audio decoder (true for `<moq-watch>` as well) and closes it with the
+  pipeline, so a full 9+ bubble holds ~8 contexts plus the theater's
+  meter context. That exceeds Chrome's context limit (6): the surplus
+  starts suspended and is resumed by our wiring (the `resume` is
+  gesture-licensed by the join, `--autoplay-policy` in the e2e). The
+  2-browser dev loop — the acceptance configuration — never reaches it;
+  a production fix would mean one shared context and our own
+  `AudioDecoder`→WebAudio pump, which is a Phase 4+ concern.
+- **Screen share.** `getDisplayMedia`'s video track rides a third
+  uplink rendition `s`, registered when the share starts and
+  unregistered with `Encoder.close()` when it stops (the browser's own
+  "stop sharing" button ends the track and the client listens for
+  `ended`); `call_screen` presence reveals the peer's screen canvas in
+  the theater. Headless e2e works with
+  `--use-fake-ui-for-media-stream`, which also auto-approves the
+  display picker (fake 800×600 monitor).
+- **Tab refresh.** The sessionStorage token re-join restores the
+  identity; `hello` carries `call` plus a fresh ticket, `rejoinCall`
+  re-acquires the media (no new prompt — the permission persisted) and
+  re-establishes the session. The peer's downlink needs no help:
+  `Watch.Broadcast` resolves its path through
+  `request(path, {announced: true})`, whose active consumer follows the
+  table, so when A's old session retracts the route and the re-join
+  re-announces it, the subscription comes back on its own (verified in
+  the e2e's reload step). A re-join while a media prompt is still open
+  (phase "joining") only updates the roster — tickets are multi-use
+  for 60 s.
+- **E2E.** `tools/e2e/moq.js` is now the full Phase 2+3 suite (11
+  steps): uplinks, then downlinks both ways via the
+  `window.__campfire_moq_down` hook (status / frames / screenFrames /
+  audioBytes / delay / jitter, refreshed at 1 Hz), the spike subscriber
+  and `/metrics` from Phase 2, screen share start/render/stop,
+  mute/camera presence badges *and* catalog-driven delivery (the
+  decoded frame count must plateau while the peer's camera is off and
+  resume when it comes back), the tab-refresh reload, and the
+  walk-away teardown. Latency is asserted as a sanity budget on the
+  playback delay and jitter buffer (≤ 1 s); the glass-to-glass
+  acceptance figure stays the spike's. Silent zone and the 9-person
+  auto voice-only are not automatable here (they need map zones and a
+  crowd) and ride the manual §7 checklist.
+- **WebRTC gone client-side.** `client/src/call/peer.ts` is deleted;
+  the manager is roster-driven (one downlink per other participant,
+  synced from the server's `call_start`/`call_leave`), and the
+  `call_offer`/`call_answer`/`call_ice` handlers are no-ops until the
+  Phase 4 protocol removal. `tools/e2e/e2e.js` (presence, chat, bubble
+  state, walk-away) is unchanged and still green.
+
 **Phase 4 — Cutover + removal**
 - Delete WebRTC/TURN/STUN end to end (§8), rewrite README, verify chart,
   clean up tests (bubble state, zones, presence, reconnect survive;

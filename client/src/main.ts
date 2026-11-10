@@ -256,9 +256,12 @@ async function main(): Promise<void> {
       calls.delete(key);
       refreshCallUi();
     },
-    onCallOffer: (from, sdp) => manager.onCallOffer(from, sdp),
-    onCallAnswer: (from, sdp) => manager.onCallAnswer(from, sdp),
-    onCallIce: (from, c) => manager.onCallIce(from, c),
+    // WebRTC relay path removed (docs/moq-sfu.md §9 Phase 3): media now
+    // transits the MoQ SFU, so these signaling messages are parsed but
+    // dropped. The protocol messages go away in Phase 4.
+    onCallOffer: () => {},
+    onCallAnswer: () => {},
+    onCallIce: () => {},
     onCallMute: (id, a, v) => manager.onCallMute(id, a, v),
     onCallScreen: (id, on) => manager.onCallScreen(id, on),
     onError: (code) => {

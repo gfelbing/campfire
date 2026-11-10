@@ -1,22 +1,23 @@
 //! Proximity-call state machine — "bubbles" (README §6.3).
 //!
-//! One `RTCPeerConnection` per remote participant (mesh, README §6.1).
-//! The *joiner* is always the offerer — each newcomer offers every
-//! existing member, who never renegotiate (README §6.3). On bubble
-//! creation the server designates the smaller id.
+//! Media is one MoQ SFU session per call (docs/moq-sfu.md §9): the client
+//! publishes its own `call/<room>/<user-id>.hang` (the uplink) and watches
+//! one downlink per other participant. There is no mesh and no
+//! offer/answer/ICE — the server's bubble engine computes the call, and
+//! every participant's media transits the SFU. The WebRTC signaling
+//! messages (`call_offer`/`call_answer`/`call_ice`) are still on the wire
+//! (server-defined, removed in Phase 4) but are no-ops here.
 //!
 //! Call *state* (`call_start` / `call_leave` / `call_end`) is room-wide: it
-//! powers the avatars' headphone badge, so a bystander hears it too. Call
-//! *signaling* (offer/answer/ice/mute) is call-scoped.
+//! powers the avatars' headphone badge, so a bystander hears it too.
 //!
 //! Joining is automatic: the server pulls nearby avatars into a bubble and
 //! the client asks for the mic (`getUserMedia`) on the first auto-join —
 //! walking close is the user's intent. A user can opt out entirely with
 //! the bubble toggle (`sendBubble`).
 import type { UserBrief } from "../net/types";
-import { MoqUplink } from "./moq";
-import { getLocalMedia, getScreenMedia, iceServers } from "./media";
-import { RtcPeer, type PeerState } from "./peer";
+import { MoqCall, type DownlinkStatus, type DownlinkView } from "./moq";
+import { getLocalMedia, getScreenMedia } from "./media";
 
 /** Participant count at which the call degrades to voice-only (README §6.1:
  *  "9+"; the done-when's "engages at 10" is satisfied, the 📷 button
@@ -29,24 +30,25 @@ export type CallPhase =
   | { p: "joining" }
   | { p: "in-call"; participants: UserBrief[] };
 
+/** A participant's downlink state (README §7: "subscribing…/live"). */
+export type DownlinkState = DownlinkStatus;
+
 /** One remote participant as the UI needs it (grid tile). */
 export interface PeerView {
   id: string;
   name: string;
-  /** Remote media per slot (README roadmap "UI redesign": a participant
-   *  can send camera AND screen at the same time). */
-  camera: MediaStream | null;
-  screen: MediaStream | null;
-  state: PeerState;
-  viaRelay: boolean;
+  /** The camera downlink's paint target (the SFU renders into it). */
+  camera: HTMLCanvasElement | null;
+  /** The camera downlink's audio as a MediaStream (the level meter). */
+  cameraStream: MediaStream | null;
+  /** The screen-share downlink's paint target (only while they share). */
+  screen: HTMLCanvasElement | null;
+  state: DownlinkState;
   /** Presence from `call_mute` (default on). */
   audioOn: boolean;
   videoOn: boolean;
-  /** Presence from `call_screen`: the camera track carries a screen share. */
+  /** Presence from `call_screen`: the peer is sharing their screen. */
   screenOn: boolean;
-  /** `sz` (README roadmap "Map enhancements"): the sender stands inside a
-   *  `silentZone` — their audio is muted locally. */
-  silent: boolean;
 }
 
 /** What the manager tells the UI. */
@@ -60,7 +62,7 @@ export interface CallUiHooks {
   onLocalMute: (audio: boolean, video: boolean) => void;
   /** Our screen share started/stopped (button styling). */
   onLocalScreen: (on: boolean) => void;
-  /** A local log/system line (errors, ICE errors). */
+  /** A local log/system line (errors, connection issues). */
   onLog: (text: string) => void;
 }
 
@@ -68,9 +70,6 @@ export interface CallUiHooks {
 export interface CallSignaling {
   /** Opt out of bubbles (or back in with false). */
   sendBubble(off: boolean): void;
-  sendCallOffer(to: string, sdp: string): void;
-  sendCallAnswer(to: string, sdp: string): void;
-  sendCallIce(to: string, candidate: string): void;
   sendCallMute(audio: boolean, video: boolean): void;
   sendCallScreen(on: boolean): void;
   sendCallLeave(): void;
@@ -85,29 +84,20 @@ export class CallManager {
   screenOn = false;
 
   private selfId = "";
-  /** One peer per remote participant of *our* call (empty when idle). */
-  private peers = new Map<string, RtcPeer>();
-  /** Remote media per participant (camera slot + screen slot). */
-  private streams = new Map<string, { camera: MediaStream | null; screen: MediaStream | null }>();
   /** Per-participant `call_mute`/`call_screen` presence. */
   private presence = new Map<string, { audio: boolean; video: boolean; screen: boolean }>();
   /** Our screen share (when `screenOn`). */
   private screenStream: MediaStream | null = null;
-  /** Per-participant connection state (quality UI). */
-  private connState = new Map<string, { state: PeerState; viaRelay: boolean }>();
   /** `sz` (README roadmap "Map enhancements"): peers inside a silentZone. */
   private silent = new Set<string>();
   /** The call roster including ourselves (from `call_start`/`call_join`). */
   private roster: UserBrief[] = [];
   private localStream: MediaStream | null = null;
-  /** ICE servers for the current call (fetched with the local media). */
-  private servers: RTCIceServer[] | null = null;
-  /** MoQ uplink (docs/moq-sfu.md §9 Phase 2): publishes `localStream` to
-   *  the SFU while in a call. */
-  private moq: MoqUplink | null = null;
-  /** Monotonic guard for in-flight uplink starts (a reset must not let a
+  /** The one MoQ session for the current call (uplink + downlinks). */
+  private moq: MoqCall | null = null;
+  /** Monotonic guard for in-flight session starts (a reset must not let a
    *  late start attach). */
-  private uplinkSeq = 0;
+  private sessionSeq = 0;
   /** Room name (broadcast path `call/<room>/<user-id>.hang`). */
   private room: string;
 
@@ -128,7 +118,7 @@ export class CallManager {
     return this.selfId;
   }
 
-  /** Whether we currently hold peers (i.e. are in a call). */
+  /** Whether we are currently in a call. */
   inCall(): boolean {
     return this.phase.p === "in-call";
   }
@@ -151,7 +141,8 @@ export class CallManager {
   toggleMute(): void {
     if (this.phase.p !== "in-call" || !this.localStream) return;
     this.audioOn = !this.audioOn;
-    // The same track objects are added to every peer: one flip covers all.
+    // Disable the local track: the uplink encodes silence and the PiP
+    // reflects it too.
     for (const t of this.localStream.getAudioTracks()) t.enabled = this.audioOn;
     this.send.sendCallMute(this.audioOn, this.videoOn);
     this.hooks.onLocalMute(this.audioOn, this.videoOn);
@@ -161,15 +152,17 @@ export class CallManager {
     if (this.phase.p !== "in-call" || !this.localStream) return;
     this.videoOn = !this.videoOn;
     for (const t of this.localStream.getVideoTracks()) t.enabled = this.videoOn;
+    // Omit the uplink's video rendition so subscribers stop receiving
+    // black frames rather than a stream of them.
+    this.moq?.setVideoEnabled(this.videoOn);
     this.send.sendCallMute(this.audioOn, this.videoOn);
     this.hooks.onLocalMute(this.audioOn, this.videoOn);
   }
 
   /** Screen share (README roadmap "UI redesign"): the screen rides as a
-   *  second video track in every peer — the camera keeps flowing, so
-   *  others see BOTH streams. Adding/removing tracks renegotiates (the
-   *  sharer offers again, the others answer); the 🖥 badge on the other
-   *  side comes from `call_screen` presence. */
+   *  third uplink rendition (`s`) — the camera keeps flowing, so others
+   *  see BOTH streams. The 🖥 badge on the other side comes from the
+   *  `call_screen` presence, which reveals their screen downlink canvas. */
   toggleScreen(): void {
     if (this.phase.p !== "in-call") return;
     if (this.screenOn) {
@@ -191,10 +184,10 @@ export class CallManager {
       this.screenStream = stream;
       const track = stream.getVideoTracks()[0];
       // The browser's own "stop sharing" button ends the track: share off.
-      track.addEventListener("ended", () => {
+      track?.addEventListener("ended", () => {
         if (this.screenOn) this.stopScreenShare();
       });
-      for (const p of this.peers.values()) p.addScreenTrack(track, stream);
+      this.moq?.startScreen(stream);
       this.screenOn = true;
       this.send.sendCallScreen(true);
       this.hooks.onLocalScreen(true);
@@ -202,11 +195,11 @@ export class CallManager {
     })();
   }
 
-  /** Drop the screen track everywhere and release the capture. */
+  /** Unregister the uplink's screen rendition and release the capture. */
   private stopScreenShare(): void {
     if (!this.screenOn) return;
     this.screenOn = false;
-    for (const p of this.peers.values()) p.removeScreenTrack();
+    this.moq?.stopScreen();
     this.screenStream?.getTracks().forEach((t) => t.stop());
     this.screenStream = null;
     this.send.sendCallScreen(false);
@@ -220,10 +213,10 @@ export class CallManager {
    *  authoritative bubble state: created or joined (auto-join on approach,
    *  README §6.3), or a roster re-sync while we are already in.
    *
-   *  `youOffer` marks us as the designated offerer: a fresh joiner offers
-   *  every existing member; on a join catch-up after a reconnect our old
-   *  peer connections are dead, so we re-offer. */
+   *  `youOffer` is a WebRTC artifact (the designated offerer); it has no
+   *  meaning in the subscribe model and is ignored. */
   onCallStart(participants: UserBrief[], youOffer: boolean, ticket?: string): void {
+    void youOffer;
     const selfIn = participants.some((u) => u.id === this.selfId);
     if (!selfIn) {
       // Bystander: badge only (the avatar layer reads the roster from
@@ -231,17 +224,10 @@ export class CallManager {
       return;
     }
     if (this.phase.p === "in-call") {
-      // Re-sync: a newcomer joined (they offer, we wait) — open a peer for
-      // anyone we do not have one to. When `youOffer` (reconnect catch-up:
-      // our old paths are dead) re-offer to the ones missing a peer.
+      // Re-sync: a newcomer joined. Open a downlink for anyone we do not
+      // have one to once the session is up.
       this.roster = participants;
-      for (const u of participants) {
-        if (u.id === this.selfId) continue;
-        if (!this.peers.has(u.id)) {
-          this.ensurePeer(u);
-          if (youOffer) void this.offerTo(u);
-        }
-      }
+      this.syncDownlinks();
       this.maybeAutoVoiceOnly();
       this.pushPeers();
       return;
@@ -259,7 +245,7 @@ export class CallManager {
         this.reset();
         return;
       }
-      this.enterCall(participants, youOffer, ticket);
+      this.enterCall(participants, ticket);
     })();
   }
 
@@ -271,11 +257,9 @@ export class CallManager {
       return;
     }
     this.roster = this.roster.filter((u) => u.id !== id);
-    this.peers.get(id)?.close();
-    this.peers.delete(id);
-    this.streams.delete(id);
     this.presence.delete(id);
-    this.connState.delete(id);
+    this.silent.delete(id);
+    this.syncDownlinks();
     this.pushPeers();
     // If we are the last one left the server sends `call_end`.
   }
@@ -287,79 +271,37 @@ export class CallManager {
   }
 
   /** Reconnect-with-token (README §5): the `hello` after a dropped
-   *  connection says the room's call survived and we are still in it. The
-   *  old peers' network paths are dead, so close them all and re-establish
-   *  from scratch: we act as the fresh joiner and offer every existing
-   *  member a direct connection (they answer; their stale peers are
-   *  replaced by `onCallOffer`). */
+   *  connection (or a tab refresh) says the room's call survived and we
+   *  are still in it. The MoQ session died with the old connection, so it
+   *  is torn down and re-established with the fresh ticket. A refresh
+   *  loses `localStream`, so the media is re-acquired (the mic permission
+   *  was granted on the original join, so no new prompt). */
   async rejoinCall(participants: UserBrief[], ticket?: string): Promise<void> {
-    if (!this.localStream) {
-      // Media was released while we were away (e.g. the tab slept): we
-      // cannot rejoin without a fresh mic prompt (explicit join, README
-      // §6.3) — the user can "Join call" from the status panel.
-      this.hooks.onLog("call ended while you were disconnected");
-      this.reset();
+    if (this.phase.p === "joining") {
+      // An auto-join is already in flight (media prompt open): let it
+      // finish with its own ticket (tickets are valid for 60 s).
+      this.roster = participants;
       return;
     }
-    // The MoQ session died with the dropped connection; the fresh ticket
-    // from `hello` re-admits a new one (docs/moq-sfu.md §9 Phase 2).
-    this.stopUplink();
-    for (const p of this.peers.values()) p.close();
-    this.peers.clear();
-    this.streams.clear();
-    this.presence.clear();
-    this.connState.clear();
-    this.roster = participants;
-    this.servers = await iceServers();
-    const others = participants.filter((u) => u.id !== this.selfId);
-    for (const u of others) {
-      this.ensurePeer(u);
-      void this.offerTo(u);
+    if (!this.localStream) {
+      // "joining" also blocks a `call_start` catch-up from starting a
+      // second auto-join (and a second prompt) while this one is open.
+      this.setPhase({ p: "joining" });
+      const stream = await this.acquireMedia();
+      if (!stream) {
+        this.hooks.onLog("call ended while you were disconnected");
+        this.reset();
+        return;
+      }
     }
+    this.stopSession();
+    this.roster = participants;
+    const others = participants.filter((u) => u.id !== this.selfId);
     this.setPhase({ p: "in-call", participants: others });
     this.maybeAutoVoiceOnly();
     this.pushPeers();
     this.hooks.onLog("rejoined the call");
-    this.startUplink(ticket);
-  }
-
-  /** A relayed offer from a call participant.
-   *
-   *  The peer is reused only while it is fresh (`new`/`connecting` — a
-   *  huddle joiner that just opened it, or our own 1:1 in flight). Anything
-   *  else (no peer, or a peer whose network path died during a connection
-   *  drop) is closed and rebuilt from the roster: a rejoiner after a drop
-   *  offers us a *fresh* connection (README §5 reconnect). */
-  onCallOffer(from: string, sdp: string): void {
-    const existing = this.peers.get(from);
-    const st = this.connState.get(from)?.state ?? "new";
-    if (existing && st !== "new" && st !== "connecting") {
-      existing.close();
-      this.peers.delete(from);
-      const u = this.roster.find((r) => r.id === from);
-      if (u) this.ensurePeer(u);
-    }
-    const peer = this.peers.get(from);
-    if (!peer) return;
-    void (async () => {
-      try {
-        await peer.setRemoteOffer(sdp);
-        const answer = await peer.createAnswer();
-        this.send.sendCallAnswer(from, answer);
-      } catch (err) {
-        // Expected in the impolite glare case ("keeping our own offer") —
-        // our answer to *their* offer of ours is already in flight.
-        this.hooks.onLog(`offer from ${from} not applied: ${String(err)}`);
-      }
-    })();
-  }
-
-  onCallAnswer(from: string, sdp: string): void {
-    void this.peers.get(from)?.setRemoteAnswer(sdp);
-  }
-
-  onCallIce(from: string, candidate: string): void {
-    void this.peers.get(from)?.addIceCandidate(candidate);
+    this.startSession(ticket);
   }
 
   /** Presence only (call-scoped; the server does not echo it to us). */
@@ -370,7 +312,8 @@ export class CallManager {
     this.pushPeers();
   }
 
-  /** Presence only (call-scoped): a peer started/stopped screen sharing. */
+  /** Presence only (call-scoped): a peer started/stopped screen sharing.
+   *  Reveals (or hides) that peer's screen downlink canvas in the UI. */
   onCallScreen(id: string, on: boolean): void {
     if (id === this.selfId) return;
     const cur = this.presence.get(id) ?? { audio: true, video: true, screen: false };
@@ -392,12 +335,14 @@ export class CallManager {
   setSilent(id: string, on: boolean): void {
     if (id === this.selfId) return;
     const changed = on ? this.silent.add(id) : this.silent.delete(id);
-    if (changed) this.pushPeers();
+    if (!changed) return;
+    this.moq?.setMuted(id, on);
+    this.pushPeers();
   }
 
   // --- internals ------------------------------------------------------------
 
-  /** Acquire local media + ICE servers; log and return null on refusal. */
+  /** Acquire local media; log and return null on refusal. */
   private async acquireMedia(): Promise<MediaStream | null> {
     try {
       this.localStream = await getLocalMedia();
@@ -405,108 +350,77 @@ export class CallManager {
       this.hooks.onLog(`cannot access microphone/camera: ${String(err)}`);
       return null;
     }
-    this.servers = await iceServers();
     this.hooks.onLocalStream(this.localStream);
     return this.localStream;
   }
 
-  /** We are in the bubble with `participants` (including us): open a peer
-   *  to every other member, and (when `offer`) send each of them our
-   *  offer (the joiner offers, README §6.3). */
-  private enterCall(participants: UserBrief[], offer: boolean, ticket?: string): void {
+  /** We are in the bubble with `participants` (including us): enter the
+   *  call and open the MoQ session. */
+  private enterCall(participants: UserBrief[], ticket?: string): void {
     this.roster = participants;
     const others = participants.filter((u) => u.id !== this.selfId);
-    for (const u of others) {
-      this.ensurePeer(u);
-      if (offer) void this.offerTo(u);
-    }
     this.setPhase({ p: "in-call", participants: others });
     this.maybeAutoVoiceOnly();
     this.pushPeers();
-    this.startUplink(ticket);
+    this.startSession(ticket);
   }
 
-  /** (Re)start the MoQ uplink with the call's fresh ticket. No ticket
-   *  (server predates Phase 2) means uplink off — the WebRTC mesh still
-   *  carries the call. */
-  private startUplink(ticket?: string): void {
-    this.stopUplink();
+  /** (Re)start the MoQ session with the call's fresh ticket. No ticket
+   *  (server predates the MoQ SFU) means the session is off. */
+  private startSession(ticket?: string): void {
+    this.stopSession();
     if (!ticket) return;
     if (!this.localStream) return;
-    const seq = ++this.uplinkSeq;
+    const seq = ++this.sessionSeq;
     const url = `${location.origin}/moq?ticket=${encodeURIComponent(ticket)}`;
     const name = `call/${this.room}/${this.selfId}.hang`;
-    void MoqUplink.start({
+    void MoqCall.start({
       url,
       name,
+      room: this.room,
       stream: this.localStream,
       onLog: (t) => this.hooks.onLog(t),
+      onDownlinkChange: () => this.pushPeers(),
     })
-      .then((u) => {
+      .then((c) => {
         // A reset raced the async start: drop the orphaned session.
-        if (seq !== this.uplinkSeq) u.stop();
-        else this.moq = u;
+        if (seq !== this.sessionSeq) c.stop();
+        else {
+          this.moq = c;
+          // Camera off / auto voice-only while the session was in flight:
+          // apply the gate now. A screen share started in flight rides the
+          // fresh session.
+          c.setVideoEnabled(this.videoOn);
+          if (this.screenStream) c.startScreen(this.screenStream);
+        }
+        this.syncDownlinks();
+        this.pushPeers();
       })
       .catch((err) => {
         this.hooks.onLog(String(err));
       });
   }
 
-  /** Stop the MoQ uplink (idempotent). */
-  private stopUplink(): void {
-    this.uplinkSeq++;
+  /** Stop the MoQ session (idempotent). */
+  private stopSession(): void {
+    this.sessionSeq++;
     this.moq?.stop();
     this.moq = null;
   }
 
-  /** Open (or reuse) the peer to `user`; tracks are added once per peer. */
-  private ensurePeer(user: UserBrief): void {
-    if (this.peers.has(user.id) || !this.localStream || !this.servers) return;
-    const servers = this.servers;
-    const stream = this.localStream;
-    this.peers.set(
-      user.id,
-      // Deterministic politeness: the lexicographically smaller id rolls
-      // back on a rejoin glare, the larger keeps its own offer.
-      new RtcPeer(stream, servers, {
-        onRemoteTrack: (s, kind, videoIndex) => {
-          const cur =
-            this.streams.get(user.id) ?? { camera: null, screen: null };
-          if (kind === "audio" || videoIndex === 0) cur.camera = s;
-          else cur.screen = s;
-          this.streams.set(user.id, cur);
-          this.pushPeers();
-        },
-        onNegotiationNeeded: () => {
-          // A screen track was added/removed after the initial round: we
-          // offer again (the other side answers — no glare, only the
-          // sharer renegotiates).
-          void this.offerTo(user);
-        },
-        onIceCandidate: (c) => this.send.sendCallIce(user.id, c),
-        onStateChange: (state, viaRelay) => {
-          this.connState.set(user.id, { state, viaRelay });
-          this.pushPeers();
-        },
-        onIceError: (detail) => this.hooks.onLog(`ICE error (${user.name}): ${detail}`),
-      }, user.id < this.selfId),
+  /** Ensure the session has exactly one downlink per other participant:
+   *  add the missing, drop the stale. */
+  private syncDownlinks(): void {
+    const moq = this.moq;
+    if (!moq) return;
+    const wanted = new Set(
+      this.roster.filter((u) => u.id !== this.selfId).map((u) => u.id),
     );
-    // Sharing already? Then the new peer gets the screen track too.
-    if (this.screenStream) {
-      const t = this.screenStream.getVideoTracks()[0];
-      if (t) this.peers.get(user.id)!.addScreenTrack(t, this.screenStream);
+    for (const id of [...moq.participantIds()]) {
+      if (!wanted.has(id)) moq.removeParticipant(id);
     }
-  }
-
-  /** Offer side: create the offer and send it to `user`. */
-  private async offerTo(user: UserBrief): Promise<void> {
-    const peer = this.peers.get(user.id);
-    if (!peer) return;
-    try {
-      const sdp = await peer.createOffer();
-      this.send.sendCallOffer(user.id, sdp);
-    } catch (err) {
-      this.hooks.onLog(`offer to ${user.name} failed: ${String(err)}`);
+    for (const id of wanted) {
+      if (!moq.hasParticipant(id)) moq.addParticipant(id);
     }
   }
 
@@ -517,6 +431,7 @@ export class CallManager {
     if (total >= VOICE_ONLY_AT && this.videoOn && this.localStream) {
       this.videoOn = false;
       for (const t of this.localStream.getVideoTracks()) t.enabled = false;
+      this.moq?.setVideoEnabled(false);
       this.send.sendCallMute(this.audioOn, this.videoOn);
       this.hooks.onLocalMute(this.audioOn, this.videoOn);
       this.hooks.onLog(
@@ -525,24 +440,23 @@ export class CallManager {
     }
   }
 
-  /** Push the remote roster (state, streams, presence) to the UI grid. */
+  /** Push the remote roster (state, downlink canvases, presence) to the UI. */
   private pushPeers(): void {
     const views: PeerView[] = this.roster
       .filter((u) => u.id !== this.selfId)
       .map((u) => {
-        const st = this.connState.get(u.id) ?? { state: "new" as PeerState, viaRelay: false };
+        const dl: DownlinkView | null = this.moq?.view(u.id) ?? null;
         const pres = this.presence.get(u.id) ?? { audio: true, video: true, screen: false };
         return {
           id: u.id,
           name: u.name,
-          camera: this.streams.get(u.id)?.camera ?? null,
-          screen: this.streams.get(u.id)?.screen ?? null,
-          state: st.state,
-          viaRelay: st.viaRelay,
+          camera: dl?.canvas ?? null,
+          cameraStream: dl?.stream ?? null,
+          screen: pres.screen ? (dl?.screenCanvas ?? null) : null,
+          state: dl?.status ?? "subscribing",
           audioOn: pres.audio,
           videoOn: pres.video,
           screenOn: pres.screen,
-          silent: this.silent.has(u.id),
         };
       });
     this.hooks.onPeers(views);
@@ -554,14 +468,10 @@ export class CallManager {
   }
 
   /** Tear everything down with zero leftovers (README §11 Phase 6: "no
-   *  leaked peer connections" — every peer is closed, every track stopped). */
+   *  leaked peer connections" — the session closes, every track stopped). */
   private reset(reason?: string): void {
-    this.stopUplink();
-    for (const p of this.peers.values()) p.close();
-    this.peers.clear();
-    this.streams.clear();
+    this.stopSession();
     this.presence.clear();
-    this.connState.clear();
     this.silent.clear();
     this.roster = [];
     this.localStream?.getTracks().forEach((t) => t.stop());
@@ -570,7 +480,6 @@ export class CallManager {
     this.screenStream = null;
     this.screenOn = false;
     this.hooks.onLocalScreen(false);
-    this.servers = null;
     this.hooks.onLocalStream(null);
     this.hooks.onPeers([]);
     this.audioOn = true;

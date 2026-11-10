@@ -1,17 +1,29 @@
 #!/usr/bin/env node
 /**
- * MoQ uplink E2E (docs/moq-sfu.md §9 Phase 2): real browser → SFU fan-out.
+ * MoQ call E2E (docs/moq-sfu.md §9 Phases 2–3): real browser ↔ SFU, both
+ * directions.
  *
  * Drives the real client in headless Brave/Chromium with fake media:
  *   1. both pages auto-join via `/?room=…&name=…` and stand still on the
  *      spawn tile, so the server's bubble engine pulls them into a call;
- *   2. each client opens a MoQ uplink on `/moq?ticket=…` (Phase 2) and
- *      announces `call/<room>/<user-id>.hang` — asserted via the
- *      `window.__campfire_moq` debug hook;
- *   3. the Rust spike client subscribes to A's broadcast as a third call
+ *   2. each client opens one MoQ session on `/moq?ticket=…` carrying the
+ *      uplink (announces `call/<room>/<user-id>.hang`) and every downlink —
+ *      asserted via the `window.__campfire_moq` / `window.__campfire_moq_down`
+ *      debug hooks;
+ *   3. the downlinks must render: decoded video frames, received audio
+ *      bytes, and the playback delay/jitter within a sane budget;
+ *   4. the Rust spike client subscribes to A's broadcast as a third call
  *      member (B's ticket) and must receive video AND audio objects;
- *   4. the SFU's own `/metrics` object counter must have moved;
- *   5. B walks away and leaves the room, the call ends, and A's uplink
+ *   5. the SFU's own `/metrics` object counter must have moved;
+ *   6. B shares their screen (fake display, headless): A must gain a
+ *      screen tile and decode its `s` rendition; stopping the share drops
+ *      the tile;
+ *   7. B mutes / camera-off: A's tile must show the presence badges, and
+ *      the camera-off must stop video delivery (rendition omitted);
+ *   8. A refreshes the tab: the token re-join must restore the identity,
+ *      relive A's uplink, and B's downlink to A must follow the
+ *      re-announced broadcast;
+ *   9. B walks away and leaves the room, the call ends, and A's session
  *      stops.
  *
  * The dev server (port 8443) must be running, like `just e2e`.
@@ -42,6 +54,10 @@ const SUB_DURATION = arg("duration", "8s");
 const REPO_ROOT = path.resolve(__dirname, "..", "..");
 const SPIKE_BIN = arg("bin", path.join(REPO_ROOT, "target", "release", "moq-spike-client"));
 const CA_CERT = path.join(REPO_ROOT, "certs", "ca.pem");
+// Latency budget for the downlink playback delay and jitter-buffer depth
+// (the spike's glass-to-glass number is the acceptance figure; this is a
+// sanity bound, docs/moq-sfu.md §9 Phase 3).
+const MAX_LATENCY_MS = 1000;
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -60,13 +76,8 @@ async function waitUntil(fn, what, timeoutMs = 20_000) {
   throw new Error(`timeout waiting for ${what} (last: ${JSON.stringify(last)})`);
 }
 
-/** `window.__campfire_moq` (the Phase 2 debug hook), or undefined. */
+/** `window.__campfire_moq` (the session debug hook), or undefined. */
 const moqHook = (page) => page.evaluate(() => window.__campfire_moq);
-
-const presenceNames = (page) =>
-  page.evaluate(() =>
-    [...document.querySelectorAll(".presence-name")].map((e) => e.textContent),
-  );
 
 /** Does the presence row of `name` carry the 🎧 in-call badge? */
 const badgeFor = (page, name) =>
@@ -77,6 +88,52 @@ const badgeFor = (page, name) =>
     }
     return false;
   }, name);
+
+/** The page's single downlink view (`window.__campfire_moq_down`), or
+ *  null while there is not exactly one. */
+const soleDown = (page) =>
+  page.evaluate(() => {
+    const h = window.__campfire_moq_down;
+    if (!h) return null;
+    const keys = Object.keys(h);
+    return keys.length === 1 ? h[keys[0]] : null;
+  });
+
+const presenceNames = (page) =>
+  page.evaluate(() =>
+    [...document.querySelectorAll(".presence-name")].map((e) => e.textContent),
+  );
+
+/** The call column's state label ("live", "subscribing…", …). */
+const theaterState = (page) =>
+  page.evaluate(() => document.querySelector(".theater-state")?.textContent ?? null);
+
+/** The call bar button's state classes, or null when the call bar is not
+ *  in the DOM. `cls` is `mute` | `camera` | `screen`. */
+const callBtn = (page, cls) =>
+  page.evaluate((c) => {
+    const el = document.querySelector(`.call-${c}`);
+    if (!el) return null;
+    return { off: el.classList.contains("off"), on: el.classList.contains("on") };
+  }, cls);
+
+/** Does A's camera tile for `name` show the badge (`.tile-mute` /
+ *  `.tile-cam`)? */
+const tileBadge = (page, name, badgeSel) =>
+  page.evaluate(([needle, sel]) => {
+    for (const tile of document.querySelectorAll(".theater-tile:not(.local):not(.screen)")) {
+      const label = tile.querySelector(".tile-name")?.textContent ?? "";
+      if (label.includes(needle)) {
+        const el = tile.querySelector(sel);
+        return el ? !el.classList.contains("hidden") : false;
+      }
+    }
+    return false;
+  }, [name, badgeSel]);
+
+/** Number of screen-share tiles the page shows. */
+const screenTiles = (page) =>
+  page.evaluate(() => document.querySelectorAll(".theater-tile.screen").length);
 
 /** Run the spike subscriber and resolve with its parsed JSON report. */
 function runSpikeSubscriber(ticket, subPath) {
@@ -112,6 +169,22 @@ function runSpikeSubscriber(ticket, subPath) {
     });
     child.on("error", reject);
   });
+}
+
+/** The downlink must be live with decoded video, received audio, and the
+ *  playback delay / jitter buffer within budget. */
+async function assertDownlinkLive(page, label, timeoutMs) {
+  const v = await waitUntil(async () => {
+    const d = await soleDown(page);
+    return d && d.status === "live" && d.frames >= 5 && d.audioBytes > 0 ? d : undefined;
+  }, `${label}: downlink live with video + audio`, timeoutMs ?? 30_000);
+  if (!Number.isFinite(v.delay) || v.delay < 0 || v.delay > MAX_LATENCY_MS) {
+    throw new Error(`${label}: playback delay ${v.delay} ms out of budget`);
+  }
+  if (!Number.isFinite(v.jitter) || v.jitter < 0 || v.jitter > MAX_LATENCY_MS) {
+    throw new Error(`${label}: jitter buffer ${v.jitter} ms out of budget`);
+  }
+  return v;
 }
 
 (async () => {
@@ -191,21 +264,34 @@ function runSpikeSubscriber(ticket, subPath) {
     );
     console.log("   bubble call established");
 
-    console.log("4. MoQ uplinks live (window.__campfire_moq)…");
+    console.log("4. MoQ sessions live (window.__campfire_moq)…");
     const hookA = await waitUntil(async () => {
       const h = await moqHook(pageA);
       return h && h.state === "live" ? h : undefined;
-    }, "A's uplink live", 30_000);
+    }, "A's session live", 30_000);
     const hookB = await waitUntil(async () => {
       const h = await moqHook(pageB);
       return h && h.state === "live" ? h : undefined;
-    }, "B's uplink live", 30_000);
+    }, "B's session live", 30_000);
     console.log(`   A: ${hookA.name} (${hookA.version})`);
     console.log(`   B: ${hookB.name} (${hookB.version})`);
 
-    console.log("5. spike subscriber: A's broadcast, admitted with B's ticket…");
+    console.log("5. downlinks live both ways (window.__campfire_moq_down)…");
+    const downA = await assertDownlinkLive(pageA, "A → B's media");
+    const downB = await assertDownlinkLive(pageB, "B → A's media");
+    console.log(
+      `   A sees B: ${downA.frames} frames, ${downA.audioBytes} B audio, delay ${downA.delay} ms`,
+    );
+    console.log(
+      `   B sees A: ${downB.frames} frames, ${downB.audioBytes} B audio, delay ${downB.delay} ms`,
+    );
+    await waitUntil(async () => (await theaterState(pageA)) === "live", "A's column live", 15_000);
+    await waitUntil(async () => (await theaterState(pageB)) === "live", "B's column live", 15_000);
+    console.log("   downlinks rendered, latency within budget");
+
+    console.log("6. spike subscriber: A's broadcast, admitted with B's ticket…");
     const ticket = new URL(hookB.url).searchParams.get("ticket");
-    if (!ticket) throw new Error("B's uplink URL carries no ticket");
+    if (!ticket) throw new Error("B's session URL carries no ticket");
     const report = await runSpikeSubscriber(ticket, hookA.name);
     const sub = report.subscribers?.[0];
     if (!sub || sub.error) throw new Error(`subscriber failed: ${JSON.stringify(sub)}`);
@@ -219,7 +305,7 @@ function runSpikeSubscriber(ticket, subPath) {
     }
     console.log("   video + audio objects delivered");
 
-    console.log("6. SFU metrics: campfire_moq_objects_in_total…");
+    console.log("7. SFU metrics: campfire_moq_objects_in_total…");
     const metrics = await pageA.evaluate(async () => {
       const res = await fetch("/metrics");
       return res.text();
@@ -230,7 +316,75 @@ function runSpikeSubscriber(ticket, subPath) {
     }
     console.log(`   campfire_moq_objects_in_total = ${m[1]}`);
 
-    console.log("7. walk-away: B leaves, A's uplink stops…");
+    console.log("8. screen share B → A (fake display)…");
+    await pageB.$eval(".call-screen", (el) => el.click());
+    await waitUntil(async () => (await callBtn(pageB, "screen"))?.on === true, "B's share on", 15_000);
+    await waitUntil(async () => (await screenTiles(pageA)) >= 1, "A shows B's screen tile", 30_000);
+    const downScr = await waitUntil(async () => {
+      const d = await soleDown(pageA);
+      return d && d.screenFrames >= 5 ? d : undefined;
+    }, "A decodes B's screen frames", 30_000);
+    console.log(`   A decoded ${downScr.screenFrames} screen frames`);
+    // Stop the share: the rendition is unregistered and the tile drops.
+    await pageB.$eval(".call-screen", (el) => el.click());
+    await waitUntil(async () => (await callBtn(pageB, "screen"))?.on === false, "B's share off", 10_000);
+    await waitUntil(async () => (await screenTiles(pageA)) === 0, "A's screen tile gone", 15_000);
+    console.log("   share started, rendered, stopped");
+
+    console.log("9. mute / camera-off presence + delivery…");
+    // Mute: the badge appears on A's tile; the meter still shows (the
+    // tap is pre-gain), but e2e asserts the presence signal only.
+    await pageB.$eval(".call-mute", (el) => el.click());
+    await waitUntil(async () => (await callBtn(pageB, "mute"))?.off === true, "B muted", 10_000);
+    await waitUntil(async () => (await tileBadge(pageA, NAME_B, ".tile-mute")), "A's tile shows B muted");
+    await pageB.$eval(".call-mute", (el) => el.click());
+    await waitUntil(async () => (await callBtn(pageB, "mute"))?.off === false, "B unmuted", 10_000);
+    await waitUntil(async () => !(await tileBadge(pageA, NAME_B, ".tile-mute")), "A's tile un-muted");
+    // Camera off: the `v` rendition is omitted from the catalog, so A's
+    // decoded frame count must plateau — then resume when the camera comes
+    // back.
+    await pageB.$eval(".call-camera", (el) => el.click());
+    await waitUntil(async () => (await callBtn(pageB, "camera"))?.off === true, "B camera off", 10_000);
+    await waitUntil(async () => (await tileBadge(pageA, NAME_B, ".tile-cam")), "A's tile shows B camera off");
+    const f1 = (await soleDown(pageA)).frames;
+    await sleep(3_000);
+    const f2 = (await soleDown(pageA)).frames;
+    if (f2 > f1 + 2) throw new Error(`B camera-off still delivers video: ${f1} → ${f2} frames`);
+    await pageB.$eval(".call-camera", (el) => el.click());
+    await waitUntil(async () => {
+      const d = await soleDown(pageA);
+      return d.frames > f2 + 5;
+    }, "A's frames from B resume after camera on", 30_000);
+    await waitUntil(async () => !(await tileBadge(pageA, NAME_B, ".tile-cam")), "A's tile camera back");
+    console.log("   badges follow presence; video delivery follows the catalog");
+
+    console.log("10. tab refresh: A reloads, token re-join…");
+    await pageA.reload({ waitUntil: "domcontentloaded" });
+    await waitUntil(async () => {
+      const a = await presenceNames(pageA);
+      return (
+        a.length === 2 &&
+        a.some((n) => n?.includes(NAME_B)) &&
+        a.filter((n) => n?.includes(NAME_A)).length === 1
+      );
+    }, "A sees exactly A + B after reload", 90_000);
+    const hookA2 = await waitUntil(async () => {
+      const h = await moqHook(pageA);
+      return h && h.state === "live" ? h : undefined;
+    }, "A's session live after reload", 45_000);
+    if (hookA2.name !== hookA.name) {
+      throw new Error(`identity changed on reload: ${hookA.name} → ${hookA2.name}`);
+    }
+    await assertDownlinkLive(pageA, "A → B after reload", 30_000);
+    // B's downlink to A must follow the re-announced broadcast: A's old
+    // session retracted the route, the re-join re-announced it.
+    await waitUntil(async () => {
+      const d = await soleDown(pageB);
+      return d && d.status === "live" && d.frames > 0 ? d : undefined;
+    }, "B's downlink to A live after A's reload (re-announce)", 45_000);
+    console.log("   identity, uplink and both downlinks restored");
+
+    console.log("11. walk-away: B leaves, A's session stops…");
     await pageB.keyboard.down("ArrowRight");
     await sleep(4_000);
     await pageB.keyboard.up("ArrowRight");
@@ -246,10 +400,10 @@ function runSpikeSubscriber(ticket, subPath) {
         const h = await moqHook(pageA);
         return h && h.state === "stopped";
       },
-      "A's uplink stopped after B left",
+      "A's session stopped after B left",
       40_000,
     );
-    console.log("   uplink torn down with the call");
+    console.log("   session torn down with the call");
 
     if (pageErrors.length) {
       console.warn("   (page errors seen during the run — inspect above)");
