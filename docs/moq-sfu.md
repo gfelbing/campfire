@@ -127,40 +127,54 @@ Integration points (existing files):
   `in_same_call(room, a, b)` used by the SFU's subscribe check.
 - `metrics.rs` — MoQ sessions open, objects in/out, bytes, fan-out width.
 
-**Library strategy — decided in Phase 0:**
+**Library decision (Phase 0 research, settled 2026-11-09):**
 
-- **Option A:** `moq-net` / `moq-rs` serving a session adapted onto our
-  h3/quinn endpoint.
-- **Option B:** a thin own MoQ codec (the draft core is a small
-  stream/datagram framing: bidirectional control streams for
-  ANNOUNCE/SUBSCRIBE, unidirectional streams for objects) implemented
-  directly on `h3::webtransport::Session`. Insulates us from library API
-  churn and pins the protocol exactly; the cost is owning ~1–2 k lines.
-- **Option C:** `moq-native-ietf`.
-
-Decision criterion: **can it serve a session over the existing h3/quinn
-endpoint without a second port?** If none can cleanly, Option B.
+- **SFU:** `moq-net` 0.3.22 (transport-agnostic MoQ networking layer:
+  Producer/Consumer API, built-in fan-out and group caching, negotiates
+  moq-lite or IETF MoQT — drafts 14+, incl. modern 17/18) driven by
+  `moq-tokio` 0.19.35, served **over the existing h3/quinn endpoint** via a
+  custom `web_transport_trait::poll` bridge over
+  `h3::webtransport::Session`. Server intake:
+  `moq_net::server::Server::accept_request(session)` → `Handshake`
+  (exposes path, role, setup token) → media-ticket validation → `ok()` →
+  `(Session, Driver)`. The bridge is the only protocol glue we write
+  (~300–500 lines: streams + datagrams + close, poll-based).
+- **Browser client:** `@moq/net` + `@moq/publish` + `@moq/watch` (npm,
+  TypeScript). WebTransport on Chrome/Edge 97+ and Firefox 153+ (WebSocket
+  fallback elsewhere). `@moq/publish` ships the capture→WebCodecs→publish
+  pipeline; `@moq/watch` ships subscribe→decode→render (canvas + WebAudio).
+  Same project as the Rust stack — its own reference interop pair.
+- **Tier-1 native client:** `moq-tokio` `Client` (WebTransport over HTTP/3).
+- **Draft pin:** IETF MoQT 17/18 and/or moq-lite, whatever the browser
+  negotiates; the exact negotiated version is recorded in the spike results.
+- **Rejected:** a raw-QUIC `moqt-*`-ALPN endpoint (ALPN collides with the
+  app's `h3` on the one socket); `moq-relay` as a drop-in (standalone 14.5k-
+  line app with its own listener/cluster — kept as SFU plumbing reference);
+  `moq-transport`/`moq-native-ietf` as the base (superseded by moq-net for
+  our needs); an own from-scratch codec (no longer needed).
 
 ## 6. Client design (TypeScript)
 
-New `client/src/call/moq.ts` (split as needed):
+New `client/src/call/moq.ts` (split as needed), built on the Phase 0
+libraries — the WebCodecs pipelines are **provided by `@moq/publish` /
+`@moq/watch`**, not hand-rolled:
 
-- `MoqSession` — WebTransport on `/moq?ticket=…`, the MoQ client side
-  (library from Phase 0, or a small TS codec mirroring the server).
-- **Uplink** (one per local stream): `getUserMedia` / `getDisplayMedia` →
-  `VideoEncoder` (VP8; try `hardware`, fall back `software`) +
-  `AudioEncoder` (Opus). Frame loop: `track.requestFrame()` →
-  `VideoFrame` → `encoder.encode` → MoQ object. Mute stops encoding; the
-  PiP keeps using the raw `MediaStream` (unchanged).
-- **Downlink** (per peer): `VideoDecoder`/`AudioDecoder` per track.
-  - Video: draw frames to a per-tile canvas; expose
+- `MoqSession` — `@moq/net` connection on `/moq?ticket=…` (WebTransport).
+- **Uplink** (one per local stream): `@moq/publish` (or its headless
+  `Publish.Broadcast` API below the `<moq-publish>` element) over
+  `getUserMedia` / `getDisplayMedia`. Mute stops the published tracks; the
+  PiP keeps using the raw `MediaStream` (unchanged). Encoder settings
+  (VP8, hardware-first, bitrates) are configured per the spike findings.
+- **Downlink** (per peer): `@moq/watch` (or its headless `Watch.Player`
+  API) per remote track — decode to canvas + WebAudio is its job.
+  - Video: the element's canvas (or the player's canvas) is exposed via
     `canvas.captureStream(30)` as a `MediaStream` so `callui.ts` tiles and
     the `PeerView.camera/screen: MediaStream` interface stay **unchanged**.
-  - Audio: `AudioDecoder` → `AudioData` queue → per-peer gain node on one
+  - Audio: route the player's audio through a per-peer gain node on one
     shared `AudioContext` (the silent-zone mute is a gain-0 flip on that
     peer's node; `callui.ts` already has the AudioContext plumbing).
-  - Sync: audio is the reference; video plays with a small adaptive delay
-    (≤ ~100 ms) so both sit on the same edge.
+  - Sync: the library's pipeline handles it; the spike verifies the
+    measured A/V skew against T2.
 - **Reconnect:** the MoQ session dies with its connection. The existing
   `rejoinCall` path already handles "call survived, I'm back": it gets a
   fresh ticket from `hello`, reopens the session, re-announces,
@@ -216,33 +230,33 @@ Two tiers, both scripted. A justfile target runs the whole matrix, emits
 JSON, and generates `docs/moq-spike-results.md`.
 
 - **Tier 1 — no browser.** Spike binary on `127.0.0.1:4443/UDP` (reuses
-  `certs/`): h3 + WebTransport on `/moq`, the MoQ session logic, fan-out
-  1→N. Rust MoQ clients (the Phase-0 library candidate itself) act as one
-  publisher + N subscribers. Measures: protocol round-trips, SFU fan-out
-  throughput and latency, loss behavior under netem in a private
+  `certs/`): h3 + WebTransport on `/moq`, the moq-net SFU session over the
+  custom h3 bridge, fan-out 1→N. `moq-tokio` `Client`s act as one publisher
+  + N subscribers. Measures: protocol round-trips, SFU fan-out throughput
+  and latency, loss behavior under netem in a private
   user+network namespace (`unshare -rn`, non-interactive, host `lo`
-  untouched; 0/5/20 % loss + 100 ms jitter). Also answers the library-fit question
-  empirically: can the candidate serve a session over our h3/quinn
-  endpoint (options A/C), or does it force Option B (own codec)?
+  untouched; 0/5/20 % loss + 100 ms jitter).
 - **Tier 2 — headless browser.** Playwright-driven headless Chromium
   (dev-only dependency in `tools/moq-spike/`) with fake media
   (`--use-fake-ui-for-media-stream`
   `--use-fake-device-for-media-screen-capture`,
-  `--autoplay-policy=no-user-gesture-required`): a publisher tab (fake
-  camera + mic → WebCodecs → MoQ publish), subscriber tabs (MoQ → decode
-  → canvas + WebAudio), 1→3 fan-out. Measures: glass-to-glass latency
-  p50/p95 (publisher stamps at capture, subscriber at render), CPU per
-  direction, keyframe fast-start time, loss behavior under `netem`, and
-  feature detection (`VideoEncoder.isConfigSupported` for `hardware` vs
-  `software`, `AudioEncoder`/`AudioDecoder` presence).
-- **Decide:** library (A/B/C), codec config (hardware vs software VP8,
-  bitrates), object layout (streams vs datagrams), draft version pin.
+  `--autoplay-policy=no-user-gesture-required`): publisher tabs
+  (`@moq/publish` over fake camera + mic), subscriber tabs (`@moq/watch`),
+  1→3 fan-out. Measures: glass-to-glass latency p50/p95 (capture-side
+  timestamp vs render time), CPU per direction, keyframe fast-start time,
+  negotiated protocol version, loss behavior under `netem`, and feature
+  detection (`VideoEncoder.isConfigSupported` for `hardware` vs
+  `software`, `AudioEncoder`/`AudioDecoder` presence, transport `@moq`
+  actually uses).
+- **Decide:** codec config (hardware vs software VP8, bitrates), object
+  layout (streams vs datagrams) for the app build; the library choice and
+  draft pin are settled (§5) — the spike only verifies them.
 - **Decision rule (agreed).** Gates, pass/fail:
   - G1: `VideoEncoder`/`VideoDecoder` and `AudioEncoder`/`AudioDecoder`
     all present in headless Chromium (there is no JS Opus encoder to fall
     back to — missing audio codecs forces a rethink, not a tune).
   - G2: end-to-end fan-out works over the existing h3/quinn endpoint
-    (library option A/C, or the Option B own codec).
+    (moq-net over the h3 bridge — §5).
   - G3: audio pipeline stable — no sustained `AudioDecoder`→WebAudio
     underrun over the 10-minute soak.
   Thresholds (LAN, no loss unless noted):
@@ -298,7 +312,121 @@ JSON, and generates `docs/moq-spike-results.md`.
   nothing outside history; two-machine call test passes; release (version
   bump + tag) cut.
 
-## 10. Risks
+## 10. Phase 0 findings (Tier 1)
+
+Measured by the spike, in `tools/moq-spike/`, over `unshare -rn` netem
+(0/5/20 % loss + 100 ms jitter, both directions) and the host (no loss).
+These are the reasons the media path needed non-default quinn/moq-net
+tuning, and the numbers behind the gate verdict in
+`docs/moq-spike-results.md`.
+
+### F1. quinn `send_fairness` scattered burst-served groups (the jitter-loss root cause)
+
+The SFU origin cache fills under a jittery uplink and the serve loop drains
+it in bursts of many group streams at once. Quinn's default per-stream send
+fairness round-robins one chunk per pending stream per transmission and
+requeues a stream with more data at the **tail**, so a 12 KB video group's
+11 chunks spread across the whole burst drain — measured 0.7–4.9 s at
+100+30 ms one-way delay. That blew the subscriber's max-age drift budget and
+looked like loss.
+
+Fix: `transport.send_fairness(false)`. Chunks then go back-to-back; per-group
+spread is ~11 packet times. Measured effect (gate jitter, `--max-age 1s`):
+video first→fin p99 4298 ms → 103 ms, drift skips 15–71 → 0, audio p95
+299 ms with 0 gaps.
+
+Trade-off, noted for the production SFU: without fairness, one stream with a
+large backlog can starve the others. Fine for the spike (two tracks per
+connection, a bounded serve burst); a busy production SFU needs either a
+per-burst cap or fairness kept on with a smaller batch.
+
+### F2. `Subscriber` max-age default 0 s delivers nothing
+
+moq-net's `is_stale` compares `age = ts(edge) − reach(group)` against the
+budget with `>=`, so a zero budget marks every in-order group stale the
+instant a newer one arrives. The spike client default is now `1s`
+(`--max-age`, reported as `max_age_ms` in the JSON). The budget is only
+consumed when newer data is already that far ahead, so a 1 s budget rides out
+the T4/T5 reordering window without adding steady-state delay.
+
+### F3. Lite02 carries no frame timestamp; the consumer must reorder
+
+The Lite02 group stream re-stamps local receive time, so the spike embeds a
+u64-LE µs send stamp in the payload and the client reorders by it.
+moq-net 0.3.22's `Subscriber::recv_group` hands groups out in **arrival
+order** (the cursor walks the arrival deque; it does not wait on missing
+sequences). The max-age drift budget is the drop mechanism. The browser
+client (Tier 2) needs an equivalent reorder buffer + consumer reorder.
+
+### F4. Loss detection: `packet_threshold(1000)`, `time_threshold(0.7)`
+
+The default packet threshold (3) declares an in-flight packet lost as soon as
+3 newer packets are acknowledged; 100+30 ms one-way delay reorders up to ~50
+packets, so the default fired continuously and CUBIC treated every spurious
+loss as congestion (F5). `1000` disables the count trigger. The time
+threshold is a **factor of conservative RTT**: `0.7` retransmits a truly lost
+packet in ~150–250 ms at the scenario RTTs. A spurious time-trigger under
+jitter is harmless with the bandwidth-based controller (the receiver dedupes
+the retransmission), so the threshold trades a little extra retransmit load
+for a shorter loss tail — at `1.0` the 20 %-loss audio p95 measured 1026 ms,
+just over the T5 gate; at `0.7` it measures 727 ms (results doc).
+
+### F5. Stock congestion controllers fail this path; a small bandwidth-based one is used
+
+- **CUBIC** (the default) halves the window on *every* declared loss. netem
+  `loss random N%` is per-packet loss independent of load, so at 5 % the
+  window halves ~13×/s and pins at the floor — measured 99 of 1500 audio
+  groups delivered in 30 s (T4 collapse).
+- **BBR** (marked `Experimental!` in quinn) sizes its window from a BDP
+  computed with `min_rtt`. Under 100+30 ms jitter the minimum sample is a
+  20–40 ms artifact (real RTT ~190 ms), the BDP collapses to ~6 KB and the
+  rate cap cwnd/RTT ≈ 32 KB/s sits below the 316 KB/s media path, so the
+  queue grows unbounded — measured audio p50 628 ms at 0 % loss.
+- Quinn 0.11's **pacer is dead code** (constructed in `Path`, never consulted
+  in the send path), so the congestion window is the only rate lever.
+
+`MediaCc` (`tools/moq-spike/src/cc.rs`) runs the window at
+`max(128 KB floor, 3 × BDP)`, BDP = delivery-rate EWMA × **smoothed** RTT; it
+ignores isolated loss events and only halves on persistent congestion. That
+is safe on the spike's model (no bottleneck to protect); a production SFU on a
+real WAN needs a production loss-tolerant controller — a Phase 1 decision.
+With `MediaCc` (final matrix run): T4 (5 %) audio p95 402 ms, 0 gaps; T5
+(20 %) audio p95 727 ms, 0 gaps, max video freeze (rx-time) 1103 ms ≤ 2 s.
+
+### F6. Delivery funnel is lossless under the gate config
+
+Gate jitter, `--max-age 1s`, 30 s: 2114 groups ingested at the SFU (1 uplink
+error drop) → 2113 served → 2113 ingested by the subscriber → 2113 delivered
+(audio 1409, video 704). Zero downlink loss, zero drift skips. The publisher
+emits at ~93 % of nominal rate because the tick loop includes write time — a
+spike artifact, not a delivery loss (delivered == served == ingested).
+
+### F7. T6 soak RSS: a one-time origin-pool fill, not a leak
+
+The first 600 s soak exceeded the RSS gate: +16.3 MB over the run (gate:
+<10 MB). The delta is the SFU's origin cache filling once, not a leak. The
+default pool (`moq_net::cache::Config::default()`) holds published groups for
+30 s of idle time and has no byte cap. At the spike's bitrate (~316 KB/s per
+stream) 30 s of media is ~9.5 MB, cached once per group regardless of
+subscriber count — that accounts for the whole delta, and growth stops once
+fill rate meets expiry rate. The pool is what makes fast-start and late join
+cheap (T3/T7): a subscriber arriving mid-stream is served recent groups from
+the cache instead of waiting for the next one.
+
+The tuning pass bounded it: the SFU builds its origin with a 10 s expiry and
+a 16 MB byte cap (`server.rs`). 10 s of history still covers late joiners by
+a wide margin (the T7 first-frame budget is 2 s); the cap bounds a bursty
+publisher. Post-tuning 600 s soak: +1.96 MB total, ~2.0 MB by 30 s, flat to
+the end (growth from the 2-minute mark to the end ≈ 0 MB), no rx-time stall
+>46 ms.
+
+Measurement note: a two-point before/after sample cannot distinguish a
+fill-then-plateau from a slow leak, so `matrix.sh` now samples RSS every 30 s
+during the soak (`soak-rss.json`: before, series, after). `gen_report.py`
+reports the 2-minute → end growth as a diagnostic; the gate stays strict
+(before/after delta <10 MB, no stall >2 s).
+
+## 11. Risks
 
 1. **No MoQ library serves a session over our h3/quinn endpoint** →
    Option B (own thin codec). The draft core is small; the spike settles
@@ -321,9 +449,15 @@ JSON, and generates `docs/moq-spike-results.md`.
 7. **Security-model change** (server is now a media party) — must be
    explicit in README and release notes, not a quiet diff.
 
-## 11. Open questions (answered in Phase 0)
+## 12. Open questions (answered in Phase 0)
 
 - Streams vs datagrams for media objects (loss-latency trade-off, risk 5).
+  **Answer (Tier 1, §10/F5):** reliable streams pass T4/T5 — with
+  `send_fairness(false)`, time-based loss detection and the bandwidth-based
+  window, 5 %/20 % netem loss costs a retransmission's delay, not a
+  throughput or gap failure. No datagram path is needed for these targets;
+  revisit if real-world RTTs make the retransmit budget (≲350 ms at T4)
+  unmet.
 - VP8 vs VP9 default (hardware availability on the target machines).
 - Ticket TTL and re-mint cadence (60 s / per call event is the start).
 - Keyframe cache: one frame or a few groups?

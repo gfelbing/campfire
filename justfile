@@ -119,3 +119,20 @@ loadtest *args:
 # one-time `npm i` in tools/e2e.
 e2e *args:
 	node tools/e2e/e2e.js --browser "$(command -v brave || command -v chromium || echo chromium)" "$@"
+
+# MoQ SFU spike, Tier 1 (docs/moq-sfu.md Phase 0): build the spike, run the
+# fan-out / fast-start / loss matrix (fast, no soak), and generate
+# docs/moq-spike-results.md. Loss runs in a private `unshare -rn` netns, so
+# it needs user+network namespace support (works rootless).
+moq-spike:
+	cargo build --release -p moq-spike
+	rm -rf /tmp/opencode/moq-matrix
+	bash tools/moq-spike/matrix.sh /tmp/opencode/moq-matrix
+	python3 tools/moq-spike/gen_report.py /tmp/opencode/moq-matrix
+
+# Full Tier-1 matrix including the 10-minute soak (T6/G3 proxy). Slow.
+moq-spike-full:
+	cargo build --release -p moq-spike
+	rm -rf /tmp/opencode/moq-matrix
+	SOAK_DUR=600s bash tools/moq-spike/matrix.sh /tmp/opencode/moq-matrix
+	python3 tools/moq-spike/gen_report.py /tmp/opencode/moq-matrix
