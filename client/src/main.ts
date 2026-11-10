@@ -264,7 +264,7 @@ async function main(): Promise<void> {
     },
     // Bubble state (README §6.3): the manager owns the state machine;
     // the room-wide call *state* also drives the headphone badges.
-    onCallStart: (ps, youOffer, zone, ticket) => {
+    onCallStart: (ps, zone, ticket) => {
       const key = zone ?? "";
       calls.set(key, new Set(ps.map((p) => p.id)));
       // A roster containing us replaces any stale provisional membership
@@ -273,7 +273,7 @@ async function main(): Promise<void> {
         for (const [k, s] of calls) {
           if (k !== key && s.has(myId)) calls.delete(k);
         }
-        manager.onCallStart(ps, youOffer, ticket);
+        manager.onCallStart(ps, ticket);
       }
       refreshCallUi();
     },
@@ -294,12 +294,6 @@ async function main(): Promise<void> {
       calls.delete(key);
       refreshCallUi();
     },
-    // WebRTC relay path removed (docs/moq-sfu.md §9 Phase 3): media now
-    // transits the MoQ SFU, so these signaling messages are parsed but
-    // dropped. The protocol messages go away in Phase 4.
-    onCallOffer: () => {},
-    onCallAnswer: () => {},
-    onCallIce: () => {},
     onCallMute: (id, a, v) => manager.onCallMute(id, a, v),
     onCallScreen: (id, on) => manager.onCallScreen(id, on),
     onError: (code) => {

@@ -11,49 +11,23 @@ pub mod demux;
 pub mod metrics;
 pub mod moq;
 pub mod realtime;
-pub mod stun;
 pub mod tls;
-pub mod turn;
 pub mod world;
 
 use std::sync::Arc;
 
 use anyhow::Result;
-use rand::RngCore;
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 /// Run the server until Ctrl-C.
-///
-/// One port number, two protocols on it (README §2): QUIC/HTTP/3 + STUN
-/// share the UDP socket through [`demux::DemuxSocket`], and the co-located
-/// TURN server takes the same address over TCP.
 pub async fn run(cfg: &config::Config) -> Result<()> {
     let quinn_conf = tls::server_config_from_files(&cfg.cert, &cfg.key, cfg.idle_timeout())?;
     let socket = demux::DemuxSocket::bind(cfg.listen)?;
     let local = socket.local_addr()?;
     let endpoint = make_endpoint(quinn_conf, socket)?;
-    // TURN REST secret: `--turn-secret`, or generated (and logged once) so
-    // the app still works without the flag.
     let metrics = metrics::Metrics::new();
-    let turn_secret = match &cfg.turn_secret {
-        Some(secret) => secret.clone(),
-        None => {
-            let mut bytes = [0u8; 32];
-            rand::thread_rng().fill_bytes(&mut bytes);
-            let secret: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
-            warn!(%secret, "no --turn-secret configured; generated an ephemeral one (relay credentials reset on every restart)");
-            secret
-        }
-    };
-    // The public TCP port is a TLS front (`bootstrap`, README §6.2): it
-    // serves the Alt-Svc bootstrap browsers need to discover HTTP/3, and
-    // splices STUN/TURN (recognized by the STUN magic cookie) to TURN's
-    // internal plaintext listener below.
-    let turn_internal = bootstrap::free_local_tcp()?;
-    bootstrap::start(cfg, turn_internal, metrics.clone())?;
-    turn::start(cfg, &turn_secret, turn_internal);
-    let state = api::AppState::with_metrics(cfg, turn_secret, metrics.clone());
-    info!(%local, "campfire listening over HTTP/3 (QUIC) + STUN + TURN");
+    let state = api::AppState::with_metrics(cfg, metrics.clone());
+    info!(%local, "campfire listening over HTTP/3 (QUIC)");
     let _tick = world::start_ticking_with(state.world.clone(), metrics.clone());
     run_endpoint_with_metrics(endpoint, api::router(state), metrics).await;
     Ok(())
@@ -61,8 +35,7 @@ pub async fn run(cfg: &config::Config) -> Result<()> {
 
 /// Build a QUIC server endpoint over the shared demux socket.
 ///
-/// Exposed for integration tests, which also need the STUN/QUIC demux on
-/// one socket.
+/// Exposed for integration tests, which build the endpoint the same way.
 pub fn make_endpoint(
     server_conf: quinn::ServerConfig,
     socket: Arc<demux::DemuxSocket>,
@@ -87,7 +60,7 @@ pub async fn run_endpoint(endpoint: quinn::Endpoint, app: axum::Router) {
 /// (README §11 Phase 8): on Ctrl-C the endpoint stops accepting, every
 /// open connection is closed with a NO_ERROR code (browsers reconnect and
 /// keep their identity via the token), and the loop returns after the
-/// drain window so the tick task and TURN tasks die with the process.
+/// drain window so the tick task dies with the process.
 pub async fn run_endpoint_with_metrics(
     endpoint: quinn::Endpoint,
     app: axum::Router,

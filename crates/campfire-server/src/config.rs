@@ -38,20 +38,13 @@ pub struct Config {
     #[arg(long, default_value = "maps")]
     pub maps_dir: PathBuf,
 
-    /// TURN REST shared secret (README §6.2). Clients fetch per-user
-    /// credentials from `POST /api/v1/turn/credential`. When omitted, a
-    /// random secret is generated at startup (logged once) — relay
-    /// credentials then reset on every restart.
-    #[arg(long)]
-    pub turn_secret: Option<String>,
-
     /// Emit structured JSON logs (one object per line) instead of the
     /// human-readable default — for log shippers (README §11 Phase 8).
     #[arg(long)]
     pub log_json: bool,
 
-    /// Externally visible address of this server, advertised by the TURN
-    /// server for relayed allocations. Defaults to `listen` (correct for
+    /// Externally visible address of this server, used for the Alt-Svc
+    /// bootstrap (README §2). Defaults to `listen` (correct for
     /// dev; set behind a NAT/firewall). Accepts `ip:port` or a bare `ip`
     /// (the port then falls back to `--listen`'s).
     #[arg(long, value_parser = parse_external)]

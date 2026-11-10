@@ -1,8 +1,9 @@
 //! campfire — the single Campfire service binary.
 //!
-//! One binary, one port number (README §2): QUIC/HTTP/3 + WebTransport + STUN
-//! on UDP, TURN/TLS on TCP. This file only boots the library; all behaviour
-//! lives in `campfire_server` (lib.rs) so tests and tooling can reuse it.
+//! One binary, one port number (README §2): QUIC/HTTP/3 + WebTransport + MoQ
+//! media on UDP/443, the Alt-Svc TLS front on TCP/443. This file only boots
+//! the library; all behaviour lives in `campfire_server` (lib.rs) so tests
+//! and tooling can reuse it.
 
 use anyhow::Result;
 use campfire_server::config::Config;

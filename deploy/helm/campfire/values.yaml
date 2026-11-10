@@ -11,10 +11,10 @@ image:
 #  - the TCP ingress route's SNI match (TLS passes through to the pod)
 domain: example.com
 
-# Public address advertised to peers for TURN relayed allocations
-# (--external, an IP:port — the server requires a literal IP).
-# Should be the public IP of the Traefik/LB entrypoint. Empty = omit the
-# flag (fine when clients can reach the pod network directly, e.g. tests).
+# Public address advertised by the server (--external, an IP:port — the
+# server requires a literal IP). Used by the Alt-Svc bootstrap to name the
+# port clients can reach. Empty = omit the flag (fine when the port maps
+# 1:1, e.g. tests).
 # external: "1.2.3.4:443"
 external: ""
 
@@ -25,7 +25,7 @@ namespace:
   create: true
   name: campfire
 
-replicaCount: 1  # single instance by design (in-memory state + stateful TURN)
+replicaCount: 1  # single instance by design (in-memory state)
 
 maps:
   # The server scans the maps directory (--maps-dir) recursively at startup;
@@ -74,7 +74,7 @@ traefik:
     # untouched and the pod terminates TLS (QUIC/WebTransport need this).
     entrypoint: websecure
   udp:
-    # Traefik UDP entrypoint listening on 443/udp (QUIC + STUN + TURN).
+    # Traefik UDP entrypoint listening on 443/udp (QUIC/HTTP/3).
     entrypoint: quic
 
 service:
@@ -88,6 +88,4 @@ resources:
     memory: 512Mi
 
 # Optional extra args passed to the campfire binary verbatim.
-extraArgs: 
-- --turn-secret
-- supersecret
+extraArgs: ""

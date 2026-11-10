@@ -1,16 +1,10 @@
-//! TLS front over TCP: the HTTP/3 discovery bootstrap + TURN splice.
+//! TLS front over TCP: the HTTP/3 discovery bootstrap.
 //!
 //! Browsers discover HTTP/3 only through an `Alt-Svc` response header, and
 //! such a header can only arrive over a TCP connection — the QUIC listener
-//! itself cannot advertise. The public TCP port is therefore a TLS front that
-//! terminates TLS for *both* protocols sharing it (README §6.2: in
-//! production, `turns:host:443` must be indistinguishable from ordinary
-//! HTTPS) and demuxes on the first plaintext bytes:
+//! itself cannot advertise. The public TCP port is therefore a TLS front
+//! that answers HTTP/1.1 by hand:
 //!
-//! * **STUN** — every STUN message carries the magic cookie `0x2112A442` at
-//!   bytes 4–8 (RFC 5389 §6), and TURN-over-TLS clients speak STUN → the
-//!   stream is spliced to TURN's internal plaintext TCP listener (the TLS
-//!   was terminated here, so TURN is configured without SSL).
 //! * **HTTP** — a minimal HTTP/1.1 answer carrying `Alt-Svc: h3=":port"`.
 //!   The document asks the browser to reload once (`?alt=1`), by which time
 //!   the alternative is cached and the reload (plus every later request,
@@ -18,10 +12,8 @@
 //!   arrives over TCP, the page says so — that means UDP is unreachable.
 //!
 //! Failures here are logged and non-fatal: the QUIC service itself keeps
-//! working for HTTP/3-aware clients; only browser discovery and TURN-over-TCP
-//! degrade.
+//! working for HTTP/3-aware clients; only browser discovery degrades.
 
-use std::net::SocketAddr;
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -32,24 +24,8 @@ use tracing::{debug, error, info};
 use crate::config::Config;
 use crate::tls;
 
-/// The STUN magic cookie every STUN message carries (RFC 5389 §6).
-const STUN_MAGIC: [u8; 4] = [0x21, 0x12, 0xA4, 0x42];
-
-/// Reserve an ephemeral localhost port for TURN's internal plaintext TCP
-/// listener. The probe socket is dropped before TURN binds it — on localhost
-/// the race window is negligible.
-pub fn free_local_tcp() -> std::io::Result<SocketAddr> {
-    let probe = std::net::TcpListener::bind(("127.0.0.1", 0))?;
-    probe.local_addr()
-}
-
-/// Start the TLS front on the public TCP port. `turn_internal` is where
-/// TURN's plaintext TCP listener lives (splice target for STUN/TURN).
-pub fn start(
-    cfg: &Config,
-    turn_internal: SocketAddr,
-    metrics: crate::metrics::Metrics,
-) -> Result<()> {
+/// Start the TLS front on the public TCP port.
+pub fn start(cfg: &Config) -> Result<()> {
     let (certs, key) = tls::load_pem(&cfg.cert, &cfg.key)?;
     // Only http/1.1: browsers always offer h2 as well, but the bootstrap
     // answers HTTP/1.1 by hand — selecting h2 would break that.
@@ -58,32 +34,26 @@ pub fn start(
     let listen = cfg.listen;
     // The Alt-Svc must name the port the *client* can reach. Behind a port
     // mapping (docker/podman `-p 8443:443`) that is the external port, not
-    // the one the socket binds inside the container — reuse `--external`,
-    // which TURN already uses for the same reason (browsers ignore the host
-    // part of an Alt-Svc entry, so the port is what matters).
+    // the one the socket binds inside the container — reuse `--external`.
+    // Browsers ignore the host part of an Alt-Svc entry, so the port is
+    // what matters.
     let alt = format!("h3=\":{}\"; ma=86400", cfg.external_addr().port());
 
     tokio::spawn(async move {
         let listener = match tokio::net::TcpListener::bind(listen).await {
             Ok(listener) => listener,
             Err(err) => {
-                error!(%err, listen = %listen, "TCP TLS front failed to bind; browsers cannot discover HTTP/3 (Alt-Svc) and TURN over TCP is down");
+                error!(%err, listen = %listen, "TCP TLS front failed to bind; browsers cannot discover HTTP/3 (Alt-Svc)");
                 return;
             }
         };
-        info!(
-            listen = %listen,
-            turn = %turn_internal,
-            "TLS front listening: Alt-Svc bootstrap + TURN splice"
-        );
+        info!(listen = %listen, "TLS front listening: Alt-Svc bootstrap");
         loop {
             let Ok((tcp, _peer)) = listener.accept().await else {
                 break;
             };
             let acceptor = acceptor.clone();
-            let turn_internal = turn_internal;
             let alt = alt.clone();
-            let metrics = metrics.clone();
             tokio::spawn(async move {
                 let mut tls = match acceptor.accept(tcp).await {
                     Ok(tls) => tls,
@@ -92,108 +62,42 @@ pub fn start(
                         return;
                     }
                 };
-                // One read covers the demux: a STUN header starts with a
-                // 20-byte message whose bytes 4–8 are the magic cookie; an
-                // HTTP request starts with an ASCII request line.
+                // One read covers the request line: an HTTP request starts
+                // with an ASCII request line.
                 let mut buf = vec![0u8; 4096];
                 let n = match tls.read(&mut buf).await {
                     Ok(0) | Err(_) => return,
                     Ok(n) => n,
                 };
-                if n >= 8 && buf[4..8] == STUN_MAGIC {
-                    metrics.turn_splice_open();
-                    splice_to_turn(tls, turn_internal, &buf[..n], metrics.clone()).await;
-                    metrics.turn_splice_close();
-                } else {
-                    let line = buf[..n].iter().position(|&b| b == b'\n').map(|i| &buf[..i]);
-                    // The request target ("GET /play/office/office.json?name=… …"):
-                    // the reload must keep it, or the browser loses its query
-                    // parameters (the ?alt=1 marker would otherwise replace them).
-                    let target = line
-                        .and_then(|l| std::str::from_utf8(l).ok())
-                        .and_then(|l| {
-                            l.split(' ')
-                                .nth(1)
-                                .filter(|t| t.starts_with('/') && !t.contains(' '))
-                                .map(|t| t.to_owned())
-                        });
-                    let wants_alt_marker = line.is_some_and(|l| {
-                        let l = std::str::from_utf8(l).unwrap_or("");
-                        l.contains("alt=1")
+                let line = buf[..n].iter().position(|&b| b == b'\n').map(|i| &buf[..i]);
+                // The request target ("GET /play/office/office.json?name=… …"):
+                // the reload must keep it, or the browser loses its query
+                // parameters (the ?alt=1 marker would otherwise replace them).
+                let target = line
+                    .and_then(|l| std::str::from_utf8(l).ok())
+                    .and_then(|l| {
+                        l.split(' ')
+                            .nth(1)
+                            .filter(|t| t.starts_with('/') && !t.contains(' '))
+                            .map(|t| t.to_owned())
                     });
-                    let sep = if target.as_deref().is_some_and(|t| t.contains('?')) {
-                        "&"
-                    } else {
-                        "?"
-                    };
-                    let refresh = target.map(|t| format!("{t}{sep}alt=1"));
-                    if let Err(err) = bootstrap_answer(tls, &alt, wants_alt_marker, refresh).await {
-                        debug!(%err, "TLS front: bootstrap answer failed");
-                    }
+                let wants_alt_marker = line.is_some_and(|l| {
+                    let l = std::str::from_utf8(l).unwrap_or("");
+                    l.contains("alt=1")
+                });
+                let sep = if target.as_deref().is_some_and(|t| t.contains('?')) {
+                    "&"
+                } else {
+                    "?"
+                };
+                let refresh = target.map(|t| format!("{t}{sep}alt=1"));
+                if let Err(err) = bootstrap_answer(tls, &alt, wants_alt_marker, refresh).await {
+                    debug!(%err, "TLS front: bootstrap answer failed");
                 }
             });
         }
     });
     Ok(())
-}
-
-/// Splice an established TLS stream (already recognized as STUN/TURN by its
-/// first bytes) to TURN's internal plaintext listener. `first` is the bytes
-/// already consumed from the client side and must be replayed.
-async fn splice_to_turn<S>(
-    tls: S,
-    turn_internal: SocketAddr,
-    first: &[u8],
-    metrics: crate::metrics::Metrics,
-) where
-    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
-{
-    let turn = match tokio::net::TcpStream::connect(turn_internal).await {
-        Ok(turn) => turn,
-        Err(err) => {
-            debug!(%err, "TLS front: TURN splice target unreachable");
-            return;
-        }
-    };
-    let (mut turn_read, mut turn_write) = tokio::io::split(turn);
-    let (mut tls_read, mut tls_write) = tokio::io::split(tls);
-    if turn_write.write_all(first).await.is_err() {
-        return;
-    }
-    // Client → TURN runs in its own task; this task drains TURN → client and
-    // shuts the client side down when the server goes quiet.
-    let metrics_up = metrics.clone();
-    let up = tokio::spawn(async move {
-        // Copy in chunks to count the relayed bytes (README §11 Phase 8).
-        let mut buf = [0u8; 8192];
-        loop {
-            match tls_read.read(&mut buf).await {
-                Ok(0) | Err(_) => break,
-                Ok(n) => {
-                    metrics_up.turn_bytes(n, 0);
-                    if turn_write.write_all(&buf[..n]).await.is_err() {
-                        break;
-                    }
-                }
-            }
-        }
-        let _ = turn_write.shutdown().await;
-    });
-    // TURN → client, also chunked for the byte counters.
-    let mut buf = [0u8; 8192];
-    loop {
-        match turn_read.read(&mut buf).await {
-            Ok(0) | Err(_) => break,
-            Ok(n) => {
-                metrics.turn_bytes(0, n);
-                if tls_write.write_all(&buf[..n]).await.is_err() {
-                    break;
-                }
-            }
-        }
-    }
-    let _ = tls_write.shutdown().await;
-    let _ = up.await;
 }
 
 /// The HTTP/1.1 bootstrap answer: `Alt-Svc` plus a document that reloads once

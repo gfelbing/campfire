@@ -7,9 +7,8 @@
  *   2. each page sees the other in the presence panel;
  *   3. a chat line from A arrives at B (room-wide broadcast);
  *   4. both avatars stand still on the spawn tile, so the server's bubble
- *      engine pulls them into a call — the WebRTC half runs on Chromium's
- *      fake device, and the assertion is `connectionState === "connected"`
- *      (README §6.3: the joiner offers, existing members answer);
+ *      engine pulls them into a call — the assertion is the 🎧 badge
+ *      (server-authoritative call membership, README §6.3), held 3 s;
  *   5. B walks and A sees the movement; B refreshes the tab and walks
  *      again — A still sees B move (a token rejoin restarts the movement
  *      sequence at 0; A's per-user guard must follow the new epoch);
@@ -168,10 +167,10 @@ const userCount = (page) =>
       "🎧 badge for both users on both pages",
       30_000,
     );
-    // The strongest available assertion short of dumping WebRTC internals:
-    // the peer connections live inside the client module scope. Probe via
-    // the presence badge (server-authoritative call membership, README §6.3)
-    // and require it to stay up for 3 s (not a churn blip).
+    // The peer connections live inside the client module scope; media is
+    // not asserted here (the MoQ suite, tools/e2e/moq.js, covers it). Probe
+    // via the presence badge (server-authoritative call membership,
+    // README §6.3) and require it to stay up for 3 s (not a churn blip).
     await sleep(3_000);
     const still = await badgeFor(pageA, NAME_B);
     if (!still) throw new Error("call badge disappeared — bubble did not hold");

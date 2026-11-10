@@ -1,7 +1,7 @@
 //! TLS + QUIC configuration (rustls → quinn).
 //!
-//! Crypto provider: ring (quinn's default). If Phase 5's turn-rs wiring
-//! prefers aws-lc-rs as the global default, this file is the single place to
+//! Crypto provider: ring (quinn's default). If a future feature prefers
+//! aws-lc-rs as the global default, this file is the single place to
 //! switch (README §10 Q5).
 
 use std::fs::File;

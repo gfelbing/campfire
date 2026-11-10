@@ -6,8 +6,7 @@
 //! makes it trivially unit-testable and lets the server, the test clients, and
 //! (later) load-test tools share one definition of the protocol.
 //!
-//! See README §5 (Realtime protocol) for the message catalogue. Call signaling
-//! messages are added with Phase 5/6.
+//! See README §5 (Realtime protocol) for the message catalogue.
 //!
 //! Wire encoding: **newline-delimited JSON** on the reliable stream; one JSON
 //! object per datagram.
@@ -18,11 +17,6 @@ use thiserror::Error;
 
 /// Marker documenting the wire encoding used across the protocol.
 pub const WIRE_ENCODING: &str = "ndjson";
-
-/// Relay cap for SDP payloads (README §5: SDP is a few KB).
-pub const MAX_SDP_BYTES: usize = 64 * 1024;
-/// Relay cap for one ICE candidate (README §5: a few hundred bytes).
-pub const MAX_CANDIDATE_BYTES: usize = 1024;
 
 /// Direction an avatar faces.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -95,10 +89,6 @@ pub enum ErrorCode {
     /// Call signaling state violation: not in the room together, sender
     /// not a participant, or a call is already in progress (README §5/§6).
     CallNotAllowed,
-    /// SDP payload exceeds the 64 KB relay cap (README §5).
-    SdpTooLong,
-    /// ICE candidate exceeds the 1 KB relay cap (README §5).
-    CandidateTooLong,
 }
 
 /// Client → server, reliable stream.
@@ -131,22 +121,6 @@ pub enum ClientMsg {
     /// the server from positions; this only opts in or out.
     Bubble {
         off: bool,
-    },
-    /// Relay one SDP offer to a call participant.
-    CallOffer {
-        to: String,
-        sdp: String,
-    },
-    /// Relay one SDP answer to `to`.
-    CallAnswer {
-        to: String,
-        sdp: String,
-    },
-    /// Relay one ICE candidate to `to` (the candidate is the peer's
-    /// serialized candidate, JSON-encoded by the client).
-    CallIce {
-        to: String,
-        candidate: String,
     },
     /// Presence: the sender's mute/camera state flipped (track.enabled).
     /// Broadcast to every other call participant.
@@ -202,15 +176,11 @@ pub enum ServerMsg {
         on: bool,
     },
     /// A call (re)started or someone joined: everyone in the room gets the
-    /// full participant list. `you_offer` marks the recipient as the one
-    /// who must send SDP offers to the others (a fresh joiner — README
-    /// §6.3: the joiner offers, existing members never renegotiate). Only
-    /// `false` on the wire when unset.
+    /// full participant list (the authoritative catch-up for badges and
+    /// mid-call rejoin, README §6.3).
     CallStart {
         room: String,
         participants: Vec<UserBrief>,
-        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-        you_offer: bool,
         /// Zone-call marker: the `jitsiRoom` name of the zone the call is
         /// bounded by (client highlights the rectangle instead of the
         /// proximity-bubble circle). Only sent when set.
@@ -237,21 +207,6 @@ pub enum ServerMsg {
         reason: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         zone: Option<String>,
-    },
-    /// Relayed SDP offer from `from`.
-    CallOffer {
-        from: String,
-        sdp: String,
-    },
-    /// Relayed SDP answer from `from`.
-    CallAnswer {
-        from: String,
-        sdp: String,
-    },
-    /// Relayed ICE candidate from `from`.
-    CallIce {
-        from: String,
-        candidate: String,
     },
     /// `id`'s mute/camera state changed.
     CallMute {

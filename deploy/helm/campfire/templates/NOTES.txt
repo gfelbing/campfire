@@ -10,17 +10,17 @@ Campfire is deploying. One replica, one port (443 TCP + UDP).
    - TCP 443 via entrypoint `{{ .Values.traefik.tcp.entrypoint }}` with TLS
      passthrough (SNI match: {{ .Values.domain }}) — the pod terminates TLS.
    - UDP 443 via entrypoint `{{ .Values.traefik.udp.entrypoint }}` — raw
-     datagrams to the pod (QUIC, STUN, TURN).
+     datagrams to the pod (QUIC/HTTP/3).
    Make sure both Traefik entrypoints exist and are published on 443.
 
 3. Pod mount: the certificate secret is mounted read-only at /certs and the
    server is started with --cert /certs/tls.crt --key /certs/tls.key.
 
 {{- if .Values.external }}
-4. TURN advertises --external {{ .Values.external }}.
+4. The Alt-Svc bootstrap advertises --external {{ .Values.external }}.
 {{- else }}
-4. --external is NOT set: TURN relayed allocations advertise the pod address.
-   Set values.external to your public IP (IP:port) for production ICE.
+4. --external is NOT set: the bootstrap advertises the port it binds.
+   Set values.external (IP:port) behind a port-mapping entrypoint.
 {{- end }}
 
 Open https://{{ .Values.domain }}/ once DNS points {{ .Values.domain }} at

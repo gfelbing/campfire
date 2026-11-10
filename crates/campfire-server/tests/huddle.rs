@@ -1,21 +1,19 @@
 //! Phase 6 acceptance test (README §11): proximity bubbles.
 //!
 //! > **Done when:** 6-participant call; a mid-call join plus a mid-call
-//! > drop/reconnect; no leaked peer connections; auto voice-only engages
-//! > at 10 participants.
+//! > drop/reconnect; auto voice-only engages at 10 participants.
 //!
 //! Everything the *server* does for the call runs here over **real
 //! HTTP/3 on QUIC**: the bubble forms by itself from avatar positions
 //! (no ring/accept), grows one joiner per tick, is room-wide state
-//! (headphone badge), relays the joiner's offers to every existing
-//! member, keeps a dropped member's seat through the reconnect window,
-//! drops a member who walks out of the leave radius, and ends with
-//! `call_end(last_left)` — leaving no leaked call state.
+//! (headphone badge), keeps a dropped member's seat through the
+//! reconnect window, drops a member who walks out of the leave radius,
+//! and ends with `call_end(last_left)` — leaving no leaked call state.
 //!
-//! The WebRTC side (N-1 `RTCPeerConnection`s per member, zero leaked
-//! peer connections, auto voice-only at 9+) is browser-only: it is
-//! implemented in `client/src/call` and checked manually with six
-//! windows, per README §11.
+//! Media is the MoQ SFU's (docs/moq-sfu.md); there is no signaling to
+//! relay. The client-side delivery (the theater, auto voice-only at 9+)
+//! is browser-only: it is implemented in `client/src/call` and checked
+//! manually with six windows, per README §11.
 
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -98,14 +96,10 @@ impl TestClient {
     }
 
     /// Next `CallStart`, skipping presence noise (`Joined`, …).
-    async fn next_call_start(&mut self) -> (Vec<UserBrief>, bool) {
+    async fn next_call_start(&mut self) -> Vec<UserBrief> {
         loop {
             match self.recv().await {
-                ServerMsg::CallStart {
-                    participants,
-                    you_offer,
-                    ..
-                } => return (participants, you_offer),
+                ServerMsg::CallStart { participants, .. } => return participants,
                 _ => continue,
             }
         }
@@ -201,27 +195,6 @@ async fn as_call_end(c: &mut TestClient) -> String {
     }
 }
 
-async fn as_call_offer(c: &mut TestClient) -> (String, String) {
-    match c.recv().await {
-        ServerMsg::CallOffer { from, sdp } => (from, sdp),
-        m => panic!("expected call_offer, got {m:?}"),
-    }
-}
-
-async fn as_call_answer(c: &mut TestClient) -> (String, String) {
-    match c.recv().await {
-        ServerMsg::CallAnswer { from, sdp } => (from, sdp),
-        m => panic!("expected call_answer, got {m:?}"),
-    }
-}
-
-async fn as_call_ice(c: &mut TestClient) -> (String, String) {
-    match c.recv().await {
-        ServerMsg::CallIce { from, candidate } => (from, candidate),
-        m => panic!("expected call_ice, got {m:?}"),
-    }
-}
-
 async fn as_call_mute(c: &mut TestClient) -> (String, bool, bool) {
     match c.recv().await {
         ServerMsg::CallMute { id, audio, video } => (id, audio, video),
@@ -268,87 +241,42 @@ async fn bubble_six_members_join_drop_and_walk_away() {
     tokio::time::sleep(Duration::from_millis(150)).await;
     // The first tick after {alice, bob} forms the bubble.
     for u in [&mut a, &mut b, &mut g] {
-        let (p, _you) = u.next_call_start().await;
+        let p = u.next_call_start().await;
         expect_ids(&p, &[&a_id, &b_id]);
     }
 
     // Carol, dave, erin, frank join one per tick (spacing > 1 tick keeps
     // each newcomer the only candidate): the roster grows by one each
-    // time, and the joiner is the designated offerer (`you_offer`).
+    // time.
     let (mut c, c_id, _ct) = join(addr, "office", "carol").await;
     tokio::time::sleep(Duration::from_millis(150)).await;
-    for (u, you) in [
-        (&mut a, false),
-        (&mut b, false),
-        (&mut c, true),
-        (&mut g, false),
-    ] {
-        let (p, got) = u.next_call_start().await;
+    for u in [&mut a, &mut b, &mut c, &mut g] {
+        let p = u.next_call_start().await;
         expect_ids(&p, &[&a_id, &b_id, &c_id]);
-        assert_eq!(got, you, "the joiner offers");
     }
 
     let (mut d, d_id, _dt) = join(addr, "office", "dave").await;
     tokio::time::sleep(Duration::from_millis(150)).await;
     for u in [&mut a, &mut b, &mut c, &mut d, &mut g] {
-        let (p, _) = u.next_call_start().await;
+        let p = u.next_call_start().await;
         expect_ids(&p, &[&a_id, &b_id, &c_id, &d_id]);
     }
 
     let (mut e, e_id, _et) = join(addr, "office", "erin").await;
     tokio::time::sleep(Duration::from_millis(150)).await;
     for u in [&mut a, &mut b, &mut c, &mut d, &mut e, &mut g] {
-        let (p, _) = u.next_call_start().await;
+        let p = u.next_call_start().await;
         expect_ids(&p, &[&a_id, &b_id, &c_id, &d_id, &e_id]);
     }
 
     let (mut f, f_id, _ft) = join(addr, "office", "frank").await;
     tokio::time::sleep(Duration::from_millis(150)).await;
     for u in [&mut a, &mut b, &mut c, &mut d, &mut e, &mut f, &mut g] {
-        let (p, _) = u.next_call_start().await;
+        let p = u.next_call_start().await;
         expect_ids(&p, &[&a_id, &b_id, &c_id, &d_id, &e_id, &f_id]);
     }
     // Done-when: a 6-participant call.
     let _ = f_id;
-
-    // Newcomer re-ICE: carol offers alice and bob; they answer; ICE flows
-    // both ways; existing members never renegotiate (README §6.3).
-    c.send(&ClientMsg::CallOffer {
-        to: a_id.clone(),
-        sdp: "v=0 c-offer-a".into(),
-    })
-    .await;
-    c.send(&ClientMsg::CallOffer {
-        to: b_id.clone(),
-        sdp: "v=0 c-offer-b".into(),
-    })
-    .await;
-    let (from, sdp) = as_call_offer(&mut a).await;
-    assert_eq!((from, sdp), (c_id.clone(), "v=0 c-offer-a".to_owned()));
-    let (from, sdp) = as_call_offer(&mut b).await;
-    assert_eq!((from, sdp), (c_id.clone(), "v=0 c-offer-b".to_owned()));
-    a.send(&ClientMsg::CallAnswer {
-        to: c_id.clone(),
-        sdp: "v=0 a-answer-c".into(),
-    })
-    .await;
-    b.send(&ClientMsg::CallAnswer {
-        to: c_id.clone(),
-        sdp: "v=0 b-answer-c".into(),
-    })
-    .await;
-    assert_eq!(as_call_answer(&mut c).await.0, a_id);
-    assert_eq!(as_call_answer(&mut c).await.0, b_id);
-    c.send(&ClientMsg::CallIce {
-        to: a_id.clone(),
-        candidate: r#"{"candidate":"c-cand"}"#.into(),
-    })
-    .await;
-    let (from, cand) = as_call_ice(&mut a).await;
-    assert_eq!(
-        (from, cand),
-        (c_id.clone(), r#"{"candidate":"c-cand"}"#.to_owned())
-    );
 
     // Mute is presence: call-scoped (not room-wide). Alice mutes; only
     // the other participants hear it — not grace.
@@ -439,8 +367,8 @@ async fn bubble_six_members_join_drop_and_walk_away() {
     // ids are not join-ordered), so only assert that a bubble exists again.
     c.move_to(&c_id, SPAWN.0 + 0.5, SPAWN.1, 1);
     tokio::time::sleep(Duration::from_millis(150)).await;
-    let (p, _) = a.next_call_start().await;
+    let p = a.next_call_start().await;
     assert!(p.len() >= 2, "a fresh bubble reformed");
-    let (p, _) = c.next_call_start().await;
+    let p = c.next_call_start().await;
     assert!(p.len() >= 2, "a fresh bubble reformed");
 }

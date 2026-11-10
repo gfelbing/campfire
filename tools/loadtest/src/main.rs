@@ -9,13 +9,13 @@
 //!   changes, so the server validates and rebroadcasts real movement,
 //! * a fraction of the bots are clustered into `--groups` meeting points of
 //!   `--group-size`, which the server's bubble engine turns into calls
-//!   (README §6.3); group members then relay fake SDP offers/answers to
-//!   exercise the signaling path without real WebRTC,
+//!   (README §6.3); group members then toggle mute to
+//!   exercise the call-state path without real media,
 //! * occasionally chats (within the 1 msg/s room limit).
 //!
 //! It reports its own view — connect latency, inbound messages/s, errors —
 //! every `--report-secs` and a final summary. Server-side truth (tick
-//! latency, datagram totals, TURN) comes from `GET /metrics` over HTTP/3,
+//! latency, datagram totals) comes from `GET /metrics` over HTTP/3,
 //! scraped by whatever drives the run (see README §15).
 //!
 //! Turn OFF cert validation like the test suite: load runs target a dev
@@ -392,23 +392,16 @@ async fn bot(
                 break;
             }
         }
-        // Group bots relay tiny fake SDP payloads once a call exists —
-        // exercises the room-wide signaling fan-out without real WebRTC.
+        // Group bots exercise the room-wide call fan-out by sending mute
+        // toggles once a call exists.
         if let Some(partners) = &partners
             && step.is_multiple_of(50)
             && in_call.load(Ordering::Relaxed)
         {
-            let to = partners[step as usize % partners.len()].clone();
-            let msg = if step % 100 < 50 {
-                ClientMsg::CallOffer {
-                    to,
-                    sdp: "v=0 fake-loadtest".into(),
-                }
-            } else {
-                ClientMsg::CallAnswer {
-                    to,
-                    sdp: "v=0 fake-loadtest".into(),
-                }
+            let _ = partners[step as usize % partners.len()].clone();
+            let msg = ClientMsg::CallMute {
+                audio: step % 100 < 50,
+                video: false,
             };
             if send.write_all(to_line(&msg).as_bytes()).await.is_err()
                 || send.flush().await.is_err()
