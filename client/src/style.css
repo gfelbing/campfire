@@ -641,14 +641,15 @@ body {
   cursor: pointer;
 }
 
-.theater-tile video {
+.theater-tile video,
+.theater-tile canvas {
   width: 100%;
   height: 100%;
   object-fit: contain;
   display: block;
 }
 
-.theater-tile video.speaking {
+.theater-tile canvas.speaking {
   outline: 3px solid #4d9e57;
   outline-offset: -3px;
 }
@@ -686,7 +687,7 @@ body {
   transform: scaleX(-1);
 }
 
-/* center focus overlay: the clicked tile's <video> element moves here */
+/* center focus overlay: the clicked tile's media element moves here */
 .theater-focus {
   position: absolute;
   inset: 0;
@@ -708,14 +709,15 @@ body {
   border: 1px solid var(--line);
 }
 
-.theater-focus-slot video {
+.theater-focus-slot video,
+.theater-focus-slot canvas {
   width: 100%;
   height: 100%;
   object-fit: contain;
   display: block;
 }
 
-.theater-focus-slot video.speaking {
+.theater-focus-slot canvas.speaking {
   outline: 3px solid #4d9e57;
   outline-offset: -3px;
 }

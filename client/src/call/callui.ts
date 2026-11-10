@@ -2,13 +2,14 @@
 //! video streams stack in a column on the right side, over the map, with a
 //! local PiP tile and the mic/camera/share/hang-up bar on top. Every
 //! stream is its own tile — a participant can send camera AND screen at
-//! once, so a sharer appears twice. Clicking a stream focuses it large in
+//! once, so a sharer appears twice. Remote video is a `<canvas>` the MoQ
+//! downlink paints (docs/moq-sfu.md §9 Phase 3); the local PiP stays a
+//! `<video>` on `localStream`. Clicking a stream focuses it large in
 //! the center overlay; clicking again (or Escape) unfocuses. Joining is
 //! automatic (proximity), so there are no ring or accept overlays —
 //! walking away is how you leave.
 
-import type { CallPhase, PeerView } from "./manager";
-import type { PeerState } from "./peer";
+import type { CallPhase, DownlinkState, PeerView } from "./manager";
 
 export interface CallUiActions {
   onHangup(): void;
@@ -31,12 +32,14 @@ interface Tile {
   /** Tile key: `<peerId>:cam` or `<peerId>:scr`. */
   key: string;
   el: HTMLElement;
-  video: HTMLVideoElement;
+  /** The downlink's paint target (a `<canvas>`), once wired. */
+  media: HTMLCanvasElement | null;
   nameEl: HTMLElement;
   stateEl: HTMLElement;
   muteEl: HTMLElement;
   camEl: HTMLElement;
   screenEl: HTMLElement;
+  /** The downlink's audio MediaStream (level meter), once wired. */
   stream: MediaStream | null;
   /** Only camera tiles get a level meter (the screen stream has no audio). */
   meter: boolean;
@@ -46,30 +49,24 @@ interface Tile {
 }
 
 /** Aggregate the per-peer states into one column-level label. */
-function aggregateState(peers: PeerView[]): { text: string; state: PeerState } {
-  if (peers.length === 0) return { text: "waiting for peers…", state: "new" };
-  const has = (s: PeerState) => peers.some((p) => p.state === s);
-  if (has("failed")) return { text: "connection problem", state: "failed" };
-  const connected = peers.filter((p) => p.state === "connected");
-  const viaRelay = connected.some((p) => p.viaRelay);
-  if (connected.length === peers.length) {
-    return { text: viaRelay ? "connected (via relay)" : "connected", state: "connected" };
+function aggregateState(peers: PeerView[]): { text: string; state: DownlinkState } {
+  if (peers.length === 0) return { text: "waiting for peers…", state: "subscribing" };
+  const has = (s: DownlinkState) => peers.some((p) => p.state === s);
+  if (has("offline")) return { text: "connection problem", state: "offline" };
+  if (peers.every((p) => p.state === "live")) {
+    return { text: "live", state: "live" };
   }
-  if (has("disconnected")) return { text: "reconnecting…", state: "disconnected" };
-  return { text: "connecting…", state: "connecting" };
+  return { text: "subscribing…", state: "subscribing" };
 }
 
-function stateText(state: PeerState, viaRelay: boolean): string {
+function stateText(state: DownlinkState): string {
   switch (state) {
-    case "connected":
-      return viaRelay ? "connected (via relay)" : "connected";
-    case "connecting":
-    case "new":
-      return "connecting…";
-    case "disconnected":
-      return "reconnecting…";
-    case "failed":
-      return "connection failed";
+    case "live":
+      return "live";
+    case "subscribing":
+      return "subscribing…";
+    case "offline":
+      return "no signal";
     default:
       return state;
   }
@@ -146,7 +143,7 @@ export function createCallUI(container: HTMLElement, actions: CallUiActions): Ca
     t.analyser?.disconnect();
     t.analyser = null;
     t.data = null;
-    t.video.classList.remove("speaking");
+    t.media?.classList.remove("speaking");
     if (levelTimer !== null && ![...tiles.values()].some((x) => x.analyser)) {
       window.clearInterval(levelTimer);
       levelTimer = null;
@@ -173,13 +170,13 @@ export function createCallUI(container: HTMLElement, actions: CallUiActions): Ca
       levelTimer = window.setInterval(() => {
         for (const tile of tiles.values()) {
           if (!tile.meter || !tile.analyser || !tile.data) {
-            tile.video.classList.remove("speaking");
+            tile.media?.classList.remove("speaking");
             continue;
           }
           tile.analyser.getByteFrequencyData(tile.data);
           let sum = 0;
           for (let i = 0; i < tile.data.length; i++) sum += tile.data[i];
-          tile.video.classList.toggle("speaking", sum / tile.data.length > 24);
+          tile.media?.classList.toggle("speaking", sum / tile.data.length > 24);
         }
       }, 100);
     }
@@ -189,16 +186,14 @@ export function createCallUI(container: HTMLElement, actions: CallUiActions): Ca
     const el = document.createElement("div");
     el.className = `theater-tile${screen ? " screen" : ""}`;
     el.innerHTML = `
-      <video autoplay playsinline></video>
       <div class="theater-tile-info"><span class="tile-name"></span><span class="tile-state"></span></div>
       <span class="call-badge tile-mute hidden">🔇</span>
       <span class="call-badge tile-cam hidden">📷 off</span>
       <span class="call-badge tile-screen hidden">🖥</span>`;
-    const video = el.querySelector<HTMLVideoElement>("video")!;
     const tile: Tile = {
       key,
       el,
-      video,
+      media: null,
       nameEl: el.querySelector<HTMLElement>(".tile-name")!,
       stateEl: el.querySelector<HTMLElement>(".tile-state")!,
       muteEl: el.querySelector<HTMLElement>(".tile-mute")!,
@@ -223,17 +218,20 @@ export function createCallUI(container: HTMLElement, actions: CallUiActions): Ca
     return tile;
   }
 
-  function updateTile(t: Tile, name: string, state: PeerState, viaRelay: boolean, stream: MediaStream | null, audioOn: boolean, videoOn: boolean, silent: boolean): void {
+  function updateTile(t: Tile, name: string, state: DownlinkState, canvas: HTMLCanvasElement | null, stream: MediaStream | null, audioOn: boolean, videoOn: boolean): void {
     t.nameEl.textContent = t.key.endsWith(":scr") ? `${name} · screen` : name;
-    t.stateEl.textContent = stateText(state, viaRelay);
+    t.stateEl.textContent = stateText(state);
     t.muteEl.classList.toggle("hidden", audioOn);
     t.camEl.classList.toggle("hidden", videoOn);
-    // A silentZone (README roadmap "Map enhancements"): the tile's audio
-    // (through the video element) is muted locally.
-    t.video.muted = silent;
+    // The downlink's canvas is the paint target; move it in when it first
+    // appears (rebuilding it would restart the decode pipeline).
+    if (canvas !== t.media) {
+      t.media?.remove();
+      t.media = canvas;
+      if (canvas) t.el.prepend(canvas);
+    }
     if (stream !== t.stream) {
       t.stream = stream;
-      t.video.srcObject = stream;
       if (stream && t.meter) startMeter(t, stream);
       else stopMeter(t);
     }
@@ -243,9 +241,9 @@ export function createCallUI(container: HTMLElement, actions: CallUiActions): Ca
 
   function focusTile(key: string): void {
     const t = tiles.get(key);
-    if (!t) return;
+    if (!t || !t.media) return;
     focused = key;
-    focusSlot.appendChild(t.video); // the same element: the stream keeps playing
+    focusSlot.appendChild(t.media); // the same element: decoding keeps going
     focus.classList.remove("hidden");
   }
 
@@ -253,7 +251,7 @@ export function createCallUI(container: HTMLElement, actions: CallUiActions): Ca
     const t = focused !== null ? tiles.get(focused) : undefined;
     focused = null;
     focus.classList.add("hidden");
-    if (t) t.el.prepend(t.video); // back into the column
+    if (t?.media) t.el.prepend(t.media); // back into the column
   }
 
   focus.addEventListener("click", () => unfocus());
@@ -324,12 +322,11 @@ export function createCallUI(container: HTMLElement, actions: CallUiActions): Ca
         key: string;
         name: string;
         screen: boolean;
+        canvas: HTMLCanvasElement | null;
         stream: MediaStream | null;
-        state: PeerState;
-        viaRelay: boolean;
+        state: DownlinkState;
         audioOn: boolean;
         videoOn: boolean;
-        silent: boolean;
       }
       const views: View[] = [];
       for (const p of peers) {
@@ -337,24 +334,22 @@ export function createCallUI(container: HTMLElement, actions: CallUiActions): Ca
           key: `${p.id}:cam`,
           name: p.name,
           screen: false,
-          stream: p.camera,
+          canvas: p.camera,
+          stream: p.cameraStream,
           state: p.state,
-          viaRelay: p.viaRelay,
           audioOn: p.audioOn,
           videoOn: p.videoOn,
-          silent: p.silent,
         });
         if (p.screen) {
           views.push({
             key: `${p.id}:scr`,
             name: p.name,
             screen: true,
-            stream: p.screen,
+            canvas: p.screen,
+            stream: null, // the screen share carries no audio
             state: p.state,
-            viaRelay: p.viaRelay,
             audioOn: true,
             videoOn: true,
-            silent: false,
           });
         }
       }
@@ -366,7 +361,7 @@ export function createCallUI(container: HTMLElement, actions: CallUiActions): Ca
           t = makeTile(v.key, v.name, v.screen);
           tiles.set(v.key, t);
         }
-        updateTile(t, v.name, v.state, v.viaRelay, v.stream, v.audioOn, v.videoOn, v.silent);
+        updateTile(t, v.name, v.state, v.canvas, v.stream, v.audioOn, v.videoOn);
       }
       for (const [key, t] of tiles) {
         if (!seen.has(key)) {
@@ -378,7 +373,9 @@ export function createCallUI(container: HTMLElement, actions: CallUiActions): Ca
       }
       const agg = aggregateState(peers);
       theaterState.textContent = agg.text;
-      col.dataset.state = agg.state;
+      // Map onto the column's CSS state colors (green/red).
+      col.dataset.state =
+        agg.state === "live" ? "connected" : agg.state === "offline" ? "failed" : "connecting";
       tilesEl.dataset.empty = peers.length === 0 ? "1" : "0";
     },
     setLocalMute(audio, video) {
