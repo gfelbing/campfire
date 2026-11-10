@@ -17,6 +17,9 @@ WORKDIR /build
 # in the same stage as cargo so the static embed is fresh.
 COPY rust-toolchain.toml Cargo.toml Cargo.lock ./
 COPY crates ./crates
+# The tools are workspace members: cargo loads every member's manifest
+# before building, so their sources must be present even though only the
+# server is compiled.
 COPY tools/loadtest ./tools/loadtest
 COPY tools/moq-spike ./tools/moq-spike
 COPY client ./client
@@ -32,10 +35,13 @@ RUN apt-get update \
 # of the target cache in the same RUN.
 RUN --mount=type=cache,target=/root/.npm,sharing=locked \
     npm --prefix client ci && npm --prefix client run build
+# Only the server package is shipped; -p skips compiling the tools'
+# binaries (their sources must still exist — cargo loads every workspace
+# member's manifest before building anything).
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,target=/build/target,sharing=locked \
-    cargo build --release && cp target/release/campfire /build/campfire
+    cargo build --release -p campfire-server && cp target/release/campfire /build/campfire
 
 FROM debian:stable-slim
 RUN apt-get update \
