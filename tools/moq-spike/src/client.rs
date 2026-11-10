@@ -87,6 +87,23 @@ struct Args {
     /// a newer one arrives, which drops scattered groups under jitter.
     #[arg(long, default_value = "1s")]
     max_age: String,
+
+    /// Media ticket for the app server (docs/moq-sfu.md §7): every session
+    /// this client opens is admitted with it (`?ticket=…` on the URL).
+    #[arg(long)]
+    ticket: Option<String>,
+
+    /// Skip the publisher session: pure subscriber, the media is published
+    /// by another client (the Phase 2 e2e browser uplink).
+    #[arg(long)]
+    no_publish: bool,
+
+    /// Do not strip the 8-byte send-stamp prefix from frames (spike
+    /// publisher convention). For foreign publishers (browser media) the
+    /// receive time is the stamp; latency stats read as ~0 and are
+    /// meaningless, sample/byte counts are not.
+    #[arg(long)]
+    no_stamp: bool,
 }
 
 /// Parse `30s`, `500ms`, `1.5s`, `250us` or bare seconds.
@@ -140,65 +157,81 @@ async fn main() -> Result<()> {
     let endpoint = wtransport::Endpoint::client(config)?;
 
     let path = args.path.clone();
-    let wt_url = args.url.trim_end_matches('/').to_string();
+    let mut wt_url = args.url.trim_end_matches('/').to_string();
+    if let Some(ticket) = &args.ticket {
+        // The ticket is 32 hex bytes: URL-safe as-is, no encoding needed.
+        wt_url.push_str(&format!("?ticket={ticket}"));
+    }
 
     // --- publisher session --------------------------------------------------
-    let publisher = connect_session(&endpoint, &wt_url).await?;
-    info!(?publisher.version, "publisher connected");
+    // In pure-subscriber mode (`--no-publish`, the Phase 2 e2e) the media is
+    // published by another client; this process only subscribes.
+    let (publisher, pub_task) = if args.no_publish {
+        (None, None)
+    } else {
+        let publisher = connect_session(&endpoint, &wt_url).await?;
+        info!(?publisher.version, "publisher connected");
 
-    let b = publisher
-        .origin
-        .publish(&path, moq_net::origin::Route::default())
-        .expect("publishing local broadcast");
-    let track_info = moq_net::track::Info::default().with_timescale(moq_net::Timescale::MICRO);
-    let mut v = b
-        .create_track("v", track_info.clone())
-        .expect("creating video track");
-    let mut a = b.create_track("a", track_info).expect("creating audio track");
-    let video_fill = vec![0xA5u8; args.video_bytes];
-    let audio_fill = vec![0x5Au8; args.audio_bytes];
-    let video_every = (video_interval.as_millis() / audio_interval.as_millis()).max(1) as u64;
-    // The publisher outlives a late-joining subscriber by the join delay, so
-    // every subscriber still gets a full `duration` measurement window.
-    let pub_duration = duration + join_delay;
+        let b = publisher
+            .origin
+            .publish(&path, moq_net::origin::Route::default())
+            .expect("publishing local broadcast");
+        let track_info = moq_net::track::Info::default().with_timescale(moq_net::Timescale::MICRO);
+        let mut v = b
+            .create_track("v", track_info.clone())
+            .expect("creating video track");
+        let mut a = b.create_track("a", track_info).expect("creating audio track");
+        let video_fill = vec![0xA5u8; args.video_bytes];
+        let audio_fill = vec![0x5Au8; args.audio_bytes];
+        let video_every = (video_interval.as_millis() / audio_interval.as_millis()).max(1) as u64;
+        // The publisher outlives a late-joining subscriber by the join delay,
+        // so every subscriber still gets a full `duration` measurement window.
+        let pub_duration = duration + join_delay;
 
-    let pub_task = tokio::spawn(async move {
-        let deadline = run_start + pub_duration;
-        let mut tick = 0u64;
-        loop {
-            let now_us = run_start.elapsed().as_micros() as u64;
-            let ts = moq_net::Timestamp::from_micros(now_us).expect("timestamp in range");
-            // Lite02 wire carries no frame timestamp (receivers re-stamp
-            // local receive time), so the send stamp rides in the payload:
-            // u64 LE microseconds since run_start, stripped in `reader_task`.
-            let stamp = now_us.to_le_bytes();
-            if tick % video_every == 0 {
-                let mut payload = Vec::with_capacity(8 + video_fill.len());
+        let pub_task = tokio::spawn(async move {
+            let deadline = run_start + pub_duration;
+            let mut tick = 0u64;
+            loop {
+                let now_us = run_start.elapsed().as_micros() as u64;
+                let ts = moq_net::Timestamp::from_micros(now_us).expect("timestamp in range");
+                // Lite02 wire carries no frame timestamp (receivers re-stamp
+                // local receive time), so the send stamp rides in the payload:
+                // u64 LE microseconds since run_start, stripped in `reader_task`.
+                let stamp = now_us.to_le_bytes();
+                if tick.is_multiple_of(video_every) {
+                    let mut payload = Vec::with_capacity(8 + video_fill.len());
+                    payload.extend_from_slice(&stamp);
+                    payload.extend_from_slice(&video_fill);
+                    if v.write_frame(ts, payload).is_err() {
+                        break;
+                    }
+                }
+                let mut payload = Vec::with_capacity(8 + audio_fill.len());
                 payload.extend_from_slice(&stamp);
-                payload.extend_from_slice(&video_fill);
-                if v.write_frame(ts, payload).is_err() {
+                payload.extend_from_slice(&audio_fill);
+                if a.write_frame(ts, payload).is_err() {
                     break;
                 }
+                tick += 1;
+                if Instant::now() >= deadline {
+                    break;
+                }
+                tokio::time::sleep(audio_interval).await;
             }
-            let mut payload = Vec::with_capacity(8 + audio_fill.len());
-            payload.extend_from_slice(&stamp);
-            payload.extend_from_slice(&audio_fill);
-            if a.write_frame(ts, payload).is_err() {
-                break;
-            }
-            tick += 1;
-            if Instant::now() >= deadline {
-                break;
-            }
-            tokio::time::sleep(audio_interval).await;
-        }
-    });
+        });
+        (Some(publisher), Some(pub_task))
+    };
 
     // --- subscriber sessions -------------------------------------------------
     let mut handles = Vec::new();
+    let mut subscriber_version: Option<moq_net::Version> = None;
+    let stamp_prefix = !args.no_stamp;
     for i in 0..args.subscribers {
         let subscriber = connect_session(&endpoint, &wt_url).await?;
         info!(subscriber = i, "connected");
+        if subscriber_version.is_none() {
+            subscriber_version = Some(subscriber.version);
+        }
         let path = args.sub_path.clone().unwrap_or_else(|| path.clone());
         handles.push(tokio::spawn(async move {
             // The session handle must live until the task ends: dropping it
@@ -209,7 +242,7 @@ async fn main() -> Result<()> {
             if join_delay > Duration::ZERO {
                 tokio::time::sleep(join_delay).await;
             }
-            let stats = match run_subscriber(origin, &path, run_start, duration, max_age).await {
+            let stats = match run_subscriber(origin, &path, run_start, duration, max_age, stamp_prefix).await {
                 Ok(stats) => stats,
                 Err(err) => {
                     warn!(subscriber = i, %err, "subscriber failed");
@@ -227,12 +260,17 @@ async fn main() -> Result<()> {
     }
 
     // Let the publisher wind down, then report.
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    let _ = pub_task.await;
+    if let Some(pub_task) = pub_task {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let _ = pub_task.await;
+    }
 
     let result = serde_json::json!({
         "url": args.url,
-        "negotiated_version": format!("{:?}", publisher.version),
+        "negotiated_version": publisher
+            .as_ref()
+            .map(|p| format!("{:?}", p.version))
+            .or_else(|| subscriber_version.map(|v| format!("{v:?}"))),
         "max_age_ms": max_age.as_millis() as u64,
         "duration_s": run_start.elapsed().as_secs_f64(),
         "cpu_seconds": cpu_time() - cpu_start,
@@ -322,6 +360,7 @@ async fn run_subscriber(
     run_start: Instant,
     duration: Duration,
     max_age: Duration,
+    stamp_prefix: bool,
 ) -> Result<serde_json::Value> {
     let consumer = origin.consume();
     let subscribe_start = Instant::now();
@@ -351,7 +390,7 @@ async fn run_subscriber(
             .map_err(|e| anyhow::anyhow!("subscribe {name} failed: {e}"))?;
         let (tx, rx) = tokio::sync::mpsc::channel::<(u128, u64, Instant)>(512);
         tracks.push((name, rx));
-        tokio::spawn(reader_task(name, subscriber, tx));
+        tokio::spawn(reader_task(name, subscriber, tx, run_start, stamp_prefix));
     }
 
     let deadline = subscribe_start + duration;
@@ -442,6 +481,8 @@ async fn reader_task(
     name: &str,
     subscriber: moq_net::track::Subscriber,
     tx: tokio::sync::mpsc::Sender<(u128, u64, Instant)>,
+    run_start: Instant,
+    stamp_prefix: bool,
 ) {
     let mut sub = subscriber;
     // Count the groups the cursor hands out and how each one ends; the
@@ -456,22 +497,27 @@ async fn reader_task(
             match group.read_frame().await {
                 Ok(Some(frame)) => {
                     frames += 1;
-                    // Strip the u64 LE send stamp the publisher embedded in
-                    // the payload (the wire's own timestamp is a local
-                    // receive stamp under Lite02 and unusable).
-                    let payload = frame.payload;
-                    if payload.len() < 8 {
-                        continue;
-                    }
-                    let mut stamp_buf = [0u8; 8];
-                    stamp_buf.copy_from_slice(&payload[..8]);
-                    let stamp_us = u64::from_le_bytes(stamp_buf) as u128;
-                    let body_len = payload.len() as u64 - 8;
-                    if tx
-                        .send((stamp_us, body_len, Instant::now()))
-                        .await
-                        .is_err()
-                    {
+                    let rx = Instant::now();
+                    // With the spike's own publisher the payload embeds a u64
+                    // LE send stamp (the wire's own timestamp is a local
+                    // receive stamp under Lite02 and unusable); with a foreign
+                    // publisher (browser media, `--no-stamp`) the whole payload
+                    // is body and the receive time is the stamp.
+                    let (stamp_us, body_len) = if stamp_prefix {
+                        let payload = &frame.payload;
+                        if payload.len() < 8 {
+                            continue;
+                        }
+                        let mut stamp_buf = [0u8; 8];
+                        stamp_buf.copy_from_slice(&payload[..8]);
+                        (u64::from_le_bytes(stamp_buf) as u128, payload.len() as u64 - 8)
+                    } else {
+                        (
+                            rx.saturating_duration_since(run_start).as_micros(),
+                            frame.payload.len() as u64,
+                        )
+                    };
+                    if tx.send((stamp_us, body_len, rx)).await.is_err() {
                         return;
                     }
                 }

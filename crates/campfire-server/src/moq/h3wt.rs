@@ -4,7 +4,6 @@
 //! so this bridge is what the rebuilt SFU runs on.
 
 use std::{
-    future::Future,
     sync::Arc,
     task::{Context, Poll},
 };
@@ -120,67 +119,55 @@ impl wt::Session for Session {
     type RecvStream = RecvStream;
     type Error = Error;
 
-    fn accept_uni(&self) -> impl Future<Output = Result<RecvStream, Error>> + wt::MaybeSend {
-        async move {
-            match self.inner.accept_uni().await.map_err(|e| log_err("accept_uni", e))? {
-                Some((_id, stream)) => {
-                    Ok(RecvStream::new(stream))
-                }
-                // None: the session's stream queue is drained for good.
-                None => Err(Error::Closed),
+    async fn accept_uni(&self) -> Result<RecvStream, Error> {
+        match self.inner.accept_uni().await.map_err(|e| log_err("accept_uni", e))? {
+            Some((_id, stream)) => {
+                Ok(RecvStream::new(stream))
             }
+            // None: the session's stream queue is drained for good.
+            None => Err(Error::Closed),
         }
     }
 
-    fn accept_bi(
-        &self,
-    ) -> impl Future<Output = Result<(SendStream, RecvStream), Error>> + wt::MaybeSend {
-        async move {
-            let accepted = self
-                .inner
-                .accept_bi()
-                .await
-                .map_err(|e| log_err("accept_bi", e))?;
-            match accepted {
-                Some(AcceptedBi::BidiStream(_id, bidi)) => {
-                    let (send, recv) = bidi.split();
-                    Ok((SendStream::new(send), RecvStream::new(recv)))
-                }
-                // A plain h3 request inside the WebTransport session: the MoQ
-                // clients never send one; failing is the honest answer.
-                Some(AcceptedBi::Request(_request, _stream)) => {
-                    Err(Error::Stream("unexpected h3 request in webtransport session".into()))
-                }
-                None => Err(Error::Closed),
+    async fn accept_bi(&self) -> Result<(SendStream, RecvStream), Error> {
+        let accepted = self
+            .inner
+            .accept_bi()
+            .await
+            .map_err(|e| log_err("accept_bi", e))?;
+        match accepted {
+            Some(AcceptedBi::BidiStream(_id, bidi)) => {
+                let (send, recv) = bidi.split();
+                Ok((SendStream::new(send), RecvStream::new(recv)))
             }
+            // A plain h3 request inside the WebTransport session: the MoQ
+            // clients never send one; failing is the honest answer.
+            Some(AcceptedBi::Request(_request, _stream)) => {
+                Err(Error::Stream("unexpected h3 request in webtransport session".into()))
+            }
+            None => Err(Error::Closed),
         }
     }
 
-    fn open_bi(
-        &self,
-    ) -> impl Future<Output = Result<(SendStream, RecvStream), Error>> + wt::MaybeSend {
+    async fn open_bi(&self) -> Result<(SendStream, RecvStream), Error> {
         let session_id = self.inner.session_id();
-        async move {
-            let bidi = self
-                .inner
-                .open_bi(session_id)
-                .await
-                .map_err(|e| log_err("open_bi", e))?;
-            let (send, recv) = bidi.split();
-            Ok((SendStream::new(send), RecvStream::new(recv)))
-        }
+        let bidi = self
+            .inner
+            .open_bi(session_id)
+            .await
+            .map_err(|e| log_err("open_bi", e))?;
+        let (send, recv) = bidi.split();
+        Ok((SendStream::new(send), RecvStream::new(recv)))
     }
 
-    fn open_uni(&self) -> impl Future<Output = Result<SendStream, Error>> + wt::MaybeSend {
+    async fn open_uni(&self) -> Result<SendStream, Error> {
         let session_id = self.inner.session_id();
-        async move {
-            let stream = self
-                .inner
-                .open_uni(session_id)
-                .await
-                .map_err(|e| log_err("open_uni", e))?;
-            Ok(SendStream::new(stream))
-        }
+        let stream = self
+            .inner
+            .open_uni(session_id)
+            .await
+            .map_err(|e| log_err("open_uni", e))?;
+        Ok(SendStream::new(stream))
     }
 
     fn send_datagram(&self, payload: Bytes) -> Result<(), Error> {
@@ -188,13 +175,11 @@ impl wt::Session for Session {
         sender.send_datagram(payload).map_err(|err| Error::Stream(err.to_string()))
     }
 
-    fn recv_datagram(&self) -> impl Future<Output = Result<Bytes, Error>> + wt::MaybeSend {
-        async move {
-            let mut guard = self.dgram_reader.lock().await;
-            let reader = guard.get_or_insert_with(|| self.inner.datagram_reader());
-            let dgram = reader.read_datagram().await?;
-            Ok(dgram.payload().clone())
-        }
+    async fn recv_datagram(&self) -> Result<Bytes, Error> {
+        let mut guard = self.dgram_reader.lock().await;
+        let reader = guard.get_or_insert_with(|| self.inner.datagram_reader());
+        let dgram = reader.read_datagram().await?;
+        Ok(dgram.payload().clone())
     }
 
     fn max_datagram_size(&self) -> usize {
@@ -208,11 +193,9 @@ impl wt::Session for Session {
             .close(quinn::VarInt::from_u32(code), reason.as_bytes());
     }
 
-    fn closed(&self) -> impl Future<Output = Error> + wt::MaybeSend {
-        async move {
-            let err = self.quic.closed().await;
-            Error::Connection(err.to_string())
-        }
+    async fn closed(&self) -> Error {
+        let err = self.quic.closed().await;
+        Error::Connection(err.to_string())
     }
 }
 
@@ -241,18 +224,16 @@ impl SendStream {
 impl wt::SendStream for SendStream {
     type Error = Error;
 
-    fn write(&mut self, buf: &[u8]) -> impl Future<Output = Result<usize, Error>> + wt::MaybeSend {
-        async move {
-            let mut remaining: &[u8] = buf;
-            loop {
-                let n = futures_util::future::poll_fn(|cx| self.inner.poll_send(cx, &mut remaining))
-                    .await
-                    .map_err(|e| log_err("send_stream.write", e))?;
-                if n > 0 {
-                    return Ok(n);
-                }
-                // h3 accepts zero bytes while waiting for capacity; retry.
+    async fn write(&mut self, buf: &[u8]) -> Result<usize, Error> {
+        let mut remaining: &[u8] = buf;
+        loop {
+            let n = futures_util::future::poll_fn(|cx| self.inner.poll_send(cx, &mut remaining))
+                .await
+                .map_err(|e| log_err("send_stream.write", e))?;
+            if n > 0 {
+                return Ok(n);
             }
+            // h3 accepts zero bytes while waiting for capacity; retry.
         }
     }
 
@@ -266,7 +247,7 @@ impl wt::SendStream for SendStream {
         // sync `SendStream::finish`), so one poll with a noop waker suffices
         // to make the peer see the FIN now.
         let waker = std::task::Waker::noop();
-        let mut cx = Context::from_waker(&waker);
+        let mut cx = Context::from_waker(waker);
         let fut = futures_util::future::poll_fn(|cx| self.inner.poll_finish(cx));
         match std::pin::pin!(fut).poll(&mut cx) {
             Poll::Ready(Ok(())) => {
@@ -285,19 +266,17 @@ impl wt::SendStream for SendStream {
         self.inner.reset(code as u64);
     }
 
-    fn closed(&mut self) -> impl Future<Output = Result<(), Error>> + wt::MaybeSend {
-        async move {
-            if self.terminal {
-                return Ok(());
-            }
-            // Not terminal yet, and h3-quinn cannot surface a FIN ack or the
-            // peer's STOP_SENDING, so there is nothing to await. The
-            // moq-tokio adapter interrupts this watch (a oneshot) when a
-            // deferred finish or reset settles and recreates it, at which
-            // point the flag is read again.
-            std::future::pending::<()>().await;
-            Ok(())
+    async fn closed(&mut self) -> Result<(), Error> {
+        if self.terminal {
+            return Ok(());
         }
+        // Not terminal yet, and h3-quinn cannot surface a FIN ack or the
+        // peer's STOP_SENDING, so there is nothing to await. The
+        // moq-tokio adapter interrupts this watch (a oneshot) when a
+        // deferred finish or reset settles and recreates it, at which
+        // point the flag is read again.
+        std::future::pending::<()>().await;
+        Ok(())
     }
 }
 
@@ -321,41 +300,34 @@ impl RecvStream {
 impl wt::RecvStream for RecvStream {
     type Error = Error;
 
-    fn read(
-        &mut self,
-        buf: &mut [u8],
-    ) -> impl Future<Output = Result<Option<usize>, Error>> + wt::MaybeSend {
-        async move {
-            if self.pending.is_empty() {
-                match futures_util::future::poll_fn(|cx| self.inner.poll_data(cx))
-                    .await
-                    .map_err(|e| log_err("recv_stream.read", e))?
-                {
-                    Some(chunk) => self.pending = chunk,
-                    None => return Ok(None),
-                }
+    async fn read(&mut self, buf: &mut [u8]) -> Result<Option<usize>, Error> {
+        if self.pending.is_empty() {
+            match futures_util::future::poll_fn(|cx| self.inner.poll_data(cx))
+                .await
+                .map_err(|e| log_err("recv_stream.read", e))?
+            {
+                Some(chunk) => self.pending = chunk,
+                None => return Ok(None),
             }
-            let n = self.pending.len().min(buf.len());
-            buf[..n].copy_from_slice(&self.pending[..n]);
-            self.pending.advance(n);
-            Ok(Some(n))
         }
+        let n = self.pending.len().min(buf.len());
+        buf[..n].copy_from_slice(&self.pending[..n]);
+        self.pending.advance(n);
+        Ok(Some(n))
     }
 
     fn stop(&mut self, code: u32) {
         self.inner.stop_sending(code as u64);
     }
 
-    fn closed(&mut self) -> impl Future<Output = Result<(), Error>> + wt::MaybeSend {
+    async fn closed(&mut self) -> Result<(), Error> {
         // The moq-tokio adapter never calls this (it emulates the closed
         // watch with reads), so chunks fetched while waiting for the FIN are
         // discarded.
-        async move {
-            loop {
-                match futures_util::future::poll_fn(|cx| self.inner.poll_data(cx)).await? {
-                    Some(_) => {}
-                    None => return Ok(()),
-                }
+        loop {
+            match futures_util::future::poll_fn(|cx| self.inner.poll_data(cx)).await? {
+                Some(_) => {}
+                None => return Ok(()),
             }
         }
     }

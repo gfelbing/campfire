@@ -352,11 +352,83 @@ JSON, and generates `docs/moq-spike-results.md`.
   as production (`AppState::with_metrics` shape). The tier-1 MoQ client
   is the spike's `client_wt.rs`, copied to `tests/moq_client_wt.rs`.
 
-**Phase 2 — Client uplink**
+**Phase 2 — Client uplink** (done, 2026-11-10)
 - Real browser in a real bubble: media acquired, MoQ session opened,
-  `a`+`v` published; a subscriber (spike tab or minimal page) sees it.
+  `a`+`v` published; a subscriber (spike or decode page) sees it.
 - **Accept:** walk into a bubble with another client; camera + mic reach
-  the SFU and are forwarded.
+  the SFU and are forwarded. — **passed:** `just moq-e2e` (or
+  `node tools/e2e/moq.js --url https://localhost:8443`) drives two real
+  client pages (fake media) over HTTP/3 into a bubble; both uplinks go
+  live on `moq-lite-02`, the Rust spike client joins as a third
+  participant (admitted with B's ticket) and reads A's
+  `call/island/<user-id>.hang` — 163 video + 398 audio objects over an
+  8 s window, `campfire_moq_objects_in_total` moves, and A's uplink
+  stops when B walks away. Decode proof: the third tab on
+  `client/public/moq-subscriber.html` renders the same broadcast
+  (WebCodecs, frames decoding, audio pumping).
+
+**Phase 2 implementation notes**
+
+- **Browser wire path.** h3 0.0.8 only accepts a `:protocol` of
+  `webtransport` or `connect-udp`; a browser WebTransport session always
+  negotiates `""`, so `@moq/net` 0.4.7 takes its browser-compat path —
+  the legacy in-band bidi SETUP exchange — landing on **moq-lite-02**,
+  the same wire the Rust spike negotiates. No server change was needed.
+  Corollary: `connect()` must pass
+  `webtransport: { protocols: undefined }`. Any protocols list makes
+  Chromium send a `:protocol` the h3 stack cannot parse, and the
+  extended CONNECT is then dropped silently (`wt.ready` hangs). The TS
+  DOM lib has no `protocols` field, so the options object is cast.
+- **Broadcast naming.** The client announces
+  `call/<room>/<user-id>.hang` (the @moq/hang convention, a `@moq/net`
+  `Path.Valid` via `Net.Path.from`) with tracks `v` (camera) and
+  `a` (mic). The hang catalog is JSON and carries codec/dimensions per
+  track, so the short names are fine. This replaces the spike-era raw
+  `call/<room>/<user-id>` namespace (the server's fan-out is
+  namespace-agnostic, so no server change).
+- **Uplink lifecycle** (`client/src/call/moq.ts`, manager hooks). One
+  one-shot `Net.Connection.connect` per call entry; no reconnect loop —
+  the app's own reconnect (re-`hello`) mints a fresh ticket, and the
+  manager restarts the uplink in `rejoinCall`. `enterCall` starts it
+  with the `call_start` ticket, `reset`/`stopUplink` stop it, and an
+  `uplinkSeq` counter drops an in-flight start that loses the race
+  against a reset. The captures feed the manager's existing
+  `localStream` tracks (`Video.Capture`/`Audio.Capture` accept a
+  `MediaStreamTrack`), so mute/camera `track.enabled` toggles carry
+  over unchanged. A `window.__campfire_moq` hook (url/name/version/
+  state/error) serves the e2e and the dev loop.
+- **Demand gate.** `@moq/publish` 0.5.6 renditions expose their live
+  track only while a subscriber is attached, and the encoders encode
+  only then: a participant nobody is watching announces the broadcast
+  but ships no objects.
+- **Spike additions for the e2e.** `--ticket <hex>` (admits the
+  session with the app server's ticket), `--no-publish` (pure
+  subscriber) and `--no-stamp` (do not strip the 8-byte send-stamp
+  prefix: browser payloads are encoded media, so the receive time is
+  the stamp and latency stats read ~0; the e2e asserts sample/byte
+  counts, not latency).
+- **Dev decode page.** `client/public/moq-subscriber.html` (vite
+  `public/` → `dist/`; served by the SFU's own origin because
+  WebTransport is same-origin) loads `@moq/watch` 0.6.6 from esm.sh at
+  runtime — no npm dep, no build step. The element fires no
+  load/error events, so the page polls `connection.status.peek()`,
+  `catalog` and `video.out.stats.frameCount` for its status line. The
+  SharedArrayBuffer console warning is benign (postMessage audio
+  fallback).
+- **Headless media.** The e2e browser flags need
+  `--autoplay-policy=no-user-gesture-required`: the audio encoder
+  pumps through an AudioContext, which browsers suspend until a user
+  gesture.
+- **E2E robustness.** Both e2e scripts wait for the room to contain
+  exactly the two test users before the bubble forms: users of a run
+  that ended seconds earlier sit on the spawn tile through the server's
+  10 s reconnect window — longer when a headless close leaves the QUIC
+  connection open (worst case observed ~90 s) — and would be pulled
+  into the bubble, so the clean-room wait is budgeted at 90 s (a clean
+  server passes it in ~1 s). In teardown, B closes its page after the
+  walk-away — once B is out of the room no bubble can re-form (a
+  rejoining B within bubble radius would legitimately start a fresh
+  call), so "the call ended" is a terminal assertion.
 
 **Phase 3 — Client downlink + full UX**
 - Two real browsers, both directions, plus screen share, mute/camera,

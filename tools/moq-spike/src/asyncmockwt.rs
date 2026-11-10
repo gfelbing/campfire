@@ -20,13 +20,16 @@ use bytes::Bytes;
 use web_transport_trait::poll;
 use web_transport_trait::poll::{RecvStream as _PollRecvStream, SendStream as _PollSendStream};
 use web_transport_trait::poll::Session as _PollSession;
-use web_transport_trait::{MaybeSend, RecvStream, SendStream, Session};
+use web_transport_trait::{RecvStream, SendStream, Session};
 
 use crate::mockwt::{create_mock_session_pair, MockError, MockRecvStream, MockSendStream, MockSession};
 
 /// A future that polls the shared mock session once per poll.
 struct SharedPoll<R> {
     inner: Arc<Mutex<MockSession>>,
+    // The closure shape is the poll interface itself (one poll of the
+    // shared handle); there is no shorter way to name it.
+    #[allow(clippy::type_complexity)]
     f: Box<dyn Fn(&mut MockSession, &mut Context<'_>) -> Poll<R> + Send>,
 }
 
@@ -127,7 +130,7 @@ impl Session for AsyncMockSession {
         let inner = self.inner.clone();
         SharedPoll {
             inner,
-            f: Box::new(|s, cx| poll::Session::poll_recv_datagram(s, cx)),
+            f: Box::new(poll::Session::poll_recv_datagram),
         }
     }
 
@@ -149,7 +152,7 @@ impl Session for AsyncMockSession {
         let inner = self.inner.clone();
         SharedPoll {
             inner,
-            f: Box::new(|s, cx| poll::Session::poll_closed(s, cx)),
+            f: Box::new(poll::Session::poll_closed),
         }
     }
 }
@@ -168,12 +171,10 @@ impl AsyncMockSend {
 impl SendStream for AsyncMockSend {
     type Error = MockError;
 
-    fn write(&mut self, buf: &[u8]) -> impl Future<Output = Result<usize, MockError>> + MaybeSend {
+    async fn write(&mut self, buf: &[u8]) -> Result<usize, MockError> {
         // The mock's poll methods re-register their kio waiters on every
         // poll, so driving them through poll_fn is re-entrantly safe.
-        async move {
-            futures_util::future::poll_fn(|cx| self.inner.poll_write(cx, buf)).await
-        }
+        futures_util::future::poll_fn(|cx| self.inner.poll_write(cx, buf)).await
     }
 
     fn set_priority(&mut self, order: u8) {
@@ -188,10 +189,8 @@ impl SendStream for AsyncMockSend {
         self.inner.reset(code);
     }
 
-    fn closed(&mut self) -> impl Future<Output = Result<(), MockError>> + MaybeSend {
-        async move {
-            futures_util::future::poll_fn(|cx| self.inner.poll_closed(cx)).await
-        }
+    async fn closed(&mut self) -> Result<(), MockError> {
+        futures_util::future::poll_fn(|cx| self.inner.poll_closed(cx)).await
     }
 }
 
@@ -209,22 +208,15 @@ impl AsyncMockRecv {
 impl RecvStream for AsyncMockRecv {
     type Error = MockError;
 
-    fn read(
-        &mut self,
-        dst: &mut [u8],
-    ) -> impl Future<Output = Result<Option<usize>, MockError>> + MaybeSend {
-        async move {
-            futures_util::future::poll_fn(|cx| self.inner.poll_read(cx, dst)).await
-        }
+    async fn read(&mut self, dst: &mut [u8]) -> Result<Option<usize>, MockError> {
+        futures_util::future::poll_fn(|cx| self.inner.poll_read(cx, dst)).await
     }
 
     fn stop(&mut self, code: u32) {
         self.inner.stop(code);
     }
 
-    fn closed(&mut self) -> impl Future<Output = Result<(), MockError>> + MaybeSend {
-        async move {
-            futures_util::future::poll_fn(|cx| self.inner.poll_closed(cx)).await
-        }
+    async fn closed(&mut self) -> Result<(), MockError> {
+        futures_util::future::poll_fn(|cx| self.inner.poll_closed(cx)).await
     }
 }

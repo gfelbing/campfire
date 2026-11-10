@@ -891,9 +891,7 @@ fn call_target<'a>(entry: &'a Room, from: &str, to: &str) -> Result<&'a Member, 
 /// leaves ends with `call_end(last_left)`; a one-on-one whose partner
 /// stays keeps the remaining participant.
 fn leave_call(entry: &mut Room, id: &str) -> Option<u64> {
-    let Some(index) = call_containing(entry, id) else {
-        return None;
-    };
+    let index = call_containing(entry, id)?;
     let mut call = entry.calls.swap_remove(index);
     call.participants.remove(id);
     let over = call.participants.len() <= 1;

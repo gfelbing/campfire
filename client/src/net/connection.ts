@@ -24,6 +24,9 @@ export interface ConnHandlers {
     users: UserState[];
     chat: ChatMsg[];
     call: UserBrief[];
+    /** Media ticket for an active call (reconnect catch-up, docs/moq-sfu.md
+     *  §7). Present only when the user is in a call. */
+    ticket?: string;
   }) => void;
   onJoined: (u: UserBrief) => void;
   onLeft: (id: string) => void;
@@ -31,8 +34,14 @@ export interface ConnHandlers {
   onTyping: (id: string, on: boolean) => void;
   onMovement: (batch: MovementBatch) => void;
   /** A bubble started or grew; `participants` is the full list and
-   *  `youOffer` marks us as the designated offerer (README §6.3). */
-  onCallStart: (participants: UserBrief[], youOffer: boolean, zone?: string) => void;
+   *  `youOffer` marks us as the designated offerer (README §6.3). `ticket`
+   *  is our media ticket when we are a participant (docs/moq-sfu.md §7). */
+  onCallStart: (
+    participants: UserBrief[],
+    youOffer: boolean,
+    zone?: string,
+    ticket?: string,
+  ) => void;
   /** A participant left the ongoing bubble (huddles, Phase 6). */
   onCallLeave: (id: string, zone?: string) => void;
   /** The bubble is over (`last_left`). */
@@ -249,7 +258,7 @@ export class Connection {
         this.handlers.onTyping(msg.id, msg.on);
         break;
       case "call_start":
-        this.handlers.onCallStart(msg.participants, msg.you_offer, msg.zone);
+        this.handlers.onCallStart(msg.participants, msg.you_offer, msg.zone, msg.ticket);
         break;
       case "call_leave":
         this.handlers.onCallLeave(msg.id, msg.zone);

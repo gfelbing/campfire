@@ -186,7 +186,7 @@ async function main(): Promise<void> {
       calls.set("", new Set(h.call.map((u) => u.id)));
       const mine = calls.get("")!;
       if (mine.has(myId)) {
-        void manager.rejoinCall(h.call);
+        void manager.rejoinCall(h.call, h.ticket);
       } else if (manager.inCall()) {
         manager.onCallEnd("ended while you were disconnected");
       }
@@ -226,7 +226,7 @@ async function main(): Promise<void> {
     },
     // Bubble state (README §6.3): the manager owns the state machine;
     // the room-wide call *state* also drives the headphone badges.
-    onCallStart: (ps, youOffer, zone) => {
+    onCallStart: (ps, youOffer, zone, ticket) => {
       const key = zone ?? "";
       calls.set(key, new Set(ps.map((p) => p.id)));
       // A roster containing us replaces any stale provisional membership
@@ -235,7 +235,7 @@ async function main(): Promise<void> {
         for (const [k, s] of calls) {
           if (k !== key && s.has(myId)) calls.delete(k);
         }
-        manager.onCallStart(ps, youOffer);
+        manager.onCallStart(ps, youOffer, ticket);
       }
       refreshCallUi();
     },
@@ -293,7 +293,7 @@ async function main(): Promise<void> {
     onLocalMute: (a, v) => callUI.setLocalMute(a, v),
     onLocalScreen: (on) => callUI.setLocalScreen(on),
     onLog: (t) => chat?.system(t),
-  });
+  }, opts.room);
   const status = createStatus(
     sidebar.pane("menu"),
     (off) => manager.setBubble(off),

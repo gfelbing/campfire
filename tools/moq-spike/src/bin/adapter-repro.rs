@@ -97,7 +97,7 @@ async fn main() -> std::io::Result<()> {
                 tracing::error!(seq, "write_frame failed");
                 break;
             }
-            if seq % 50 == 0 {
+            if seq.is_multiple_of(50) {
                 tracing::info!(seq, "client wrote group");
             }
             seq += 1;

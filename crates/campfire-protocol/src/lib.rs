@@ -358,7 +358,7 @@ mod tests {
             }],
             // A minted media ticket (docs/moq-sfu.md §7): 32 random bytes,
             // hex-encoded.
-            ticket: Some("9f3ab1c2de4708ab".repeat(4).into()),
+            ticket: Some("9f3ab1c2de4708ab".repeat(4)),
         };
         assert_eq!(from_line::<ServerMsg>(&to_line(&msg)).unwrap(), msg);
     }

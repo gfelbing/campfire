@@ -1,8 +1,6 @@
 //! Async `web_transport_trait::Session` (v0.4) over a `wtransport` client
 //! connection — the tier-1 spike clients (no browser involved).
 
-use std::future::Future;
-
 use bytes::Bytes;
 use web_transport_trait as wt;
 
@@ -67,50 +65,36 @@ impl wt::Session for Session {
     type RecvStream = RecvStream;
     type Error = Error;
 
-    fn accept_uni(&self) -> impl Future<Output = Result<RecvStream, Error>> + wt::MaybeSend {
-        async move {
-            let stream = self.conn.accept_uni().await?;
-            Ok(RecvStream::new(stream))
-        }
+    async fn accept_uni(&self) -> Result<RecvStream, Error> {
+        let stream = self.conn.accept_uni().await?;
+        Ok(RecvStream::new(stream))
     }
 
-    fn accept_bi(
-        &self,
-    ) -> impl Future<Output = Result<(SendStream, RecvStream), Error>> + wt::MaybeSend {
-        async move {
-            let (send, recv) = self.conn.accept_bi().await?;
-            Ok((SendStream::new(send), RecvStream::new(recv)))
-        }
+    async fn accept_bi(&self) -> Result<(SendStream, RecvStream), Error> {
+        let (send, recv) = self.conn.accept_bi().await?;
+        Ok((SendStream::new(send), RecvStream::new(recv)))
     }
 
-    fn open_bi(
-        &self,
-    ) -> impl Future<Output = Result<(SendStream, RecvStream), Error>> + wt::MaybeSend {
-        async move {
-            // Two-stage open: wtransport's `OpeningBiStream` is not drop-safe,
-            // but the moq-tokio adapter (which wraps this session) retains the
-            // in-flight future, so a cancelled poll cannot strand a stream.
-            let (send, recv) = self.conn.open_bi().await?.await?;
-            Ok((SendStream::new(send), RecvStream::new(recv)))
-        }
+    async fn open_bi(&self) -> Result<(SendStream, RecvStream), Error> {
+        // Two-stage open: wtransport's `OpeningBiStream` is not drop-safe,
+        // but the moq-tokio adapter (which wraps this session) retains the
+        // in-flight future, so a cancelled poll cannot strand a stream.
+        let (send, recv) = self.conn.open_bi().await?.await?;
+        Ok((SendStream::new(send), RecvStream::new(recv)))
     }
 
-    fn open_uni(&self) -> impl Future<Output = Result<SendStream, Error>> + wt::MaybeSend {
-        async move {
-            let send = self.conn.open_uni().await?.await?;
-            Ok(SendStream::new(send))
-        }
+    async fn open_uni(&self) -> Result<SendStream, Error> {
+        let send = self.conn.open_uni().await?.await?;
+        Ok(SendStream::new(send))
     }
 
     fn send_datagram(&self, payload: Bytes) -> Result<(), Error> {
         self.conn.send_datagram(&payload).map_err(|err| Error::Stream(err.to_string()))
     }
 
-    fn recv_datagram(&self) -> impl Future<Output = Result<Bytes, Error>> + wt::MaybeSend {
-        async move {
-            let dgram = self.conn.receive_datagram().await?;
-            Ok(dgram.payload())
-        }
+    async fn recv_datagram(&self) -> Result<Bytes, Error> {
+        let dgram = self.conn.receive_datagram().await?;
+        Ok(dgram.payload())
     }
 
     fn max_datagram_size(&self) -> usize {
@@ -122,11 +106,9 @@ impl wt::Session for Session {
             .close(wtransport::VarInt::from_u32(code), reason.as_bytes());
     }
 
-    fn closed(&self) -> impl Future<Output = Error> + wt::MaybeSend {
-        async move {
-            let err = self.conn.closed().await;
-            Error::Connection(err.to_string())
-        }
+    async fn closed(&self) -> Error {
+        let err = self.conn.closed().await;
+        Error::Connection(err.to_string())
     }
 }
 
@@ -144,15 +126,13 @@ impl SendStream {
 impl wt::SendStream for SendStream {
     type Error = Error;
 
-    fn write(&mut self, buf: &[u8]) -> impl Future<Output = Result<usize, Error>> + wt::MaybeSend {
-        async move {
-            let n = self
-                .inner
-                .write(buf)
-                .await
-                .map_err(|e| log_err("send_stream.write", e))?;
-            Ok(n)
-        }
+    async fn write(&mut self, buf: &[u8]) -> Result<usize, Error> {
+        let n = self
+            .inner
+            .write(buf)
+            .await
+            .map_err(|e| log_err("send_stream.write", e))?;
+        Ok(n)
     }
 
     fn set_priority(&mut self, order: u8) {
@@ -175,19 +155,17 @@ impl wt::SendStream for SendStream {
             .reset(wtransport::VarInt::from_u32(code));
     }
 
-    fn closed(&mut self) -> impl Future<Output = Result<(), Error>> + wt::MaybeSend {
+    async fn closed(&mut self) -> Result<(), Error> {
         // Resolves when the stream ends for any reason: our FIN is
         // acknowledged (quinn `stopped` yields `None`), the peer sends
         // STOP_SENDING (yields `Some(code)`), or the connection dies.
-        async move {
-            let quic = self.inner.quic_stream();
-            match quic.stopped().await {
-                Ok(None) => Ok(()),
-                Ok(code) => Err(Error::Stream(format!(
-                    "peer stop sending (code: {code:?})"
-                ))),
-                Err(err) => Err(Error::Stream(err.to_string())),
-            }
+        let quic = self.inner.quic_stream();
+        match quic.stopped().await {
+            Ok(None) => Ok(()),
+            Ok(code) => Err(Error::Stream(format!(
+                "peer stop sending (code: {code:?})"
+            ))),
+            Err(err) => Err(Error::Stream(err.to_string())),
         }
     }
 }
@@ -206,16 +184,11 @@ impl RecvStream {
 impl wt::RecvStream for RecvStream {
     type Error = Error;
 
-    fn read(
-        &mut self,
-        buf: &mut [u8],
-    ) -> impl Future<Output = Result<Option<usize>, Error>> + wt::MaybeSend {
-        async move {
-            self.inner
-                .read(buf)
-                .await
-                .map_err(|e| log_err("recv_stream.read", e))
-        }
+    async fn read(&mut self, buf: &mut [u8]) -> Result<Option<usize>, Error> {
+        self.inner
+            .read(buf)
+            .await
+            .map_err(|e| log_err("recv_stream.read", e))
     }
 
     fn stop(&mut self, code: u32) {
@@ -224,18 +197,16 @@ impl wt::RecvStream for RecvStream {
         let _ = self.inner.quic_stream_mut().stop(quinn::VarInt::from_u32(code));
     }
 
-    fn closed(&mut self) -> impl Future<Output = Result<(), Error>> + wt::MaybeSend {
+    async fn closed(&mut self) -> Result<(), Error> {
         // The moq-tokio adapter never calls this (it emulates the closed
         // watch with reads), so chunks fetched while waiting for the FIN are
         // discarded.
-        async move {
-            let mut chunk = vec![0u8; 8192];
-            loop {
-                match self.inner.read(&mut chunk).await {
-                    Ok(Some(_)) => {}
-                    Ok(None) => return Ok(()),
-                    Err(err) => return Err(Error::Stream(err.to_string())),
-                }
+        let mut chunk = vec![0u8; 8192];
+        loop {
+            match self.inner.read(&mut chunk).await {
+                Ok(Some(_)) => {}
+                Ok(None) => return Ok(()),
+                Err(err) => return Err(Error::Stream(err.to_string())),
             }
         }
     }
