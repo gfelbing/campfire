@@ -180,6 +180,10 @@ pub enum ServerMsg {
         /// running): the authoritative catch-up for badges and mid-call
         /// rejoin (README §6.3).
         call: Vec<UserBrief>,
+        /// The user's media ticket when they are in an active call
+        /// (reconnect catch-up; docs/moq-sfu.md §7). Present only then.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ticket: Option<String>,
     },
     Joined {
         user: UserBrief,
@@ -212,6 +216,12 @@ pub enum ServerMsg {
         /// proximity-bubble circle). Only sent when set.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         zone: Option<String>,
+        /// The recipient's media ticket when the recipient is a
+        /// participant of this call (docs/moq-sfu.md §7). Bystanders get
+        /// the roster for the badge but no ticket. Present only for
+        /// participants.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ticket: Option<String>,
     },
     /// A participant left an ongoing call. `zone` marks the call (only
     /// sent when it is a zone call).
@@ -346,6 +356,9 @@ mod tests {
                 id: "u_77ab".into(),
                 name: "jules".into(),
             }],
+            // A minted media ticket (docs/moq-sfu.md §7): 32 random bytes,
+            // hex-encoded.
+            ticket: Some("9f3ab1c2de4708ab".repeat(4).into()),
         };
         assert_eq!(from_line::<ServerMsg>(&to_line(&msg)).unwrap(), msg);
     }

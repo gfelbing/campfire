@@ -127,6 +127,15 @@ pub struct World {
     session_counter: Arc<AtomicU64>,
     /// How long a disconnected user keeps their identity (README §5).
     reconnect_window: Duration,
+    /// Monotonic call ids (docs/moq-sfu.md §5): name the call's media
+    /// origin and ride in media tickets.
+    call_counter: Arc<AtomicU64>,
+    /// Media tickets for `/moq` (docs/moq-sfu.md §5); the SFU shares this
+    /// handle.
+    tickets: Arc<crate::moq::tickets::TicketRegistry>,
+    /// Set by [`Self::on_call_end`]; fired with the call id when a call
+    /// ends so the SFU drops its media origin.
+    call_end_hook: Option<Arc<dyn Fn(u64) + Send + Sync>>,
 }
 
 #[cfg(test)]
@@ -183,6 +192,9 @@ impl World {
             nonce: Arc::new(Mutex::new(nonce)),
             session_counter: Arc::new(AtomicU64::new(0)),
             reconnect_window: RECONNECT_WINDOW,
+            call_counter: Arc::new(AtomicU64::new(0)),
+            tickets: Arc::new(crate::moq::tickets::TicketRegistry::new()),
+            call_end_hook: None,
         }
     }
 
@@ -197,9 +209,58 @@ impl World {
         self
     }
 
+    /// Register the SFU's call-end hook (docs/moq-sfu.md §5): called with
+    /// the call id whenever a call ends, so the SFU drops the call's media
+    /// origin. Must be set before the tick loop starts.
+    pub fn on_call_end(mut self, hook: Arc<dyn Fn(u64) + Send + Sync>) -> Self {
+        self.call_end_hook = Some(hook);
+        self
+    }
+
+    /// The ticket store media sessions present on `/moq` (docs/moq-sfu.md
+    /// §5): one per process, shared with the SFU.
+    pub fn tickets(&self) -> &crate::moq::tickets::TicketRegistry {
+        &self.tickets
+    }
+
+    /// Mint a media ticket for `user` when they sit in a call in `room`
+    /// (docs/moq-sfu.md §5). `None` for bystanders.
+    pub fn mint_call_ticket(&self, room: &str, user: &str) -> Option<String> {
+        let rooms = self.rooms.lock().unwrap();
+        let entry = rooms.get(room)?;
+        let call = entry.calls.iter().find(|c| c.participants.contains_key(user))?;
+        Some(self.tickets.mint(user, room, call.id))
+    }
+
+    /// The SFU's CONNECT check (docs/moq-sfu.md §5): the ticket's call must
+    /// still exist in its room with the ticket's user in it.
+    pub fn call_active(&self, room: &str, call_id: u64, user: &str) -> bool {
+        let rooms = self.rooms.lock().unwrap();
+        let Some(entry) = rooms.get(room) else {
+            return false;
+        };
+        entry
+            .calls
+            .iter()
+            .any(|c| c.id == call_id && c.participants.contains_key(user))
+    }
+
     /// Next session id (monotonic; guards discard/leave races, README §5).
     pub fn next_session_id(&self) -> u64 {
         self.session_counter.fetch_add(1, Ordering::Relaxed)
+    }
+
+    /// Next call id (monotonic per process; docs/moq-sfu.md §5).
+    fn next_call_id(&self) -> u64 {
+        self.call_counter.fetch_add(1, Ordering::Relaxed)
+    }
+
+    /// Fire the SFU's call-end hook for a call that just ended (no-op when
+    /// the SFU is not attached, as in unit tests).
+    fn call_ended(&self, call_id: u64) {
+        if let Some(hook) = &self.call_end_hook {
+            hook(call_id);
+        }
     }
 
     /// The map a room id names, if it is a known map.
@@ -273,17 +334,26 @@ impl World {
             // as stale.
             member.seq = 0;
             member.dirty = true;
+            // A mid-call reconnect keeps call membership, so the user gets
+            // a fresh media ticket for it (docs/moq-sfu.md §7).
+            let (call, ticket) = match room_entry
+                .calls
+                .iter()
+                .find(|c| c.participants.contains_key(&id))
+            {
+                Some(c) => (
+                    c.participant_list(),
+                    Some(self.tickets.mint(&id, room, c.id)),
+                ),
+                None => (Vec::new(), None),
+            };
             let joined = Joined {
-                call: room_entry
-                    .calls
-                    .iter()
-                    .find(|c| c.participants.contains_key(&id))
-                    .map(|c| c.participant_list())
-                    .unwrap_or_default(),
+                call,
                 you: id,
                 token: member.token.clone(),
                 users: user_snapshot(room_entry, Some(map)),
                 chat: room_entry.chat.iter().cloned().collect(),
+                ticket,
             };
             return Ok(joined);
         }
@@ -332,6 +402,9 @@ impl World {
                 .find(|c| c.participants.contains_key(&id))
                 .map(|c| c.participant_list())
                 .unwrap_or_default(),
+            // A fresh joiner is never a call participant; a ticket is minted
+            // only when they are pulled into a bubble (docs/moq-sfu.md §7).
+            ticket: None,
         };
 
         let brief = UserBrief {
@@ -362,6 +435,9 @@ impl World {
                 // room re-entry) re-offers: their peer connections died.
                 you_offer: call.contains(&id),
                 zone: call.zone.clone(),
+                // A fresh room joiner is a bystander to the running call:
+                // roster for the badge, no media ticket.
+                ticket: None,
             });
         }
         Ok(joined)
@@ -394,7 +470,11 @@ impl World {
     /// they are gone.
     pub fn leave(&self, room: &str, id: &str) {
         let mut rooms = self.rooms.lock().unwrap();
-        remove_from_room(&mut rooms, room, id);
+        let ended = remove_from_room(&mut rooms, room, id);
+        drop(rooms);
+        for call_id in ended {
+            self.call_ended(call_id);
+        }
     }
 
     /// Validate and apply one user's movement batch (README §5 "Movement
@@ -465,11 +545,17 @@ impl World {
             })
             .collect();
         for (room, id) in &expired {
-            remove_from_room(&mut rooms, room, id);
+            let ended = remove_from_room(&mut rooms, room, id);
+            for call_id in ended {
+                self.call_ended(call_id);
+            }
         }
         for (room, room_entry) in rooms.iter_mut() {
             let map = self.maps.get(room);
-            update_bubbles(room, room_entry, Instant::now(), map);
+            let ended = update_bubbles(self, room, room_entry, Instant::now(), map);
+            for call_id in ended {
+                self.call_ended(call_id);
+            }
             if !room_entry.users.values().any(|m| m.dirty) {
                 continue;
             }
@@ -719,7 +805,11 @@ impl World {
         if !involved {
             return Err(ErrorCode::CallNotAllowed);
         }
-        leave_call(entry, from);
+        let ended = leave_call(entry, from);
+        drop(rooms);
+        if let Some(call_id) = ended {
+            self.call_ended(call_id);
+        }
         Ok(())
     }
 
@@ -800,9 +890,9 @@ fn call_target<'a>(entry: &'a Room, from: &str, to: &str) -> Result<&'a Member, 
 /// so every remaining member of the room is told. A call whose last member
 /// leaves ends with `call_end(last_left)`; a one-on-one whose partner
 /// stays keeps the remaining participant.
-fn leave_call(entry: &mut Room, id: &str) {
+fn leave_call(entry: &mut Room, id: &str) -> Option<u64> {
     let Some(index) = call_containing(entry, id) else {
-        return;
+        return None;
     };
     let mut call = entry.calls.swap_remove(index);
     call.participants.remove(id);
@@ -822,7 +912,9 @@ fn leave_call(entry: &mut Room, id: &str) {
     }
     if !over {
         entry.calls.push(call);
+        return None;
     }
+    Some(call.id)
 }
 
 /// One step of the proximity-call engine (README §6.3), run every tick
@@ -831,13 +923,16 @@ fn leave_call(entry: &mut Room, id: &str) {
 /// center (or of another player, when no bubble exists yet) and you are
 /// pulled in; at the radius or beyond — or toggled off — you drop out
 /// immediately. At most one join per tick keeps the offerer designation
-/// deterministic and the signaling trickle-paced.
+/// deterministic and the signaling trickle-paced. Returns the ids of the
+/// calls that ended this step, so the caller can fire the SFU's call-end
+/// hook (docs/moq-sfu.md §5).
 fn update_bubbles(
+    world: &World,
     room: &str,
     entry: &mut Room,
     now: Instant,
     map: Option<&campfire_maps::MapData>,
-) {
+) -> Vec<u64> {
     // Silent zones (README roadmap "Map enhancements"): silent-zone
     // occupants never join a proximity bubble (zone calls are separate).
     let in_silent = |x: f32, y: f32| -> bool {
@@ -896,8 +991,11 @@ fn update_bubbles(
             }
         }
     }
+    let mut ended: Vec<u64> = Vec::new();
     for id in dropped {
-        leave_call(entry, &id);
+        if let Some(call_id) = leave_call(entry, &id) {
+            ended.push(call_id);
+        }
     }
 
     // Creation: each occupied jitsi zone can carry its own call (the zone
@@ -936,6 +1034,7 @@ fn update_bubbles(
             let mut inside = inside;
             inside.sort();
             let call = call::Call::new(
+                world.next_call_id(),
                 entry
                     .users
                     .iter()
@@ -946,15 +1045,9 @@ fn update_bubbles(
                 zone: Some(jitsi.clone()),
                 ..call
             };
-            broadcast_call_start(
-                room,
-                entry,
-                call.zone.clone(),
-                call.participant_list(),
-                Some(&inside[0]),
-            );
+            broadcast_call_start(world, room, entry, &call, Some(&inside[0]));
             entry.calls.push(call);
-            return;
+            return ended;
         }
     }
     {
@@ -979,6 +1072,7 @@ fn update_bubbles(
                     let call = call::Call {
                         zone: None,
                         ..call::Call::new(
+                            world.next_call_id(),
                             entry
                                 .users
                                 .iter()
@@ -987,13 +1081,7 @@ fn update_bubbles(
                         )
                     };
                     let offerer = [a.0.clone(), b.0.clone()].into_iter().min().unwrap();
-                    broadcast_call_start(
-                        room,
-                        entry,
-                        call.zone.clone(),
-                        call.participant_list(),
-                        Some(&offerer),
-                    );
+                    broadcast_call_start(world, room, entry, &call, Some(&offerer));
                     entry.calls.push(call);
                     created = true;
                     break 'pair;
@@ -1001,7 +1089,7 @@ fn update_bubbles(
             }
         }
         if created {
-            return;
+            return ended;
         }
     }
 
@@ -1052,16 +1140,11 @@ fn update_bubbles(
                 );
             }
             let c = &entry.calls[ci];
-            broadcast_call_start(
-                room,
-                entry,
-                c.zone.clone(),
-                c.participant_list(),
-                Some(&joiner),
-            );
+            broadcast_call_start(world, room, entry, c, Some(&joiner));
             break 'calls;
         }
     }
+    ended
 }
 
 /// The centroid of the call's connected participants.
@@ -1083,22 +1166,31 @@ fn center_of_call(entry: &Room, call: &call::Call) -> (f32, f32) {
 }
 
 /// Broadcast the bubble's roster to the whole room: `CallStart` powers the
-/// headphone badge on everyone, and `you_offer` marks the one recipient
-/// who must send SDP offers to the others.
+/// headphone badge on everyone, `you_offer` marks the one recipient who
+/// must send SDP offers to the others, and `ticket` mints a media ticket
+/// for each participant (docs/moq-sfu.md §7) — bystanders get the roster
+/// but no ticket.
 fn broadcast_call_start(
+    world: &World,
     room: &str,
-    entry: &mut Room,
-    zone: Option<String>,
-    participants: Vec<UserBrief>,
+    entry: &Room,
+    call: &call::Call,
     offerer: Option<&str>,
 ) {
+    let participants = call.participant_list();
+    let zone = call.zone.clone();
     for (uid, m) in &entry.users {
         let you = offerer == Some(uid.as_str());
+        let ticket = call
+            .participants
+            .contains_key(uid)
+            .then(|| world.tickets.mint(uid, room, call.id));
         let _ = m.tx.send(ServerMsg::CallStart {
             room: room.to_owned(),
             participants: participants.clone(),
             you_offer: you,
             zone: zone.clone(),
+            ticket,
         });
     }
 }
@@ -1110,20 +1202,31 @@ fn dist(a: (f32, f32), b: (f32, f32)) -> f32 {
 
 /// Remove `id` from `room` — call membership included (see
 /// [`leave_call`]) — broadcast `Left` to everyone left, and drop the room
-/// when it becomes empty. The caller owns the `rooms` lock.
-fn remove_from_room(rooms: &mut HashMap<String, Room>, room: &str, id: &str) {
+/// when it becomes empty. The caller owns the `rooms` lock. Returns the
+/// ids of the calls that ended, so the caller can fire the SFU's
+/// call-end hook (docs/moq-sfu.md §5).
+fn remove_from_room(rooms: &mut HashMap<String, Room>, room: &str, id: &str) -> Vec<u64> {
     let Some(entry) = rooms.get_mut(room) else {
-        return;
+        return Vec::new();
     };
+    let mut ended: Vec<u64> = Vec::new();
     if entry.users.remove(id).is_some() {
-        leave_call(entry, id);
+        if let Some(call_id) = leave_call(entry, id) {
+            ended.push(call_id);
+        }
         for m in entry.users.values() {
             let _ = m.tx.send(ServerMsg::Left { id: id.to_owned() });
         }
     }
     if entry.users.is_empty() {
+        // A dropped room takes every remaining call with it (defensive: an
+        // empty room normally has none left).
+        for c in &entry.calls {
+            ended.push(c.id);
+        }
         rooms.remove(room);
     }
+    ended
 }
 
 /// The room's full user snapshot for a `hello` (gone members included —
@@ -1180,6 +1283,10 @@ pub struct Joined {
     pub chat: Vec<ChatMsg>,
     /// The room's current call participants (empty when no call is running).
     pub call: Vec<UserBrief>,
+    /// The joiner's media ticket when they are in an active call
+    /// (reconnect catch-up; docs/moq-sfu.md §7). `None` for fresh joiners
+    /// and for users outside any call.
+    pub ticket: Option<String>,
 }
 
 /// One active room, as reported by `GET /api/v1/rooms`.

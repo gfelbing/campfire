@@ -375,6 +375,7 @@ fn dispatch(
                         users: joined.users,
                         chat: joined.chat,
                         call: joined.call,
+                        ticket: joined.ticket,
                     };
                     tx.send(msg).is_ok()
                 }

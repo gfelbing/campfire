@@ -38,6 +38,7 @@ use crate::realtime::{
     MAX_AVATAR_CHARS, MAX_CHAT_CHARS, MAX_NAME_CHARS, RateLimit, handle_wt, unix_ts, valid_room,
 };
 use crate::world::{RoomInfo, World};
+use crate::moq::handle_moq;
 
 /// Web client, built by Vite and embedded at compile time (README §3).
 static STATIC: Dir<'static> = include_dir!("$CARGO_MANIFEST_DIR/../../client/dist");
@@ -59,6 +60,9 @@ pub struct AppState {
     pub turn_rate: Arc<std::sync::Mutex<HashMap<std::net::IpAddr, (Instant, TurnCredential)>>>,
     /// Shared metrics registry (README §11 Phase 8, `/metrics`).
     pub metrics: crate::metrics::Metrics,
+    /// The MoQ SFU (docs/moq-sfu.md §5): one per process, wired to the
+    /// world's call-end hook so call media origins are reaped.
+    pub moq: std::sync::Arc<crate::moq::MoqSfu>,
 }
 
 impl AppState {
@@ -73,12 +77,19 @@ impl AppState {
         turn_secret: String,
         metrics: crate::metrics::Metrics,
     ) -> Self {
+        // The SFU is built next to the world and shares its ticket store;
+        // the world's call-end hook reaps the SFU's per-call media origins
+        // (docs/moq-sfu.md §5).
+        let world = World::new(campfire_maps::Maps::load(&cfg.maps_dir));
+        let moq = crate::moq::MoqSfu::new(world.clone(), metrics.clone());
+        let world = world.on_call_end(moq.call_end_hook());
         Self {
-            world: World::new(campfire_maps::Maps::load(&cfg.maps_dir)),
+            world,
             static_dir: cfg.static_dir.clone(),
             turn_secret,
             turn_rate: Arc::new(std::sync::Mutex::new(HashMap::new())),
             metrics,
+            moq,
         }
     }
 }
@@ -119,6 +130,9 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/turn/credential", post(turn_credential))
         // WebTransport realtime session (README §5).
         .route("/wt", connect(handle_wt))
+        // MoQ SFU media session (docs/moq-sfu.md §5): a second WebTransport
+        // connection carrying the call's media, admitted by ticket.
+        .route("/moq", connect(handle_moq))
         // The map in the URL path: `/play/office/office.json` picks the
         // office map. The server serves the SPA; the client takes the room
         // id from the path segment.
@@ -136,11 +150,21 @@ pub fn router(state: AppState) -> Router {
 async fn metrics_endpoint(State(state): State<AppState>) -> impl axum::response::IntoResponse {
     let (users, rooms) = state.world.stats();
     let calls = state.world.call_count();
+    // SFU gauges: live origins + the media traffic through the moq-net
+    // stats registry (docs/moq-sfu.md §5).
+    let (objects_in, bytes_in, objects_out, bytes_out) = state.moq.traffic();
+    let moq = crate::metrics::MoqGauges {
+        origins: state.moq.live_origins(),
+        objects_in,
+        bytes_in,
+        objects_out,
+        bytes_out,
+    };
     (
         [(header::CONTENT_TYPE, "text/plain; version=0.0.4")],
         state
             .metrics
-            .render((users as u64, rooms as u64, calls as u64)),
+            .render((users as u64, rooms as u64, calls as u64), &moq),
     )
 }
 
@@ -383,6 +407,7 @@ async fn fallback_event(
                             users: joined.users,
                             chat: joined.chat,
                             call: joined.call,
+                            ticket: joined.ticket,
                         });
                         joined.you
                     }

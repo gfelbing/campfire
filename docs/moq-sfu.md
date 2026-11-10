@@ -284,12 +284,73 @@ JSON, and generates `docs/moq-spike-results.md`.
   offers; the rest is handled by runtime feature detection) and
   Safari/Firefox codec availability (verified from release notes).
 
-**Phase 1 — Server core in the app**
+**Phase 1 — Server core in the app** (done, 2026-11-10)
 - `moq/` module wired into the running server on the real 443; ticket
   minting on `call_start`; `/moq` route; metrics.
 - **Accept:** a spike-style client can publish and subscribe through the
   dev-loop server with a minted ticket; a subscription from a user outside
-  the call is rejected.
+  the call is rejected. — **passed:** `tests/moq.rs`
+  (`publish_and_subscribe_within_a_call`,
+  `outsider_without_ticket_is_rejected`,
+  `stale_ticket_after_call_end_is_rejected`) run the Phase 0 tier-1 client
+  shape (moq-net over `wtransport` WebTransport) against the real server:
+  two co-located users form a bubble, each gets a minted ticket in
+  `CallStart`, one publishes her `call/<room>/<user-id>` namespace, the
+  other subscribes mid-stream and reads the live groups through the SFU;
+  a room user outside the call is refused (no ticket, bogus ticket); a
+  ticket whose call ended is refused until the re-formed call mints a
+  fresh one.
+
+**Phase 1 implementation notes**
+
+- **Per-call origins, not per-room.** A room runs several concurrent calls
+  (bubbles + zone calls), so the fan-out is one moq-net origin per call
+  (`Fanout: HashMap<call_id, Producer>`), lazily created on the first
+  `/moq` CONNECT for that call. The world fires a call-end hook
+  (`World::on_call_end`) from every call-end path (`leave_call`,
+  `update_bubbles` drops, room removal); the hook drops the origin, which
+  ends its driver task and cache pool. Isolation between calls is
+  structural: a session is wired only to its call's origin as publisher
+  and subscriber, so a session of call C cannot see or write call D's
+  namespaces.
+- **Tickets are bearer.** A ticket is 32 random bytes (hex, 64 chars),
+  60 s TTL, lazy-swept on mint, and maps to `(user, room, call_id)`. It
+  only ever travels over the owner's own TLS session (`CallStart.ticket`
+  for participants, `Hello.ticket` on a mid-call reconnect; bystanders
+  get the roster with `ticket: None`). No single-use: the TTL is the
+  lifetime.
+- **Admission is two CONNECT-time checks**, both before
+  `upgrade.accept()`, failing with HTTP 403 (no WebTransport session is
+  opened): (1) the `?ticket=…` query names a live ticket; (2)
+  `world.call_active(room, call_id, user)` — the call still exists with
+  the ticket's user in it. A ticket outlives its call for up to its TTL;
+  check 2 is what kills it early.
+- **Known limitation (documented in `moq/session.rs`).** A session may
+  announce any namespace on its call's origin: moq-net exposes no
+  announce hook on the server handshake, so a participant cannot be
+  pinned to their own `call/<room>/<user-id>`. The blast radius is one
+  call (origins isolate calls); the client subscribes by roster id.
+- **Lite02 delivery semantics (observed in the acceptance tests).** The
+  negotiated version is moq-lite 02, whose SUBSCRIBE wire carries no
+  max-age field and no frame timestamps. A new subscriber's cursor starts
+  at the **live edge** (an absent `Group Start` means the latest group),
+  with an unbounded serving budget — so there is **no backlog replay**:
+  a subscriber joining after the publisher has produced groups gets the
+  latest group and then follows live. Catch-up of older groups is not a
+  transport feature in this version; if Phase 2/3 needs it (late joiner
+  wants the in-flight call state), it is an app-level concern (keyframe
+  on join) or a matter of negotiating a newer lite/IETF version.
+- **Metrics** (`/metrics`, `campfire_moq_*`): `sessions` (gauge, open
+  now), `sessions_total`, `sessions_rejected_total` (403 at CONNECT),
+  `origins` (gauge, live per-call origins), and
+  `objects_in/bytes_in/objects_out/bytes_out` counters from the moq-net
+  stats registry (publisher role = media in, subscriber role = media
+  out), tagged per session as `moq/call/<call_id>`.
+- **Test harness.** `tests/common/mod.rs::start_server_with_world()`
+  returns the server's `World` so tests can drive world state directly
+  (e.g. `set_bubble` to make an outsider); the MoQ SFU is wired exactly
+  as production (`AppState::with_metrics` shape). The tier-1 MoQ client
+  is the spike's `client_wt.rs`, copied to `tests/moq_client_wt.rs`.
 
 **Phase 2 — Client uplink**
 - Real browser in a real bubble: media acquired, MoQ session opened,

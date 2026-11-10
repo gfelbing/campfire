@@ -31,6 +31,9 @@ pub struct ParticipantFlags {
 /// An in-flight proximity call in one room.
 #[derive(Debug, Clone, Default)]
 pub struct Call {
+    /// Call id: assigned by the world (monotonic per process). Names the
+    /// call's media origin (docs/moq-sfu.md §5) and rides in media tickets.
+    pub id: u64,
     /// Participants: id → (name, flags).
     pub participants: HashMap<UserId, (String, ParticipantFlags)>,
     /// `jitsiRoom` zone call (README roadmap "Map enhancements"): the call
@@ -43,8 +46,11 @@ impl Call {
     /// A bubble with its first participants (id → name); they do *not*
     /// offer each other — the server designates one offerer per recipient
     /// in `CallStart.you_offer` (the smaller id offers on creation).
-    pub fn new(entries: impl Iterator<Item = (UserId, String)>) -> Self {
-        let mut call = Self::default();
+    pub fn new(id: u64, entries: impl Iterator<Item = (UserId, String)>) -> Self {
+        let mut call = Call {
+            id,
+            ..Self::default()
+        };
         for (id, name) in entries {
             call.participants.insert(
                 id,
@@ -92,6 +98,7 @@ mod tests {
 
     fn sample_call() -> Call {
         Call::new(
+            1,
             [
                 ("u_aaa".to_owned(), "alice".to_owned()),
                 ("u_bbb".to_owned(), "bob".to_owned()),
