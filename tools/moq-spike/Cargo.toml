@@ -1,0 +1,49 @@
+[package]
+name = "moq-spike"
+version.workspace = true
+edition.workspace = true
+rust-version = "1.91"
+license-file.workspace = true
+repository.workspace = true
+
+# Phase 0 spike for the SFU-via-MoQ media rebuild (docs/moq-sfu.md).
+# Standalone: server (h3/quinn + moq-net SFU) and client (moq-net over a
+# wtransport WebTransport client) that measure the media path without the app.
+
+[[bin]]
+name = "moq-spike-server"
+path = "src/server.rs"
+
+[[bin]]
+name = "moq-spike-client"
+path = "src/client.rs"
+
+[[bin]]
+name = "adapter-repro"
+path = "src/bin/adapter-repro.rs"
+
+[dependencies]
+anyhow.workspace = true
+axum.workspace = true
+bytes.workspace = true
+clap.workspace = true
+futures-util.workspace = true
+h3.workspace = true
+h3-axum.workspace = true
+h3-datagram.workspace = true
+h3-quinn.workspace = true
+h3-webtransport.workspace = true
+kio.workspace = true
+moq-net.workspace = true
+moq-tokio.workspace = true
+quinn.workspace = true
+quinn-proto.workspace = true
+rustls.workspace = true
+rustls-pemfile.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+web-transport-trait.workspace = true
+wtransport.workspace = true

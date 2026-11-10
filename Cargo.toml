@@ -5,6 +5,7 @@ members = [
     "crates/campfire-protocol",
     "crates/campfire-maps",
     "tools/loadtest",
+    "tools/moq-spike",
 ]
 
 [workspace.package]
@@ -25,13 +26,19 @@ crc32fast = "1"
 futures-util = "0.3"
 h3 = "0.0"
 h3-axum = { version = "0.3", features = ["webtransport"] }
+h3-datagram = "0.0"
 h3-quinn = "0.0"
 h3-webtransport = "0.1"
 hmac = "0.12"
+kio = "0.6.4"
 http = "1"
 http-body-util = "0.1"
 include_dir = "0.7"
 quinn = "0.11"
+# Pinned to the exact version quinn 0.11.12 links against: the spike's
+# custom congestion controller implements quinn-proto's `Controller`
+# trait, so a version drift would produce a second, incompatible copy.
+quinn-proto = "=0.11.19"
 rand = "0.8"
 rcgen = "0.13"
 rustls = "0.23"
@@ -46,7 +53,12 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 turn-server = { version = "4.1", default-features = false, features = ["tcp", "ssl"] }
 thiserror = "2"
-wtransport = "0.7"
+wtransport = { version = "0.7", features = ["quinn"] }
+
+# MoQ spike (tools/moq-spike, docs/moq-sfu.md Phase 0)
+moq-net = "0.3.22"
+moq-tokio = { version = "0.19.35", default-features = false }
+web-transport-trait = "0.4"
 
 # Internal crates
 campfire-protocol = { path = "crates/campfire-protocol" }
