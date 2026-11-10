@@ -18,6 +18,7 @@ WORKDIR /build
 COPY rust-toolchain.toml Cargo.toml Cargo.lock ./
 COPY crates ./crates
 COPY tools/loadtest ./tools/loadtest
+COPY tools/moq-spike ./tools/moq-spike
 COPY client ./client
 COPY maps ./maps
 COPY justfile ./
