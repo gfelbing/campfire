@@ -8,7 +8,6 @@
 
 use std::collections::HashMap;
 use std::io::Read;
-use std::net::SocketAddr;
 use std::path::{Component, Path, PathBuf};
 use std::pin::Pin;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -22,7 +21,7 @@ use axum::http::header;
 use axum::response::sse::Event;
 use axum::response::{IntoResponse, Response, Sse};
 use axum::routing::{connect, get, post};
-use axum::{Extension, Json, Router};
+use axum::{Json, Router};
 use bytes::Bytes;
 use campfire_protocol::{Avatar, ChatMsg, ClientMsg, ErrorCode, ServerMsg, to_line};
 use futures_util::StreamExt;
@@ -51,13 +50,6 @@ pub struct AppState {
     pub world: World,
     /// Serve static files from this directory instead of the embed (dev).
     pub static_dir: Option<PathBuf>,
-    /// Shared TURN REST secret for minting relay credentials (README §6.2).
-    pub turn_secret: String,
-    /// Per-IP throttle for the TURN credential endpoint: a *fresh pair* is
-    /// minted at most once per 10 min per IP; repeats within the window get
-    /// the cached pair (many users behind one NAT legitimately share it —
-    /// the mint limit is what throttles abuse, not uniqueness).
-    pub turn_rate: Arc<std::sync::Mutex<HashMap<std::net::IpAddr, (Instant, TurnCredential)>>>,
     /// Shared metrics registry (README §11 Phase 8, `/metrics`).
     pub metrics: crate::metrics::Metrics,
     /// The MoQ SFU (docs/moq-sfu.md §5): one per process, wired to the
@@ -66,17 +58,13 @@ pub struct AppState {
 }
 
 impl AppState {
-    pub fn new(cfg: &Config, turn_secret: String) -> Self {
-        Self::with_metrics(cfg, turn_secret, crate::metrics::Metrics::new())
+    pub fn new(cfg: &Config) -> Self {
+        Self::with_metrics(cfg, crate::metrics::Metrics::new())
     }
 
     /// [`AppState::new`] with a shared metrics registry (the real server
     /// passes the same one the tick loop and TLS front feed).
-    pub fn with_metrics(
-        cfg: &Config,
-        turn_secret: String,
-        metrics: crate::metrics::Metrics,
-    ) -> Self {
+    pub fn with_metrics(cfg: &Config, metrics: crate::metrics::Metrics) -> Self {
         // The SFU is built next to the world and shares its ticket store;
         // the world's call-end hook reaps the SFU's per-call media origins
         // (docs/moq-sfu.md §5).
@@ -86,8 +74,6 @@ impl AppState {
         Self {
             world,
             static_dir: cfg.static_dir.clone(),
-            turn_secret,
-            turn_rate: Arc::new(std::sync::Mutex::new(HashMap::new())),
             metrics,
             moq,
         }
@@ -126,8 +112,6 @@ pub fn router(state: AppState) -> Router {
         // `office/tiles.png`.
         .route("/api/v1/maps/{*rest}", get(map_or_asset))
         .route("/api/v1/rooms", get(list_rooms))
-        // TURN REST credentials for the co-located relay (README §6.2).
-        .route("/api/v1/turn/credential", post(turn_credential))
         // WebTransport realtime session (README §5).
         .route("/wt", connect(handle_wt))
         // MoQ SFU media session (docs/moq-sfu.md §5): a second WebTransport
@@ -238,74 +222,6 @@ async fn map_or_asset(
 /// `GET /api/v1/rooms` → the active rooms with member counts.
 async fn list_rooms(State(state): State<AppState>) -> Json<Vec<RoomInfo>> {
     Json(state.world.rooms_list())
-}
-
-// ---------------------------------------------------------------------------
-// TURN REST credentials (README §6.2)
-// ---------------------------------------------------------------------------
-
-/// Credentials live for one hour; the server does not validate the
-/// timestamp inside the username (turn-server trusts the shared secret),
-/// so expiry is enforced by us minting fresh ones and clients using them
-/// for one call setup.
-const TURN_TTL: Duration = Duration::from_secs(3600);
-/// A fresh pair is minted at most once per ten minutes per peer address;
-/// repeats inside the window get the cached pair (shared IPs, README §14).
-const TURN_CRED_LIMIT: Duration = Duration::from_secs(600);
-
-/// Public because it sits in `AppState::turn_rate`'s value type (tests
-/// construct the state).
-#[derive(Clone, Serialize)]
-pub struct TurnCredential {
-    username: String,
-    credential: String,
-    expires: u64,
-}
-/// `POST /api/v1/turn/credential` → a short-lived TURN REST pair.
-///
-/// The username is `"{expires_unix}:{peer_ip}"` per the TURN REST draft;
-/// the credential is `base64(HMAC-SHA1(secret, username))`, which the
-/// co-located turn-server verifies independently.
-async fn turn_credential(
-    State(state): State<AppState>,
-    Extension(remote): Extension<SocketAddr>,
-) -> Result<Json<TurnCredential>, (StatusCode, String)> {
-    let ip = remote.ip();
-    {
-        let seen = state.turn_rate.lock().unwrap();
-        let now = Instant::now();
-        if let Some((last, cred)) = seen.get(&ip)
-            && now.duration_since(*last) < TURN_CRED_LIMIT
-            && cred.expires > now_unix().saturating_add(60)
-        // still > 1 min of life left
-        {
-            // Same IP inside the mint window: hand back the cached pair.
-            return Ok(Json(cred.clone()));
-        }
-    }
-    let now_unix = now_unix();
-    let expires = now_unix + TURN_TTL.as_secs();
-    let username = format!("{expires}:{ip}");
-    let credential = crate::stun::turn_rest_credential(&state.turn_secret, &username);
-    let cred = TurnCredential {
-        username,
-        credential,
-        expires,
-    };
-    state
-        .turn_rate
-        .lock()
-        .unwrap()
-        .insert(ip, (Instant::now(), cred.clone()));
-    Ok(Json(cred))
-}
-
-/// Unix seconds now (0 if the clock is before the epoch).
-fn now_unix() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
 }
 
 // ---------------------------------------------------------------------------
@@ -482,20 +398,11 @@ async fn fallback_event(
                 ClientMsg::Typing { on } => {
                     state.world.broadcast_typing(&room, &token, on);
                 }
-                // Bubble opt-out and call signaling: same world methods as
-                // the WebTransport path (README §5); fallback clients get
-                // presence, chat and calls.
+                // Bubble opt-out and call mute/screen: same world methods
+                // as the WebTransport path (README §5); fallback clients
+                // get presence, chat and calls.
                 ClientMsg::Bubble { off } => {
                     let _ = state.world.set_bubble(&room, &token, off);
-                }
-                ClientMsg::CallOffer { to, sdp } => {
-                    let _ = state.world.call_relay_offer(&room, &token, &to, sdp);
-                }
-                ClientMsg::CallAnswer { to, sdp } => {
-                    let _ = state.world.call_relay_answer(&room, &token, &to, sdp);
-                }
-                ClientMsg::CallIce { to, candidate } => {
-                    let _ = state.world.call_relay_ice(&room, &token, &to, candidate);
                 }
                 ClientMsg::CallMute { audio, video } => {
                     let _ = state.world.call_mute(&room, &token, audio, video);

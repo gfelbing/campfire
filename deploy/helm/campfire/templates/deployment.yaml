@@ -1,7 +1,7 @@
 {{/*
 Single-instance deployment. Campfire keeps all state in memory (rooms,
-presence, TURN relay), so one replica is the supported shape — see the
-scaling note in README §15.
+presence), so one replica is the supported shape — see the scaling note
+in README §15.
 */}}
 apiVersion: apps/v1
 kind: Deployment

@@ -1,31 +1,22 @@
-//! UDP demux socket: one OS socket, two protocols (README §6.2).
+//! UDP socket wrapper with burst draining: one OS socket for quinn.
 //!
-//! QUIC/HTTP/3 (quinn) and the STUN binding responder share the single UDP
-//! port. Demux: a datagram that parses as a STUN message (message type +
-//! magic cookie, see [`crate::stun::is_stun`]) is handled in place —
-//! Binding requests are answered with an XOR-MAPPED-ADDRESS; everything
-//! else is a QUIC packet queued for quinn. The first byte alone cannot
-//! disambiguate: a GREASE'd (RFC 9287) QUIC 1-RTT packet may carry any
-//! first byte below 0x80, so STUN identification relies on the 20-byte
-//! STUN header. A QUIC datagram that accidentally validates as STUN
-//! (~2^-32 per packet, the magic cookie) is dropped and retransmitted by
-//! QUIC — harmless.
+//! QUIC/HTTP/3 (quinn) binds the UDP port through this type. Formerly the
+//! socket also served the STUN binding responder (WebRTC ICE, removed in
+//! Phase 4); the demux task remains only for the burst-draining behavior
+//! that quinn's own socket does not provide:
 //!
-//! Architecture:
 //! - One OS socket, cloned once at bind time: the reader clone is owned by
-//!   a background demux task, the other half by quinn (via this type).
-//! - The demux task receives every datagram. STUN Binding requests are
-//!   answered in place; QUIC datagrams are queued for quinn.
+//!   a background task, the other half by quinn (via this type).
+//! - The background task receives every datagram and queues it for quinn.
 //! - The [`AsyncUdpSocket`] impl below (handed to `quinn::Endpoint`) reads
-//!   from that queue — it never reads from the socket, which is what keeps
-//!   the STUN/QUIC demux intact — and sends directly through its half.
+//!   from that queue — it never reads from the socket — and sends directly
+//!   through its half.
 //!
 //! No GSO/GRO/ECN: the socket is a plain UDP socket, so one `recv_from`
-//! always carries exactly one datagram and the STUN header stays intact
-//! for the demux. The optimization is not worth breaking the demux in v1.
+//! always carries exactly one datagram.
 //!
-//! Burst draining: after the first datagram of a burst arrives, the demux
-//! task drains everything already sitting in the kernel buffer without
+//! Burst draining: after the first datagram of a burst arrives, the task
+//! drains everything already sitting in the kernel buffer without
 //! yielding, and only then wakes quinn. This reproduces the effect UDP GRO
 //! had on the old `quinn-udp` socket: consecutive datagrams of one flight
 //! reach quinn in a single poll iteration, in order — so h3 sees the
@@ -44,28 +35,26 @@ use quinn::udp::{RecvMeta, Transmit};
 use quinn::{AsyncUdpSocket, UdpPoller};
 use tracing::debug;
 
-use crate::stun;
-
 /// A queued QUIC datagram with its source address.
 type Queued = (Vec<u8>, SocketAddr);
 
-/// The shared UDP socket with the STUN/QUIC demux (README §6.2).
+/// The shared UDP socket (README §6.2).
 #[derive(Debug)]
 pub struct DemuxSocket {
-    /// The socket half quinn sends through (same OS socket as the demux
-    /// task's reader half).
+    /// The socket half quinn sends through (same OS socket as the
+    /// reader task's half).
     io: tokio::net::UdpSocket,
-    /// QUIC datagrams queued by the demux task, plus the waker of the task
+    /// QUIC datagrams queued by the reader task, plus the waker of the task
     /// parked in `poll_recv`. One mutex so push-and-wake and park-and-check
     /// cannot race.
     handoff: Mutex<(VecDeque<Queued>, Option<Waker>)>,
 }
 
 impl DemuxSocket {
-    /// Bind the shared UDP socket and start the demux task.
+    /// Bind the UDP socket and start the reader task.
     pub fn bind(listen: SocketAddr) -> io::Result<Arc<Self>> {
         // Clone at the OS level: both halves share the same fd, so the
-        // demux task's `recv_from` and quinn's `send_to` meet on one port.
+        // reader's `recv_from` and quinn's `send_to` meet on one port.
         let std_sock = std::net::UdpSocket::bind(listen)?;
         std_sock.set_nonblocking(true)?;
         let reader = tokio::net::UdpSocket::from_std(std_sock.try_clone()?)?;
@@ -84,7 +73,7 @@ impl DemuxSocket {
     }
 }
 
-/// The background demux loop: receive everything, answer STUN, queue QUIC.
+/// The background reader loop: receive everything, queue QUIC.
 fn spawn_demux(socket: Arc<DemuxSocket>, reader: tokio::net::UdpSocket) {
     tokio::spawn(async move {
         let mut buf = vec![0u8; 65_536];
@@ -93,7 +82,7 @@ fn spawn_demux(socket: Arc<DemuxSocket>, reader: tokio::net::UdpSocket) {
             let (n, src) = match reader.recv_from(&mut buf).await {
                 Ok(x) => x,
                 Err(err) => {
-                    debug!(%err, "demux receive loop ended");
+                    debug!(%err, "socket receive loop ended");
                     return;
                 }
             };
@@ -104,24 +93,15 @@ fn spawn_demux(socket: Arc<DemuxSocket>, reader: tokio::net::UdpSocket) {
             let mut datagram: Option<(usize, SocketAddr)> = Some((n, src));
             while let Some((n, src)) = datagram.take() {
                 let pkt = &buf[..n];
-                if stun::is_stun(pkt) {
-                    // STUN Binding: answer in place (README §6.2).
-                    if let Some(reply) = stun::answer_binding_request(pkt, src)
-                        && let Err(err) = reader.send_to(&reply, src).await
-                    {
-                        debug!(%err, "failed to send STUN response");
-                    }
-                } else {
-                    // QUIC: hand to quinn.
-                    let mut h = socket.handoff.lock().unwrap();
-                    h.0.push_back((pkt.to_vec(), src));
-                    quic_pending = true;
-                }
+                // QUIC: hand to quinn.
+                let mut h = socket.handoff.lock().unwrap();
+                h.0.push_back((pkt.to_vec(), src));
+                quic_pending = true;
                 match reader.try_recv_from(&mut buf) {
                     Ok(next) => datagram = Some(next),
                     Err(err) if err.kind() == io::ErrorKind::WouldBlock => break,
                     Err(err) => {
-                        debug!(%err, "demux receive loop ended");
+                        debug!(%err, "socket receive loop ended");
                         return;
                     }
                 }

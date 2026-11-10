@@ -1,8 +1,8 @@
 # Campfire
 
-A virtual office — avatars walking around 2D tile maps **talking and video-calling in real time** — with the entire backend in **Rust**, deployed as **one binary** listening on **one port number** (UDP for QUIC/HTTP/3 + STUN, TCP for the Alt-Svc bootstrap and the TURN media relay).
+A virtual office — avatars walking around 2D tile maps **talking and video-calling in real time** — with the entire backend in **Rust**, deployed as **one binary** listening on **one port number** (UDP for QUIC/HTTP/3, TCP for the Alt-Svc bootstrap).
 
-> **Status: working MVP.** Walking avatars on tileset-rendered maps, proximity-video bubbles and zone-based meeting-room calls, silent zones with do-not-disturb, chat, map navigation between rooms, zoom and click-to-walk, a collapsible sidebar with a call theater, reconnect across reloads and the browser back/forward cache, metrics, a QUIC load harness and a headless E2E suite. See the [roadmap](#roadmap) for what is next.
+> **Status: working MVP.** Walking avatars on tileset-rendered maps, proximity-video bubbles and zone-based meeting-room calls (media over the MoQ SFU), silent zones with do-not-disturb, chat, map navigation between rooms, zoom and click-to-walk, a collapsible sidebar with a call theater, reconnect across reloads and the browser back/forward cache, metrics, a QUIC load harness and a headless E2E suite. See the [roadmap](#roadmap) for what is next.
 
 ---
 
@@ -27,11 +27,11 @@ Other tasks: `just check` (fmt + clippy + tests), `just build` (release binary w
 | Constraint | Consequence |
 |---|---|
 | Written in Rust | Server is 100% Rust |
-| Single service | One binary, in-memory state, no sidecars, no database. The web client is embedded into the binary at compile time; `--static-dir` overrides it at runtime for the dev loop. STUN and TURN are embedded in the same process |
-| One port number | Exactly two sockets: UDP (QUIC/HTTP/3 + WebTransport + STUN, demuxed) and TCP (a TLS front that serves the `Alt-Svc` bootstrap page and splices TURN media). Everything else — page, assets, API, realtime, call signaling — is HTTP/3 on UDP |
-| Media is relayed | All WebRTC media transits the embedded TURN relay (never direct P2P); it is DTLS-SRTP end-to-end, so the server can never decrypt it |
+| Single service | One binary, in-memory state, no sidecars, no database. The web client is embedded into the binary at compile time; `--static-dir` overrides it at runtime for the dev loop |
+| One port number | Exactly two sockets: UDP (QUIC/HTTP/3 + WebTransport) and TCP (a TLS front that serves the `Alt-Svc` bootstrap page). Everything else — page, assets, API, realtime, media — is HTTP/3 on UDP |
+| Media is relayed | All call media transits the server-side MoQ SFU (never P2P); every client publishes its stream once and subscribes to the other participants |
 
-Consequences of the HTTP/3-only data path: no WebSockets (WebTransport instead), TLS everywhere, `curl --http3` for debugging, and the honest limitation that a network blocking all UDP cannot reach the app at all — the TCP port carries *all* call media through the TURN relay, so media works on any network that allows 443/TCP (no UDP required).
+Consequences of the HTTP/3-only data path: no WebSockets (WebTransport instead), TLS everywhere, and `curl --http3` for debugging. Media rides the same UDP port, so a network blocking all UDP cannot reach the app at all.
 
 ## 3. Architecture
 
@@ -39,23 +39,22 @@ Consequences of the HTTP/3-only data path: no WebSockets (WebTransport instead),
                     one port number (UDP + TCP)
  ┌────────────────┐                  ┌────────────────┐
  │   browser A    │                  │   browser B    │
- │ avatar + call  │◄──── WebRTC ────►│ avatar + call  │
- └───────┬────────┘  P2P or via TURN  └───────┬────────┘
-         │      all app traffic + signaling   │
-         │            over HTTP/3/QUIC        │
- ┌───────▼────────────────────────────────────▼───────┐
+ │ avatar + call  │◄─── MoQ media ──►│ avatar + call  │
+ └───────┬────────┘      via SFU     └───────┬────────┘
+         │  all app traffic over HTTP/3/QUIC │
+ ┌───────▼───────────────────────────────────▼────────┐
  │                campfire (single binary)            │
  │  UDP: QUIC/HTTP/3 router (static, /api, /healthz,  │
  │       /metrics, /play) + WebTransport sessions     │
- │       (streams + datagrams) + STUN responder       │
- │  TCP: TLS front — Alt-Svc bootstrap + TURN splice  │
+ │       (streams + datagrams) + MoQ SFU sessions     │
+ │  TCP: TLS front — Alt-Svc bootstrap                │
  │  in-memory: rooms, users, 50 ms tick, room bubbles │
  └────────────────────────────────────────────────────┘
 ```
 
 - **HTTP/3 router** (`quinn` + `h3` + `h3-axum`): serves the client, the JSON API, health and metrics.
-- **WebTransport sessions** (`h3-webtransport`, same socket): one per browser. Reliable **streams** carry join/chat/signaling; **datagrams** carry movement.
-- **STUN + TURN** embedded in-process (see below).
+- **WebTransport sessions** (`h3-webtransport`, same socket): one per browser. Reliable **streams** carry join/chat/call-state; **datagrams** carry movement.
+- **MoQ SFU** (a second WebTransport session per browser, docs/moq-sfu.md): publishes each participant's media once and re-serves it to the other participants.
 - **World state**: plain in-memory Rust. A 50 ms tick fans out per-room movement batches as datagrams and runs the proximity-bubble engine.
 
 ### A session's life
@@ -71,9 +70,8 @@ Consequences of the HTTP/3-only data path: no WebSockets (WebTransport instead),
 
 | Socket | Protocol | Purpose |
 |---|---|---|
-| UDP | QUIC/HTTP/3 (ALPN `h3`) | all application traffic + WebTransport realtime + call signaling |
-| UDP | STUN (demuxed on the same socket) | reflexive address discovery for WebRTC |
-| TCP | TLS front | `Alt-Svc` bootstrap (browsers discover HTTP/3 only over TCP) + TURN splice (`turns:`) |
+| UDP | QUIC/HTTP/3 (ALPN `h3`) | all application traffic + WebTransport realtime + MoQ media |
+| TCP | TLS front | `Alt-Svc` bootstrap (browsers discover HTTP/3 only over TCP) |
 
 **HTTP/3 endpoints**
 
@@ -84,14 +82,14 @@ Consequences of the HTTP/3-only data path: no WebSockets (WebTransport instead),
 | `/api/v1/maps` | list maps: `{id, name, thumb}` |
 | `/api/v1/maps/{*rest}` | the Tiled JSON (`office`, `interiors/conference`) or a file from the map's directory (`office/tiles.png`) |
 | `/api/v1/rooms` | active rooms with member counts |
-| `/api/v1/turn/credential` | short-lived TURN credentials (HMAC, 1 h TTL, rate-limited) |
 | `/healthz`, `/metrics` | liveness; Prometheus text |
 | `/wt` | the WebTransport realtime session |
+| `/moq` | the MoQ SFU media session (admitted by ticket, docs/moq-sfu.md §7) |
 | `/rt/sse` + `/rt/event` | SSE+POST fallback for browsers without WebTransport |
 
 ## 5. Realtime protocol
 
-Reliable stream (JSON lines): join/leave, chat, typing, call signaling, errors. Datagrams: movement only (each entry carries a sequence number; stale ones are dropped).
+Reliable stream (JSON lines): join/leave, chat, typing, call state, errors. Datagrams: movement only (each entry carries a sequence number; stale ones are dropped).
 
 ```jsonc
 // client → server (stream)
@@ -99,21 +97,21 @@ Reliable stream (JSON lines): join/leave, chat, typing, call signaling, errors. 
              // "token":"…" restores the previous identity on reconnect
 {"t":"leave"} {"t":"chat","text":"hi"} {"t":"typing","on":true}
 {"t":"bubble","off":true}                    // opt out of calls
-{"t":"call_offer"/"call_answer"/"call_ice"/"call_mute"/"call_leave", …}
+{"t":"call_mute"/"call_screen"/"call_leave", …}   // call presence
 
 // server → client (stream)
 {"t":"hello", "you":"u_…", "room":"office", "token":"…", "users":[…], "chat":[…], "call":[…]}
 {"t":"joined"/"left"} {"t":"chat", …} {"t":"typing", …} {"t":"error","code":"…"}
-{"t":"call_start", "participants":[…], "you_offer":true, "zone":"MeetingRoom"}
+{"t":"call_start", "participants":[…], "zone":"MeetingRoom", "ticket":"…"}
 {"t":"call_leave","id":"u_…", "zone":"…"} {"t":"call_end","reason":"last_left","zone":"…"}
-{"t":"call_offer"/"call_answer"/"call_ice"/"call_mute", …}   // relayed
+{"t":"call_mute"/"call_screen", …}          // participant presence
 
 // datagrams (both directions)
 {"m":[{"id":"u_…","x":41.5,"y":12.75,"d":"e","mv":1,"s":4821,"sz":true}, …]}
                                      // "sz": inside a silentZone (only when true)
 ```
 
-Call *state* (`call_start`/`call_leave`/`call_end`) is room-wide (it powers the headphone badge and the zone-rectangle highlight); `zone` marks a zone call (a room can carry several concurrent calls — one per occupied jitsi zone plus the proximity bubble). Call *signaling* is relayed only between participants of the same call. The **joiner is always the offerer**; `you_offer` marks the designated offerer. Movement is server-validated: tile space, max 8 tiles/s, walkable tiles only, ≤ 30 moves/s per user.
+Call *state* (`call_start`/`call_leave`/`call_end`) is room-wide (it powers the headphone badge and the zone-rectangle highlight); `zone` marks a zone call (a room can carry several concurrent calls — one per occupied jitsi zone plus the proximity bubble). `ticket` rides `call_start` per participant (docs/moq-sfu.md §7) and admits the media session. Movement is server-validated: tile space, max 8 tiles/s, walkable tiles only, ≤ 30 moves/s per user.
 
 ## 6. Maps
 
@@ -135,16 +133,16 @@ In deployment, mount a directory of map folders with `--maps-dir /mnt/maps`; for
 
 ## 7. Voice & video calls
 
-Relayed mesh — one `RTCPeerConnection` per pair of participants, no SFU. The server relays signaling, and **all media transits the embedded TURN relay** (`turns:` over 443/TCP, turn-rs): each connection is configured `iceTransportPolicy: "relay"`, so ICE uses only relay candidates and calls never go direct P2P. Media stays DTLS-SRTP end-to-end — even the relay cannot decrypt it. STUN is co-located on the QUIC socket but unused under relay-only.
+MoQ SFU — every client publishes one media stream to the server and subscribes to the other call participants; the server relays all media (WebTransport/443, docs/moq-sfu.md). No P2P, no WebRTC, no TURN.
 
 **Calls**, computed by the server in the 50 ms tick — a room carries **at most one proximity bubble plus one call per occupied jitsi zone**; a user is in at most one call at a time:
 
 - **Zone calls**: every occupied `jitsiRoom` zone runs its own call bounded by the zone rectangle — a lone occupant starts it, anyone who walks in joins. The client highlights each live zone's rectangle (visible to bystanders too).
-- **Proximity bubbles**: the one-tile-radius circle around the centroid of the participants (the client draws exactly that circle). **Creation:** two opted-in users closer than one tile. **Joining:** automatic — closer than one tile to the center pulls you in (at most one join per tick across all calls; the joiner is the offerer). The mic permission prompt happens on the first auto-join: walking close *is* the intent.
+- **Proximity bubbles**: the one-tile-radius circle around the centroid of the participants (the client draws exactly that circle). **Creation:** two opted-in users closer than one tile. **Joining:** automatic — closer than one tile to the center pulls you in (at most one join per tick across all calls). The mic permission prompt happens on the first auto-join: walking close *is* the intent.
 - **Leaving:** outside your call's area (the zone rect or the bubble radius — or the bubble toggle) drops you **immediately** — no grace delay, no hysteresis. The last leave ends that call (`call_end {reason:"last_left","zone":…}`).
 - **Silent zones**: occupants of a `silentZone` are excluded from proximity bubbles entirely — they never form or join one, and walking into the zone drops them out of a bubble they were in. Zone calls are unaffected (the two zone types are meant to be disjoint).
 - A disconnected member keeps their seat for the reconnect window; their stale position is excluded from the centroid. A member who re-enters via their token gets a 2 s re-entry grace before the radius check applies again, so the reconnect promise (call membership survives) holds.
-- Voice-only degradation at 9+ participants (UI-enforced); mute/camera toggles flip `track.enabled` and broadcast `call_mute` — no renegotiation.
+- Voice-only degradation at 9+ participants (UI-enforced); mute/camera toggles broadcast `call_mute` — presence only, the media track catalog follows.
 
 ## 8. The web client
 
@@ -163,18 +161,18 @@ campfire/
 ├── crates/
 │   ├── campfire-server/      # the binary: sockets, h3 router, WT sessions, world, bubbles, API
 │   │   └── src/              # api.rs, world.rs (+ world/call.rs), realtime.rs, bootstrap.rs,
-│   │                         # transport/ (quic, stun, turn), config.rs, metrics.rs, main.rs
+│   │                         # demux.rs (quic socket), moq/ (SFU), config.rs, metrics.rs
 │   ├── campfire-protocol/    # message enums + codec (no IO; unit-tested)
 │   └── campfire-maps/        # runtime map loading (Maps::load), Tiled parsing, walkability
 ├── client/                   # Vite + TS + PixiJS → dist/, embedded by the server
 │   └── src/
 │       ├── world/            # mapdata.ts (Tiled subset), render.ts (sprites + bubble), avatars.ts
 │       ├── net/              # WebTransport + SSE fallback, reconnect, token persistence
-│       ├── call/             # peer connections, getUserMedia, bubble state machine
+│       ├── call/             # MoQ media (uplink + downlink), getUserMedia, bubble state machine
 │       └── ui/               # boot overlay, chat, presence
 ├── maps/                     # mounted at runtime; one folder per map, tilesets alongside
 ├── tools/
-│   ├── loadtest/             # QUIC bot swarm: joins rooms, walks, forms bubbles, relays SDP
+│   ├── loadtest/             # QUIC bot swarm: joins rooms, walks, forms bubbles
 │   └── e2e/                  # headless-browser E2E (presence, chat, bubble lifecycle)
 ├── justfile                  # dev/test/build/docker/certs helpers
 └── Dockerfile                # multi-stage → runtime image (443/udp + 443/tcp)
@@ -191,7 +189,7 @@ Ops in brief: one release binary or the Docker image (`-p 443:443/udp -p 443:443
 
 ## 11. Security & limits
 
-TLS 1.3 only, `h3`-only ALPN on UDP. Per-session limits: movement 30/s, chat 1/s, stream messages 50/s, inbound 256 KB/s, datagram ≤ 1200 B, SDP ≤ 64 KB, ICE ≤ 1 KB, name ≤ 24 chars, room cap 2048. The server is authoritative for movement, membership and call state. TURN credentials are HMAC-signed, 1 h TTL, mint-limited per IP. No persistence, no accounts, identity-free logs (random user ids).
+TLS 1.3 only, `h3`-only ALPN on UDP. Per-session limits: movement 30/s, chat 1/s, stream messages 50/s, inbound 256 KB/s, datagram ≤ 1200 B, name ≤ 24 chars, room cap 2048. The server is authoritative for movement, membership and call state. No persistence, no accounts, identity-free logs (random user ids).
 
 ---
 
@@ -235,11 +233,12 @@ areas, `exitUrl` navigation, zoom, click-to-walk) are shipped — see
 [§6 Maps](#6-maps), [§7 Voice & video calls](#7-voice--video-calls) and
 [§8 The web client](#8-the-web-client). What is left:
 
-### Media: SFU via MoQ (current focus)
+### Media: SFU via MoQ — shipped
 
-Rebuild the media stack: drop WebRTC + TURN, every client streams once to a
-server-side SFU speaking MoQ (Media-over-QUIC) over the existing
-WebTransport/443 path. Full plan: [`docs/moq-sfu.md`](docs/moq-sfu.md).
+Media is a server-side SFU speaking MoQ (Media-over-QUIC) over the existing
+WebTransport/443 path; WebRTC, TURN and STUN are removed. Full plan:
+[`docs/moq-sfu.md`](docs/moq-sfu.md) (its §10 known issue: the peer's downlink
+after a tab refresh needs a follow-up fix).
 
 ### Map rendering polish
 

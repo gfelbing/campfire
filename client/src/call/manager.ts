@@ -2,11 +2,9 @@
 //!
 //! Media is one MoQ SFU session per call (docs/moq-sfu.md §9): the client
 //! publishes its own `call/<room>/<user-id>.hang` (the uplink) and watches
-//! one downlink per other participant. There is no mesh and no
-//! offer/answer/ICE — the server's bubble engine computes the call, and
-//! every participant's media transits the SFU. The WebRTC signaling
-//! messages (`call_offer`/`call_answer`/`call_ice`) are still on the wire
-//! (server-defined, removed in Phase 4) but are no-ops here.
+//! one downlink per other participant. There is no mesh and no signaling —
+//! the server's bubble engine computes the call, and every participant's
+//! media transits the SFU (Phase 4 removed the WebRTC signaling messages).
 //!
 //! Call *state* (`call_start` / `call_leave` / `call_end`) is room-wide: it
 //! powers the avatars' headphone badge, so a bystander hears it too.
@@ -211,12 +209,8 @@ export class CallManager {
 
   /** Room-wide (headphone badge) and, when we are in the roster, our
    *  authoritative bubble state: created or joined (auto-join on approach,
-   *  README §6.3), or a roster re-sync while we are already in.
-   *
-   *  `youOffer` is a WebRTC artifact (the designated offerer); it has no
-   *  meaning in the subscribe model and is ignored. */
-  onCallStart(participants: UserBrief[], youOffer: boolean, ticket?: string): void {
-    void youOffer;
+   *  README §6.3), or a roster re-sync while we are already in. */
+  onCallStart(participants: UserBrief[], ticket?: string): void {
     const selfIn = participants.some((u) => u.id === this.selfId);
     if (!selfIn) {
       // Bystander: badge only (the avatar layer reads the roster from

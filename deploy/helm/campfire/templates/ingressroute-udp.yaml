@@ -1,5 +1,5 @@
 {{/*
-443/udp (QUIC + STUN + TURN) routed raw to the pod — the UDP datagrams are
+443/udp (QUIC/HTTP/3) routed raw to the pod — the UDP datagrams are
 TLS-oblivious, so there is nothing for Traefik to offload; this is a plain
 datagram pass-through.
 */}}

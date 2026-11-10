@@ -6,11 +6,6 @@
 //! that describe the world (users/rooms/calls) are computed from the
 //! world at scrape time, so they are always consistent with what a
 //! concurrent tick is doing.
-//!
-//! TURN has no stats API in the embedded server, so its numbers are
-//! observed where we can see them: the TLS front's STUN/TURN splices
-//! ([`crate::bootstrap`]). A splice is one TURN-over-TLS session (≈ one
-//! allocation sequence), and the spliced bytes are the relay traffic.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -43,12 +38,6 @@ struct Counters {
     /// many ticks ran (scrape → mean; spikes show up in the rate).
     tick_micros: AtomicU64,
     ticks: AtomicU64,
-    /// STUN/TURN splices at the TLS front: currently open, all-time, and
-    /// the relayed bytes both ways.
-    turn_splices: AtomicU64,
-    turn_splice_total: AtomicU64,
-    turn_bytes_in: AtomicU64,
-    turn_bytes_out: AtomicU64,
     /// MoQ SFU media sessions (docs/moq-sfu.md §5): currently open,
     /// all-time admitted, and rejected at CONNECT (missing/bad ticket or
     /// the ticket's call no longer active with the user in it).
@@ -119,24 +108,6 @@ impl Metrics {
     pub fn tick(&self, micros: u64) {
         self.inner.tick_micros.fetch_add(micros, Ordering::Relaxed);
         self.inner.ticks.fetch_add(1, Ordering::Relaxed);
-    }
-
-    pub fn turn_splice_open(&self) {
-        self.inner.turn_splices.fetch_add(1, Ordering::Relaxed);
-        self.inner.turn_splice_total.fetch_add(1, Ordering::Relaxed);
-    }
-
-    pub fn turn_splice_close(&self) {
-        self.inner.turn_splices.fetch_sub(1, Ordering::Relaxed);
-    }
-
-    pub fn turn_bytes(&self, to_turn: usize, from_turn: usize) {
-        self.inner
-            .turn_bytes_in
-            .fetch_add(to_turn as u64, Ordering::Relaxed);
-        self.inner
-            .turn_bytes_out
-            .fetch_add(from_turn as u64, Ordering::Relaxed);
     }
 
     pub fn moq_session_open(&self) {
@@ -269,34 +240,6 @@ impl Metrics {
         metric(
             &mut out,
             "gauge",
-            "campfire_turn_splices",
-            "TURN-over-TLS sessions currently spliced at the TLS front.",
-            g(&self.inner.turn_splices) as f64,
-        );
-        metric(
-            &mut out,
-            "counter",
-            "campfire_turn_splices_total",
-            "TURN-over-TLS sessions spliced (all-time).",
-            f(&self.inner.turn_splice_total),
-        );
-        metric(
-            &mut out,
-            "counter",
-            "campfire_turn_bytes_in_total",
-            "Bytes relayed client → TURN (TLS front view).",
-            f(&self.inner.turn_bytes_in),
-        );
-        metric(
-            &mut out,
-            "counter",
-            "campfire_turn_bytes_out_total",
-            "Bytes relayed TURN → client (TLS front view).",
-            f(&self.inner.turn_bytes_out),
-        );
-        metric(
-            &mut out,
-            "gauge",
             "campfire_moq_sessions",
             "MoQ media sessions currently open (docs/moq-sfu.md §5).",
             g(&self.inner.moq_sessions) as f64,
@@ -367,8 +310,6 @@ mod tests {
         m.datagram_out(1200);
         m.rate_limit_hit();
         m.tick(15_000);
-        m.turn_splice_open();
-        m.turn_bytes(100, 200);
         m.moq_session_open();
         m.moq_session_reject();
         let moq = MoqGauges {
@@ -387,7 +328,6 @@ mod tests {
         assert!(text.contains("campfire_rate_limit_hits_total 1"));
         assert!(text.contains("campfire_tick_seconds_total 0.015"));
         assert!(text.contains("campfire_ticks_total 1"));
-        assert!(text.contains("campfire_turn_bytes_in_total 100"));
         assert!(text.contains("campfire_moq_sessions 1"));
         assert!(text.contains("campfire_moq_sessions_total 1"));
         assert!(text.contains("campfire_moq_sessions_rejected_total 1"));

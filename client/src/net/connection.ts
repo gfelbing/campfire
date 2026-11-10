@@ -33,12 +33,10 @@ export interface ConnHandlers {
   onChat: (c: ChatMsg) => void;
   onTyping: (id: string, on: boolean) => void;
   onMovement: (batch: MovementBatch) => void;
-  /** A bubble started or grew; `participants` is the full list and
-   *  `youOffer` marks us as the designated offerer (README §6.3). `ticket`
+  /** A bubble started or grew; `participants` is the full list. `ticket`
    *  is our media ticket when we are a participant (docs/moq-sfu.md §7). */
   onCallStart: (
     participants: UserBrief[],
-    youOffer: boolean,
     zone?: string,
     ticket?: string,
   ) => void;
@@ -46,9 +44,6 @@ export interface ConnHandlers {
   onCallLeave: (id: string, zone?: string) => void;
   /** The bubble is over (`last_left`). */
   onCallEnd: (reason: string, zone?: string) => void;
-  onCallOffer: (from: string, sdp: string) => void;
-  onCallAnswer: (from: string, sdp: string) => void;
-  onCallIce: (from: string, candidate: string) => void;
   onCallMute: (id: string, audio: boolean, video: boolean) => void;
   onCallScreen: (id: string, on: boolean) => void;
   onError: (code: string) => void;
@@ -150,25 +145,12 @@ export class Connection {
     t.sendMove(this.selfId, x, y, d, moving, ++this.moveSeq);
   }
 
-  // --- call signaling (README §5/§6): plain stream messages, the server
-  // --- relays between same-room participants and never sees media.
+  // --- call state + presence (README §5/§6.3): plain stream messages; media
+  // --- never transits the server (docs/moq-sfu.md).
 
   /** Opt out of proximity bubbles (README §6.3) — or back in with false. */
   sendBubble(off: boolean): void {
     this.transport?.sendMsg({ t: "bubble", off });
-  }
-
-  sendCallOffer(to: string, sdp: string): void {
-    this.transport?.sendMsg({ t: "call_offer", to, sdp });
-  }
-
-  sendCallAnswer(to: string, sdp: string): void {
-    this.transport?.sendMsg({ t: "call_answer", to, sdp });
-  }
-
-  /** `candidate` is the peer's `RTCIceCandidateInit`, JSON-encoded. */
-  sendCallIce(to: string, candidate: string): void {
-    this.transport?.sendMsg({ t: "call_ice", to, candidate });
   }
 
   sendCallMute(audio: boolean, video: boolean): void {
@@ -258,22 +240,13 @@ export class Connection {
         this.handlers.onTyping(msg.id, msg.on);
         break;
       case "call_start":
-        this.handlers.onCallStart(msg.participants, msg.you_offer, msg.zone, msg.ticket);
+        this.handlers.onCallStart(msg.participants, msg.zone, msg.ticket);
         break;
       case "call_leave":
         this.handlers.onCallLeave(msg.id, msg.zone);
         break;
       case "call_end":
         this.handlers.onCallEnd(msg.reason, msg.zone);
-        break;
-      case "call_offer":
-        this.handlers.onCallOffer(msg.from, msg.sdp);
-        break;
-      case "call_answer":
-        this.handlers.onCallAnswer(msg.from, msg.sdp);
-        break;
-      case "call_ice":
-        this.handlers.onCallIce(msg.from, msg.candidate);
         break;
       case "call_mute":
         this.handlers.onCallMute(msg.id, msg.audio, msg.video);

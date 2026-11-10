@@ -422,31 +422,13 @@ fn dispatch(
             world.broadcast_typing(&room, &id, on);
             true
         }
-        // Call signaling (README §5): the world validates (same room, sender
-        // involved, size caps); errors go back as `error` messages.
+        // Call state + presence (README §5/§6.3): the world validates
+        // (same room, sender involved); errors go back as `error` messages.
         Ok(ClientMsg::Bubble { off }) => {
             let Some((room, id, _)) = session.clone() else {
                 return send(tx, ErrorCode::BadMessage);
             };
             call_result(world.set_bubble(&room, &id, off), tx)
-        }
-        Ok(ClientMsg::CallOffer { to, sdp }) => {
-            let Some((room, id, _)) = session.clone() else {
-                return send(tx, ErrorCode::BadMessage);
-            };
-            call_result(world.call_relay_offer(&room, &id, &to, sdp), tx)
-        }
-        Ok(ClientMsg::CallAnswer { to, sdp }) => {
-            let Some((room, id, _)) = session.clone() else {
-                return send(tx, ErrorCode::BadMessage);
-            };
-            call_result(world.call_relay_answer(&room, &id, &to, sdp), tx)
-        }
-        Ok(ClientMsg::CallIce { to, candidate }) => {
-            let Some((room, id, _)) = session.clone() else {
-                return send(tx, ErrorCode::BadMessage);
-            };
-            call_result(world.call_relay_ice(&room, &id, &to, candidate), tx)
         }
         Ok(ClientMsg::CallMute { audio, video }) => {
             let Some((room, id, _)) = session.clone() else {

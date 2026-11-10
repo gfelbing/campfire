@@ -8,8 +8,8 @@
 #           --external <your-LAN-IP>:443
 #
 # QUIC needs UDP 443; the same port number over TCP serves the Alt-Svc
-# bootstrap + TURN-over-TLS. UDP is not forwarded by `docker run -p`
-# unless you ask for /udp explicitly — hence both.
+# bootstrap. UDP is not forwarded by `docker run -p` unless you ask for
+# /udp explicitly — hence both.
 
 FROM rust:1-slim AS build
 WORKDIR /build

@@ -24,8 +24,7 @@ pub fn dev_certs() -> (
 }
 
 /// Start the real server (demux socket + quinn endpoint + accept loop) on
-/// an ephemeral port. STUN binding requests on the same UDP port are
-/// answered by the server's demux, exactly like in production.
+/// an ephemeral port.
 #[allow(dead_code)]
 pub async fn start_server() -> (SocketAddr, CertificateDer<'static>) {
     let (addr, root, _world) = start_server_with_world().await;
@@ -65,8 +64,6 @@ pub async fn start_server_with_world() -> (
     let state = campfire_server::api::AppState {
         world: world.clone(),
         static_dir: None,
-        turn_secret: "test-turn-secret".to_owned(),
-        turn_rate: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         metrics: metrics.clone(),
         moq,
     };

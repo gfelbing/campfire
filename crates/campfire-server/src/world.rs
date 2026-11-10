@@ -14,8 +14,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use campfire_protocol::{
-    Avatar, ChatMsg, Dir, ErrorCode, MAX_CANDIDATE_BYTES, MAX_SDP_BYTES, MovementBatch,
-    MovementEntry, ServerMsg, UserBrief, UserState,
+    Avatar, ChatMsg, Dir, ErrorCode, MovementBatch, MovementEntry, ServerMsg, UserBrief, UserState,
 };
 use rand::RngCore;
 
@@ -431,9 +430,6 @@ impl World {
             let _ = m.tx.send(ServerMsg::CallStart {
                 room: room.to_owned(),
                 participants: call.participant_list(),
-                // A member joining into an existing bubble (reconnect or
-                // room re-entry) re-offers: their peer connections died.
-                you_offer: call.contains(&id),
                 zone: call.zone.clone(),
                 // A fresh room joiner is a bystander to the running call:
                 // roster for the badge, no media ticket.
@@ -679,75 +675,6 @@ impl World {
         Ok(())
     }
 
-    /// Relay an SDP offer between two participants of the room's bubble.
-    pub fn call_relay_offer(
-        &self,
-        room: &str,
-        from: &str,
-        to: &str,
-        sdp: String,
-    ) -> Result<(), ErrorCode> {
-        if sdp.len() > MAX_SDP_BYTES {
-            return Err(ErrorCode::SdpTooLong);
-        }
-        let rooms = self.rooms.lock().unwrap();
-        let Some(entry) = rooms.get(room) else {
-            return Err(ErrorCode::CallNotAllowed);
-        };
-        let target = call_target(entry, from, to)?;
-        let _ = target.tx.send(ServerMsg::CallOffer {
-            from: from.to_owned(),
-            sdp,
-        });
-        Ok(())
-    }
-
-    /// Relay an SDP answer between two participants of the room's active call.
-    pub fn call_relay_answer(
-        &self,
-        room: &str,
-        from: &str,
-        to: &str,
-        sdp: String,
-    ) -> Result<(), ErrorCode> {
-        if sdp.len() > MAX_SDP_BYTES {
-            return Err(ErrorCode::SdpTooLong);
-        }
-        let rooms = self.rooms.lock().unwrap();
-        let Some(entry) = rooms.get(room) else {
-            return Err(ErrorCode::CallNotAllowed);
-        };
-        let target = call_target(entry, from, to)?;
-        let _ = target.tx.send(ServerMsg::CallAnswer {
-            from: from.to_owned(),
-            sdp,
-        });
-        Ok(())
-    }
-
-    /// Relay one ICE candidate between two participants of the active call.
-    pub fn call_relay_ice(
-        &self,
-        room: &str,
-        from: &str,
-        to: &str,
-        candidate: String,
-    ) -> Result<(), ErrorCode> {
-        if candidate.len() > MAX_CANDIDATE_BYTES {
-            return Err(ErrorCode::CandidateTooLong);
-        }
-        let rooms = self.rooms.lock().unwrap();
-        let Some(entry) = rooms.get(room) else {
-            return Err(ErrorCode::CallNotAllowed);
-        };
-        let target = call_target(entry, from, to)?;
-        let _ = target.tx.send(ServerMsg::CallIce {
-            from: from.to_owned(),
-            candidate,
-        });
-        Ok(())
-    }
-
     /// The sender's mute/camera state flipped; broadcast to the other call
     /// participants (presence only, README §6.3 — no renegotiation).
     pub fn call_mute(
@@ -869,19 +796,6 @@ pub fn start_ticking_with(
     })
 }
 
-/// Find the relay target of a call message: both `from` and `to` must be
-/// participants of the room's bubble. Signaling from a bystander is
-/// rejected here.
-fn call_target<'a>(entry: &'a Room, from: &str, to: &str) -> Result<&'a Member, ErrorCode> {
-    // Both endpoints must sit in the same call (a user is in at most one).
-    let same =
-        call_containing(entry, from).is_some_and(|i| entry.calls[i].participants.contains_key(to));
-    if !same {
-        return Err(ErrorCode::CallNotAllowed);
-    }
-    entry.users.get(to).ok_or(ErrorCode::CallNotAllowed)
-}
-
 /// Drop `id` from their call, if any, and tell the room (README §6.3).
 /// Used when the leaver toggles out, hangs up, or is gone and cannot be
 /// notified.
@@ -920,8 +834,8 @@ fn leave_call(entry: &mut Room, id: &str) -> Option<u64> {
 /// centroid of its participants. Walk within [`BUBBLE_RADIUS`] of the
 /// center (or of another player, when no bubble exists yet) and you are
 /// pulled in; at the radius or beyond — or toggled off — you drop out
-/// immediately. At most one join per tick keeps the offerer designation
-/// deterministic and the signaling trickle-paced. Returns the ids of the
+/// immediately. At most one join per tick keeps the roster broadcast
+/// ordered and trickle-paced. Returns the ids of the
 /// calls that ended this step, so the caller can fire the SFU's call-end
 /// hook (docs/moq-sfu.md §5).
 fn update_bubbles(
@@ -1043,7 +957,7 @@ fn update_bubbles(
                 zone: Some(jitsi.clone()),
                 ..call
             };
-            broadcast_call_start(world, room, entry, &call, Some(&inside[0]));
+            broadcast_call_start(world, room, entry, &call);
             entry.calls.push(call);
             return ended;
         }
@@ -1078,8 +992,7 @@ fn update_bubbles(
                                 .map(|(uid, m)| (uid.clone(), m.name.clone())),
                         )
                     };
-                    let offerer = [a.0.clone(), b.0.clone()].into_iter().min().unwrap();
-                    broadcast_call_start(world, room, entry, &call, Some(&offerer));
+                    broadcast_call_start(world, room, entry, &call);
                     entry.calls.push(call);
                     created = true;
                     break 'pair;
@@ -1093,8 +1006,8 @@ fn update_bubbles(
 
     // Joins: at most one per tick — the nearest eligible user inside a
     // call's area (zone rect or bubble radius) who is not already in
-    // another call. The joiner is the offerer (README §6.3: the joiner
-    // offers every existing member; nobody renegotiates).
+    // another call. One join per tick keeps the roster broadcast ordered
+    // and trickle-paced.
     'calls: for ci in 0..entry.calls.len() {
         let call = &entry.calls[ci];
         let rect = zone_rect(&call.zone);
@@ -1138,7 +1051,7 @@ fn update_bubbles(
                 );
             }
             let c = &entry.calls[ci];
-            broadcast_call_start(world, room, entry, c, Some(&joiner));
+            broadcast_call_start(world, room, entry, c);
             break 'calls;
         }
     }
@@ -1164,21 +1077,18 @@ fn center_of_call(entry: &Room, call: &call::Call) -> (f32, f32) {
 }
 
 /// Broadcast the bubble's roster to the whole room: `CallStart` powers the
-/// headphone badge on everyone, `you_offer` marks the one recipient who
-/// must send SDP offers to the others, and `ticket` mints a media ticket
-/// for each participant (docs/moq-sfu.md §7) — bystanders get the roster
-/// but no ticket.
+/// headphone badge on everyone, and `ticket` mints a media ticket for each
+/// participant (docs/moq-sfu.md §7) — bystanders get the roster but no
+/// ticket.
 fn broadcast_call_start(
     world: &World,
     room: &str,
     entry: &Room,
     call: &call::Call,
-    offerer: Option<&str>,
 ) {
     let participants = call.participant_list();
     let zone = call.zone.clone();
     for (uid, m) in &entry.users {
-        let you = offerer == Some(uid.as_str());
         let ticket = call
             .participants
             .contains_key(uid)
@@ -1186,7 +1096,6 @@ fn broadcast_call_start(
         let _ = m.tx.send(ServerMsg::CallStart {
             room: room.to_owned(),
             participants: participants.clone(),
-            you_offer: you,
             zone: zone.clone(),
             ticket,
         });
@@ -1358,20 +1267,19 @@ mod tests {
         world.tick();
         // The zone call forms (2+ occupants inside the zone rect).
         for u in [&mut a, &mut b] {
-            let (p, _) = expect_start(u);
+            let p = expect_start(u);
             assert_eq!(p.len(), 2);
         }
         // c is outside the zone: not a participant, but the room-wide badge
-        // reaches him (CallStart with the 2 participants, no you_offer).
-        let (p, you_offer) = expect_start(&mut c);
+        // reaches him (CallStart with the 2 participants).
+        let p = expect_start(&mut c);
         assert_eq!(p.len(), 2);
-        assert!(!you_offer);
         // c walks into the zone: joins the zone call on the next tick.
         place(&world, "zonetest", &c.id, 3.5, 3.5);
         world.tick();
         // The roster re-broadcasts to everyone (badge): c joins, 3 participants.
         for u in [&mut b, &mut c] {
-            let (p, _) = expect_start(u);
+            let p = expect_start(u);
             assert_eq!(p.len(), 3);
         }
         // a leaves the zone: dropped (the call keeps the other two).
@@ -1505,9 +1413,8 @@ mod tests {
         place(&world, "zonetest", &a.id, 3.5, 3.5);
         place(&world, "zonetest", &b.id, 7.5, 7.5);
         world.tick();
-        let (p, you_offer) = expect_start(&mut a);
+        let p = expect_start(&mut a);
         assert_eq!(p.len(), 1);
-        assert!(you_offer);
         expect_start(&mut b); // room-wide badge
     }
 
@@ -1559,7 +1466,7 @@ mod tests {
         // a walks out of the silent zone: the bubble forms now.
         place(&world, "zonetest", &a.id, 3.4, 1.5);
         world.tick();
-        let (p, _) = expect_start(&mut a);
+        let p = expect_start(&mut a);
         assert_eq!(p.len(), 2);
     }
 
@@ -1849,15 +1756,11 @@ mod tests {
         m.dirty = true;
     }
 
-    /// Expect `CallStart`; returns (participants, you_offer).
-    fn expect_start(u: &mut TestUser) -> (Vec<UserBrief>, bool) {
+    /// Expect `CallStart`; returns the participants.
+    fn expect_start(u: &mut TestUser) -> Vec<UserBrief> {
         for _ in 0..20 {
             match u.rx.try_recv().expect("call_start") {
-                ServerMsg::CallStart {
-                    participants,
-                    you_offer,
-                    ..
-                } => return (participants, you_offer),
+                ServerMsg::CallStart { participants, .. } => return participants,
                 _ => continue,
             }
         }
@@ -1887,24 +1790,19 @@ mod tests {
         a.rx.try_recv().unwrap();
         b.rx.try_recv().unwrap(); // b hears c join
 
-        // Carol keeps her distance so {a, b} is the only candidate pair
-        // (ids are not join-ordered): the pair — and thus the offerer — is
-        // deterministic.
+        // Carol keeps her distance so {a, b} is the only candidate pair.
         place(&world, "office", &c.id, 20.0, 0.0);
         // Spawn is shared, so both are within the join radius already: the
-        // first tick creates the bubble. The smaller id is the offerer.
+        // first tick creates the bubble.
         world.tick();
-        let (participants, a_offers) = expect_start(&mut a);
-        let (pb, b_offers) = expect_start(&mut b);
+        let participants = expect_start(&mut a);
+        let pb = expect_start(&mut b);
         assert_eq!(participants, pb, "everyone hears the same roster");
         assert_eq!(participants.len(), 2);
-        assert_eq!(a_offers, a.id < b.id, "the smaller id offers on creation");
-        assert_ne!(a_offers, b_offers, "exactly one offerer");
 
-        // The bystander hears the badge but is not marked as offerer.
-        let (p3, c_offers) = expect_start(&mut c);
+        // The bystander hears the badge but is not a participant.
+        let p3 = expect_start(&mut c);
         assert_eq!(p3.len(), 2);
-        assert!(!c_offers);
 
         // A farther-apart pair does not bubble.
         let mut d = join_user(&world, "island", "dave");
@@ -1970,85 +1868,18 @@ mod tests {
             }
         }
 
-        // Opting back in reforms the bubble with alice (creation: the
-        // smaller id offers, regardless of who opted back in).
+        // Opting back in reforms the bubble with alice.
         world.set_bubble("office", &b.id, false).unwrap();
         world.tick();
         let (a_id, b_id) = (a.id.clone(), b.id.clone());
-        let mut offers: Vec<&str> = Vec::new();
         for u in [&mut a, &mut b, &mut c] {
-            let (p, off) = expect_start(u);
+            let p = expect_start(u);
             assert_eq!(p.len(), 2);
             assert!(
                 p.iter().any(|x| x.id == a_id) && p.iter().any(|x| x.id == b_id),
                 "roster is alice and bob"
             );
-            if off {
-                offers.push("x");
-            }
         }
-        assert_eq!(offers.len(), 1, "exactly one offerer");
-    }
-
-    #[test]
-    fn call_relay_requires_participation() {
-        let world = World::new(test_maps());
-        let mut a = join_user(&world, "office", "alice");
-        let mut b = join_user(&world, "office", "bob");
-        let mut c = join_user(&world, "office", "carol");
-        // Carol keeps her distance: {a, b} is the bubble, she a bystander.
-        place(&world, "office", &c.id, 20.0, 0.0);
-        world.tick(); // a + b bubble at spawn
-        expect_start(&mut a);
-        expect_start(&mut b);
-        c.rx.try_recv().unwrap(); // bystander badge
-
-        // A bystander cannot send or receive call payloads.
-        assert_eq!(
-            world.call_relay_offer("office", &c.id, &b.id, "sdp".into()),
-            Err(ErrorCode::CallNotAllowed)
-        );
-        assert_eq!(
-            world.call_relay_offer("office", &a.id, &c.id, "sdp".into()),
-            Err(ErrorCode::CallNotAllowed)
-        );
-        // Participants relay offer, answer and ICE both ways.
-        world
-            .call_relay_offer("office", &a.id, &b.id, "v=0 offer".into())
-            .unwrap();
-        assert!(matches!(
-            b.rx.try_recv().unwrap(),
-            ServerMsg::CallOffer { ref sdp, .. } if sdp == "v=0 offer"
-        ));
-        world
-            .call_relay_answer("office", &b.id, &a.id, "v=0 answer".into())
-            .unwrap();
-        assert!(matches!(
-            a.rx.try_recv().unwrap(),
-            ServerMsg::CallAnswer { ref sdp, .. } if sdp == "v=0 answer"
-        ));
-        world
-            .call_relay_ice(
-                "office",
-                &a.id,
-                &b.id,
-                "candidate:1 udp 2130706431 ...".into(),
-            )
-            .unwrap();
-        assert!(matches!(
-            b.rx.try_recv().unwrap(),
-            ServerMsg::CallIce { .. }
-        ));
-
-        // Relay caps (README §5).
-        assert_eq!(
-            world.call_relay_offer("office", &a.id, &b.id, "x".repeat(65 * 1024)),
-            Err(ErrorCode::SdpTooLong)
-        );
-        assert_eq!(
-            world.call_relay_ice("office", &a.id, &b.id, "x".repeat(1025)),
-            Err(ErrorCode::CandidateTooLong)
-        );
     }
 
     #[test]

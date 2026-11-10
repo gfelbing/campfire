@@ -36,9 +36,7 @@ export type ErrorCode =
   | "chat_too_long"
   | "room_too_long"
   | "unknown_room"
-  | "call_not_allowed"
-  | "sdp_too_long"
-  | "candidate_too_long";
+  | "call_not_allowed";
 
 // --- server → client -------------------------------------------------------
 
@@ -68,7 +66,6 @@ export type ServerMsg =
       t: "call_start";
       room: string;
       participants: UserBrief[];
-      you_offer: boolean;
       /** Zone call: the `jitsiRoom` name of the bounding zone (README roadmap
        *  "Map enhancements"); only present for zone calls. */
       zone?: string;
@@ -78,9 +75,6 @@ export type ServerMsg =
     }
   | { t: "call_leave"; id: string; zone?: string }
   | { t: "call_end"; reason: string; zone?: string }
-  | { t: "call_offer"; from: string; sdp: string }
-  | { t: "call_answer"; from: string; sdp: string }
-  | { t: "call_ice"; from: string; candidate: string }
   | { t: "call_mute"; id: string; audio: boolean; video: boolean }
   | { t: "call_screen"; id: string; on: boolean }
   | { t: "error"; code: ErrorCode };
@@ -104,9 +98,6 @@ export type ClientMsg =
   /** Opt out of proximity bubbles (README §6.3): leaves the current bubble
    *  at once and prevents joining; `off: false` opts back in. */
   | { t: "bubble"; off: boolean }
-  | { t: "call_offer"; to: string; sdp: string }
-  | { t: "call_answer"; to: string; sdp: string }
-  | { t: "call_ice"; to: string; candidate: string }
   | { t: "call_mute"; audio: boolean; video: boolean }
   /** Presence: we started/stopped screen sharing (camera track replaced). */
   | { t: "call_screen"; on: boolean }

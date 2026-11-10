@@ -236,7 +236,7 @@ async fn reconnect_within_window_keeps_identity_no_flicker() {
     else {
         panic!("expected hello for alice");
     };
-    let (mut b, b_id, _b_token) = join(addr, "office", "bob").await;
+    let (mut b, _b_id, _b_token) = join(addr, "office", "bob").await;
     // Alice hears bob join (drain).
     assert!(matches!(a.recv().await, ServerMsg::Joined { .. }));
 
@@ -266,13 +266,8 @@ async fn reconnect_within_window_keeps_identity_no_flicker() {
     // the proximity bubble on its own — no ring, no accept (README §6.3).
     // Call state is room-wide: both hear the roster.
     match a.recv().await {
-        ServerMsg::CallStart {
-            participants,
-            you_offer,
-            ..
-        } => {
+        ServerMsg::CallStart { participants, .. } => {
             assert_eq!(participants.len(), 2, "alice's roster lists both");
-            assert_eq!(you_offer, a_id < b_id, "the smaller id offers");
         }
         m => panic!("expected call_start for alice, got {m:?}"),
     }
@@ -337,22 +332,22 @@ async fn reconnect_within_window_keeps_identity_no_flicker() {
     )
     .await;
 
-    // Call membership proof from the other side: call-scoped signaling
+    // Call membership proof from the other side: call-scoped presence
     // between the two still relays (both must be participants).
-    a2.send(&ClientMsg::CallIce {
-        to: b_id.clone(),
-        candidate: "{\"candidate\":\"alice-rejoin\"}".into(),
+    a2.send(&ClientMsg::CallMute {
+        audio: false,
+        video: false,
     })
     .await;
     match b.recv().await {
-        ServerMsg::CallIce { from, .. } => assert_eq!(from, a_id),
-        m => panic!("expected relayed call_ice, got {m:?}"),
+        ServerMsg::CallMute { id, .. } => assert_eq!(id, a_id),
+        m => panic!("expected relayed call_mute, got {m:?}"),
     }
 }
 
 /// Phase 7 acceptance: **chat is reliable under 5 % simulated packet
-/// loss** — streams (and the stream-based call signaling) deliver
-/// completely through a lossy link, thanks to QUIC retransmission.
+/// loss** — streams deliver completely through a lossy link, thanks to
+/// QUIC retransmission.
 #[tokio::test]
 async fn chat_and_signaling_survive_5_percent_packet_loss() {
     let (addr, _root) = start_server().await;
