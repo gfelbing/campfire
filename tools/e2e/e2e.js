@@ -10,7 +10,10 @@
  *      engine pulls them into a call — the WebRTC half runs on Chromium's
  *      fake device, and the assertion is `connectionState === "connected"`
  *      (README §6.3: the joiner offers, existing members answer);
- *   5. B walks away and leaves the room — the bubble tears down
+ *   5. B walks and A sees the movement; B refreshes the tab and walks
+ *      again — A still sees B move (a token rejoin restarts the movement
+ *      sequence at 0; A's per-user guard must follow the new epoch);
+ *   6. B walks away and leaves the room — the bubble tears down
  *      (walk-away leave).
  *
  * Usage: node tools/e2e/e2e.js [--url https://localhost:8443] [--browser /path]
@@ -70,6 +73,22 @@ const badgeFor = (page, name) =>
     }
     return false;
   }, name);
+
+/**
+ * The client's `__campfire_users` hook (main.ts): id → { name, x, y } in tile
+ * coords. Returns the x of the user whose name contains `needle`, or null.
+ */
+const posX = (page, name) =>
+  page.evaluate((needle) => {
+    const u = window.__campfire_users ?? {};
+    for (const rec of Object.values(u))
+      if (rec.name && rec.name.includes(needle)) return rec.x;
+    return null;
+  }, name);
+
+/** How many users does the page's own roster currently hold? */
+const userCount = (page) =>
+  page.evaluate(() => Object.keys(window.__campfire_users ?? {}).length);
 
 (async () => {
   const browser = await puppeteer.launch({
@@ -158,7 +177,37 @@ const badgeFor = (page, name) =>
     if (!still) throw new Error("call badge disappeared — bubble did not hold");
     console.log("   bubble call established and held");
 
-    console.log("5. walk-away leave…");
+    console.log("5. movement survives a peer tab refresh…");
+    // Control: B walks east from spawn; A must see B's tile position move
+    // (proves the movement pipeline works before any refresh).
+    const x0 = await posX(pageA, NAME_B);
+    await pageB.keyboard.down("ArrowRight");
+    await sleep(3_000);
+    await pageB.keyboard.up("ArrowRight");
+    const x1 = await posX(pageA, NAME_B);
+    if (x0 == null || x1 == null || x1 - x0 < 2)
+      throw new Error(`control: A did not see B walk (x ${x0} → ${x1})`);
+    console.log(`   A sees B walk east (x ${x0.toFixed(1)} → ${x1.toFixed(1)})`);
+
+    // The regression: B refreshes. The token rejoin starts the movement
+    // sequence from 0 again and the server resets its counter to match
+    // (world.rs `join`). A's per-user sequence guard used to keep B's
+    // pre-refresh lastSeq, so every new-epoch entry (s = 0,1,2…) was
+    // dropped and B's avatar froze on A. B walks again — A must still see
+    // B move.
+    await pageB.reload({ waitUntil: "domcontentloaded" });
+    await waitUntil(async () => (await userCount(pageB)) >= 2, "B re-joined after reload", 30_000);
+    await sleep(1_000); // let B's game loop settle at its restored position
+    const x2 = await posX(pageA, NAME_B);
+    await pageB.keyboard.down("ArrowLeft");
+    await sleep(2_000);
+    await pageB.keyboard.up("ArrowLeft");
+    const x3 = await posX(pageA, NAME_B);
+    if (x2 == null || x3 == null || Math.abs(x3 - x2) < 2)
+      throw new Error(`regression: A stopped seeing B after B's refresh (x ${x2} → ${x3})`);
+    console.log(`   A still sees B walk after refresh (x ${x2.toFixed(1)} → ${x3.toFixed(1)})`);
+
+    console.log("6. walk-away leave…");
     // Move B far from spawn via synthetic arrow keys (movement validator is
     // server-authoritative; synthetic key events are what a real user does).
     await pageB.keyboard.down("ArrowRight");
