@@ -2,14 +2,13 @@
 //! localhost/127.0.0.1/::1) on both sides, ring provider like the app.
 
 use std::{
-    fs::File,
-    io::BufReader,
     path::Path,
     sync::Arc,
     time::Duration,
 };
 
 use anyhow::{Context, Result};
+use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 
 /// Load the PEM certificate chain and private key from disk.
@@ -17,21 +16,16 @@ pub fn load_cert_and_key(
     cert: &Path,
     key: &Path,
 ) -> Result<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>)> {
-    let mut cert_buf = BufReader::new(
-        File::open(cert).with_context(|| format!("opening cert file {}", cert.display()))?,
-    );
-    let certs: Vec<CertificateDer<'static>> =
-        rustls_pemfile::certs(&mut cert_buf).collect::<Result<_, _>>()?;
+    let certs: Vec<CertificateDer<'static>> = CertificateDer::pem_file_iter(cert)
+        .with_context(|| format!("opening cert file {}", cert.display()))?
+        .collect::<Result<_, _>>()
+        .with_context(|| format!("parsing cert file {}", cert.display()))?;
     if certs.is_empty() {
         anyhow::bail!("no certificates found in {}", cert.display());
     }
 
-    let mut key_buf = BufReader::new(
-        File::open(key).with_context(|| format!("opening key file {}", key.display()))?,
-    );
-    let key = rustls_pemfile::private_key(&mut key_buf)
-        .with_context(|| format!("parsing key file {}", key.display()))?
-        .ok_or_else(|| anyhow::anyhow!("no private key found in {}", key.display()))?;
+    let key = PrivateKeyDer::from_pem_file(key)
+        .with_context(|| format!("parsing key file {}", key.display()))?;
 
     Ok((certs, key))
 }
@@ -114,11 +108,10 @@ pub fn media_transport_config() -> quinn::TransportConfig {
 /// Rustls client config trusting the spike CA, advertising `h3`.
 pub fn client_rustls_config(ca: &Path) -> Result<rustls::ClientConfig> {
     let provider = Arc::new(rustls::crypto::ring::default_provider());
-    let mut ca_buf = BufReader::new(
-        File::open(ca).with_context(|| format!("opening CA file {}", ca.display()))?,
-    );
-    let ca_certs: Vec<CertificateDer<'static>> =
-        rustls_pemfile::certs(&mut ca_buf).collect::<Result<_, _>>()?;
+    let ca_certs: Vec<CertificateDer<'static>> = CertificateDer::pem_file_iter(ca)
+        .with_context(|| format!("opening CA file {}", ca.display()))?
+        .collect::<Result<_, _>>()
+        .with_context(|| format!("parsing CA file {}", ca.display()))?;
     if ca_certs.is_empty() {
         anyhow::bail!("no certificates found in {}", ca.display());
     }
