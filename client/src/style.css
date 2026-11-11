@@ -681,6 +681,14 @@ body {
   white-space: nowrap;
 }
 
+/* the tile's downlink latency (delay + jitter buffer), live tiles only */
+.theater-tile-info .tile-latency {
+  font-size: 0.6rem;
+  color: #6f7580;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
 /* the local (own camera) tile: same size as every remote tile */
 .theater-tile.local video {
   object-fit: cover;

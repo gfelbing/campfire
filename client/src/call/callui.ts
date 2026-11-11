@@ -36,6 +36,8 @@ interface Tile {
   media: HTMLCanvasElement | null;
   nameEl: HTMLElement;
   stateEl: HTMLElement;
+  /** Downlink latency label (delay + jitter), live tiles only. */
+  latencyEl: HTMLElement;
   muteEl: HTMLElement;
   camEl: HTMLElement;
   screenEl: HTMLElement;
@@ -186,7 +188,7 @@ export function createCallUI(container: HTMLElement, actions: CallUiActions): Ca
     const el = document.createElement("div");
     el.className = `theater-tile${screen ? " screen" : ""}`;
     el.innerHTML = `
-      <div class="theater-tile-info"><span class="tile-name"></span><span class="tile-state"></span></div>
+      <div class="theater-tile-info"><span class="tile-name"></span><span class="tile-state"></span><span class="tile-latency hidden"></span></div>
       <span class="call-badge tile-mute hidden">🔇</span>
       <span class="call-badge tile-cam hidden">📷 off</span>
       <span class="call-badge tile-screen hidden">🖥</span>`;
@@ -196,6 +198,7 @@ export function createCallUI(container: HTMLElement, actions: CallUiActions): Ca
       media: null,
       nameEl: el.querySelector<HTMLElement>(".tile-name")!,
       stateEl: el.querySelector<HTMLElement>(".tile-state")!,
+      latencyEl: el.querySelector<HTMLElement>(".tile-latency")!,
       muteEl: el.querySelector<HTMLElement>(".tile-mute")!,
       camEl: el.querySelector<HTMLElement>(".tile-cam")!,
       screenEl: el.querySelector<HTMLElement>(".tile-screen")!,
@@ -218,9 +221,17 @@ export function createCallUI(container: HTMLElement, actions: CallUiActions): Ca
     return tile;
   }
 
-  function updateTile(t: Tile, name: string, state: DownlinkState, canvas: HTMLCanvasElement | null, stream: MediaStream | null, audioOn: boolean, videoOn: boolean): void {
+  function updateTile(t: Tile, name: string, state: DownlinkState, canvas: HTMLCanvasElement | null, stream: MediaStream | null, audioOn: boolean, videoOn: boolean, delay: number, jitter: number): void {
     t.nameEl.textContent = t.key.endsWith(":scr") ? `${name} · screen` : name;
     t.stateEl.textContent = stateText(state);
+    // Latency (playback delay from the live edge) and jitter buffer depth,
+    // once the downlink is live (the issue: "show delay in other streams").
+    if (state === "live") {
+      t.latencyEl.textContent = `${Math.round(delay)} ms · ${Math.round(jitter)} ms`;
+      t.latencyEl.classList.remove("hidden");
+    } else {
+      t.latencyEl.classList.add("hidden");
+    }
     t.muteEl.classList.toggle("hidden", audioOn);
     t.camEl.classList.toggle("hidden", videoOn);
     // The downlink's canvas is the paint target; move it in when it first
@@ -325,6 +336,8 @@ export function createCallUI(container: HTMLElement, actions: CallUiActions): Ca
         canvas: HTMLCanvasElement | null;
         stream: MediaStream | null;
         state: DownlinkState;
+        delay: number;
+        jitter: number;
         audioOn: boolean;
         videoOn: boolean;
       }
@@ -337,6 +350,8 @@ export function createCallUI(container: HTMLElement, actions: CallUiActions): Ca
           canvas: p.camera,
           stream: p.cameraStream,
           state: p.state,
+          delay: p.delay,
+          jitter: p.jitter,
           audioOn: p.audioOn,
           videoOn: p.videoOn,
         });
@@ -348,6 +363,8 @@ export function createCallUI(container: HTMLElement, actions: CallUiActions): Ca
             canvas: p.screen,
             stream: null, // the screen share carries no audio
             state: p.state,
+            delay: p.delay,
+            jitter: p.jitter,
             audioOn: true,
             videoOn: true,
           });
@@ -361,7 +378,7 @@ export function createCallUI(container: HTMLElement, actions: CallUiActions): Ca
           t = makeTile(v.key, v.name, v.screen);
           tiles.set(v.key, t);
         }
-        updateTile(t, v.name, v.state, v.canvas, v.stream, v.audioOn, v.videoOn);
+        updateTile(t, v.name, v.state, v.canvas, v.stream, v.audioOn, v.videoOn, v.delay, v.jitter);
       }
       for (const [key, t] of tiles) {
         if (!seen.has(key)) {
