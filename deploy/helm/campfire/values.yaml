@@ -88,4 +88,4 @@ resources:
     memory: 512Mi
 
 # Optional extra args passed to the campfire binary verbatim.
-extraArgs: ""
+extraArgs: []
