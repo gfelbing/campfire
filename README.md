@@ -82,6 +82,10 @@ Consequences of the HTTP/3-only data path: no WebSockets (WebTransport instead),
 | `/api/v1/maps` | list maps: `{id, name, thumb}` |
 | `/api/v1/maps/{*rest}` | the Tiled JSON (`office`, `interiors/conference`) or a file from the map's directory (`office/tiles.png`) |
 | `/api/v1/rooms` | active rooms with member counts |
+| `/api/v1/auth` | auth status `{enabled, name?}` — always 200; the client probes it on boot |
+| `/auth/login` | OIDC login: 302 to the IdP (only when auth is enabled) |
+| `/auth/callback` | OIDC callback: code exchange, session cookie, 302 back (only when auth is enabled) |
+| `/auth/logout` | drop the session, clear the cookie, 302 to `/` |
 | `/healthz`, `/metrics` | liveness; Prometheus text |
 | `/wt` | the WebTransport realtime session |
 | `/moq` | the MoQ SFU media session (admitted by ticket, docs/moq-sfu.md §7) |
@@ -191,6 +195,8 @@ Ops in brief: one release binary or the Docker image (`-p 443:443/udp -p 443:443
 ## 11. Security & limits
 
 TLS 1.3 only, `h3`-only ALPN on UDP. Per-session limits: movement 30/s, chat 1/s, stream messages 50/s, inbound 256 KB/s, datagram ≤ 1200 B, name ≤ 24 chars, room cap 2048. The server is authoritative for movement, membership and call state. No persistence, no accounts, identity-free logs (random user ids).
+
+**Optional authentication (OpenID Connect).** Behind `--auth-openid-enabled` (+ `--auth-openid-issuer` / `-client-id` / `-client-secret` / `-redirect-uri`; the secret may also come from `$CAMPFIRE_AUTH_CLIENT_SECRET`), the standard authorization-code flow for a confidential client: `/auth/login` 302s to the IdP with a random `state` + `nonce`, `/auth/callback` exchanges the code, verifies the `id_token` (JWKS signature, `iss`, `aud`, `exp`, `nonce`) and mints an HttpOnly session cookie (8 h TTL, in-memory — a restart signs everyone out). While enabled, a join without a valid session is refused (401) and the display name is **forced** from the id_token (`preferred_username` > `name` > email local-part > `sub`); the client probes `/api/v1/auth` on boot and redirects unsigned-in visitors to the IdP.
 
 ---
 

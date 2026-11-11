@@ -15,8 +15,7 @@ use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
 use axum::extract::{Path as UrlPath, Query, State};
-use axum::http::StatusCode;
-use axum::http::Uri;
+use axum::http::{HeaderMap, StatusCode, Uri};
 use axum::http::header;
 use axum::response::sse::Event;
 use axum::response::{IntoResponse, Response, Sse};
@@ -55,16 +54,36 @@ pub struct AppState {
     /// The MoQ SFU (docs/moq-sfu.md §5): one per process, wired to the
     /// world's call-end hook so call media origins are reaped.
     pub moq: std::sync::Arc<crate::moq::MoqSfu>,
+    /// OpenID Connect authentication (README §11). `None` when disabled;
+    /// when set, a join without a valid session cookie is refused and a
+    /// valid one forces the display name from the IdP.
+    pub auth: Option<std::sync::Arc<crate::auth::Auth>>,
 }
 
 impl AppState {
-    pub fn new(cfg: &Config) -> Self {
+    /// [`AppState::with_metrics`] with a fresh metrics registry (tests).
+    pub fn new(cfg: &Config) -> anyhow::Result<Self> {
         Self::with_metrics(cfg, crate::metrics::Metrics::new())
     }
 
-    /// [`AppState::new`] with a shared metrics registry (the real server
-    /// passes the same one the tick loop and TLS front feed).
-    pub fn with_metrics(cfg: &Config, metrics: crate::metrics::Metrics) -> Self {
+    /// Build the full state, resolving the (optional) auth config from the
+    /// CLI. Errors when auth is enabled but misconfigured.
+    pub fn with_metrics(cfg: &Config, metrics: crate::metrics::Metrics) -> anyhow::Result<Self> {
+        let auth = cfg
+            .auth_openid()?
+            .map(|a| crate::auth::Auth::new(a.issuer, a.client_id, a.client_secret, a.redirect_uri))
+            .transpose()?
+            .map(std::sync::Arc::new);
+        Ok(Self::with_parts(cfg, metrics, auth))
+    }
+
+    /// The infallible core: build the state from an already-resolved auth
+    /// handle (tests and the load-test tool pass `None`).
+    pub fn with_parts(
+        cfg: &Config,
+        metrics: crate::metrics::Metrics,
+        auth: Option<std::sync::Arc<crate::auth::Auth>>,
+    ) -> Self {
         // The SFU is built next to the world and shares its ticket store;
         // the world's call-end hook reaps the SFU's per-call media origins
         // (docs/moq-sfu.md §5).
@@ -76,6 +95,7 @@ impl AppState {
             static_dir: cfg.static_dir.clone(),
             metrics,
             moq,
+            auth,
         }
     }
 }
@@ -112,6 +132,13 @@ pub fn router(state: AppState) -> Router {
         // `office/tiles.png`.
         .route("/api/v1/maps/{*rest}", get(map_or_asset))
         .route("/api/v1/rooms", get(list_rooms))
+        // OpenID Connect auth (README §11): status probe, login, callback,
+        // logout. The status endpoint is always 200 (the client uses it to
+        // decide whether to redirect to login).
+        .route("/api/v1/auth", get(auth_status))
+        .route("/auth/login", get(auth_login))
+        .route("/auth/callback", get(auth_callback))
+        .route("/auth/logout", get(auth_logout))
         // WebTransport realtime session (README §5).
         .route("/wt", connect(handle_wt))
         // MoQ SFU media session (docs/moq-sfu.md §5): a second WebTransport
@@ -225,6 +252,143 @@ async fn list_rooms(State(state): State<AppState>) -> Json<Vec<RoomInfo>> {
 }
 
 // ---------------------------------------------------------------------------
+// OpenID Connect auth (README §11, authorization-code flow). When enabled, a
+// visitor signs in through the IdP; a session cookie maps to a verified name
+// that is forced onto every join. See `crate::auth` for the protocol.
+// ---------------------------------------------------------------------------
+
+/// The session cookie name. HttpOnly: the client never reads it (it only
+/// probes `/api/v1/auth`).
+pub(crate) const AUTH_COOKIE: &str = "campfire_auth";
+
+/// The value of the [`AUTH_COOKIE`], if the request carries it.
+pub(crate) fn auth_cookie(headers: &HeaderMap) -> Option<String> {
+    let raw = headers.get(header::COOKIE)?.to_str().ok()?;
+    for part in raw.split(';') {
+        if let Some(value) = part.trim().strip_prefix(&format!("{AUTH_COOKIE}=")) {
+            return (!value.is_empty()).then_some(value.to_owned());
+        }
+    }
+    None
+}
+
+/// The join gate (README §11). Returns the IdP-forced name when auth is
+/// enabled, or `None` when auth is off (the caller uses the client's name).
+/// A 401 when auth is on but the session cookie is missing or invalid.
+pub(crate) fn enforce_auth(
+    state: &AppState,
+    headers: &HeaderMap,
+) -> Result<Option<String>, StatusCode> {
+    let Some(auth) = &state.auth else {
+        return Ok(None);
+    };
+    let cookie = auth_cookie(headers).ok_or(StatusCode::UNAUTHORIZED)?;
+    let identity = auth
+        .identity_for_cookie(&cookie)
+        .ok_or(StatusCode::UNAUTHORIZED)?;
+    Ok(Some(identity.name))
+}
+
+/// `return_to` must be a same-origin absolute path (no `//`, no backslash,
+/// no CR/LF): an open redirect could bounce a signed-in user to another site.
+fn valid_return_to(s: &str) -> bool {
+    s.starts_with('/')
+        && !s.starts_with("//")
+        && s.len() <= 2048
+        && !s.contains(['\\', '\r', '\n'])
+}
+
+/// `GET /api/v1/auth` → whether auth is on and the signed-in name (if any).
+/// Always 200: the client probes it on boot to decide whether to redirect to
+/// login.
+async fn auth_status(State(state): State<AppState>, headers: HeaderMap) -> Json<serde_json::Value> {
+    let Some(auth) = &state.auth else {
+        return Json(serde_json::json!({ "enabled": false }));
+    };
+    let name = auth_cookie(&headers)
+        .and_then(|c| auth.identity_for_cookie(&c).map(|i| i.name));
+    Json(match name {
+        Some(name) => serde_json::json!({ "enabled": true, "name": name }),
+        None => serde_json::json!({ "enabled": true }),
+    })
+}
+
+#[derive(Deserialize)]
+struct LoginQuery {
+    #[serde(default)]
+    return_to: Option<String>,
+}
+
+/// `GET /auth/login?return_to=…` → 302 to the IdP's authorization endpoint
+/// (with a random `state` + `nonce`).
+async fn auth_login(State(state): State<AppState>, Query(q): Query<LoginQuery>) -> Response {
+    let Some(auth) = &state.auth else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let return_to = q
+        .return_to
+        .filter(|s| valid_return_to(s))
+        .unwrap_or_else(|| "/".to_owned());
+    match auth.start_login(return_to).await {
+        Ok(url) => (StatusCode::FOUND, [(header::LOCATION, url)]).into_response(),
+        Err(err) => {
+            tracing::warn!(error = %err, "auth login: IdP discovery failed");
+            (StatusCode::BAD_GATEWAY, "upstream IdP error").into_response()
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct CallbackQuery {
+    #[serde(default)]
+    code: Option<String>,
+    #[serde(default)]
+    state: Option<String>,
+}
+
+/// `GET /auth/callback?code&state` → exchange the code, verify the id_token,
+/// mint a session cookie, 302 back to the original page.
+async fn auth_callback(State(state): State<AppState>, Query(q): Query<CallbackQuery>) -> Response {
+    let Some(auth) = &state.auth else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let (Some(code), Some(state)) = (q.code, q.state) else {
+        return (StatusCode::BAD_REQUEST, "missing code or state").into_response();
+    };
+    match auth.handle_callback(&code, &state).await {
+        Ok((cookie, _identity, return_to)) => {
+            let set_cookie = format!(
+                "{name}={value}; Path=/; HttpOnly; SameSite=Lax; Secure; Max-Age={ttl}",
+                name = AUTH_COOKIE,
+                value = cookie,
+                ttl = crate::auth::SESSION_TTL.as_secs()
+            );
+            (
+                StatusCode::FOUND,
+                [(header::LOCATION, return_to), (header::SET_COOKIE, set_cookie)],
+            )
+                .into_response()
+        }
+        Err(err) => {
+            tracing::warn!(error = %err, "auth callback failed");
+            // Land on the page; the client sees auth enabled + unsigned in
+            // `/api/v1/auth` and redirects to login again.
+            (StatusCode::FOUND, [(header::LOCATION, "/")]).into_response()
+        }
+    }
+}
+
+/// `GET /auth/logout` → drop the session, clear the cookie, 302 to `/`.
+async fn auth_logout(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if let (Some(auth), Some(cookie)) = (&state.auth, auth_cookie(&headers)) {
+        auth.logout(&cookie);
+    }
+    let clear =
+        format!("{name}=; Path=/; HttpOnly; SameSite=Lax; Secure; Max-Age=0", name = AUTH_COOKIE);
+    (StatusCode::FOUND, [(header::LOCATION, "/"), (header::SET_COOKIE, &clear)]).into_response()
+}
+
+// ---------------------------------------------------------------------------
 // Realtime fallback: SSE down, POST up (README §8). Same message protocol as
 // the WebTransport stream; movement (datagrams) is the one thing it cannot
 // do, so fallback clients see presence, chat and calls but not movement.
@@ -273,6 +437,7 @@ fn fallback_map() -> &'static FallbackMap {
 /// `POST /rt/event` — join or relay one stream message.
 async fn fallback_event(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(req): Json<FallbackReq>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     let err = |code: ErrorCode| {
@@ -291,10 +456,24 @@ async fn fallback_event(
             if !valid_room(&room) {
                 return Err(err(ErrorCode::BadMessage));
             }
-            let name = name.trim();
-            if name.is_empty() || name.len() > MAX_NAME_CHARS {
-                return Err(err(ErrorCode::NameTooLong));
-            }
+            // Auth (README §11): when enabled, the name is forced from the
+            // verified session cookie; a missing/invalid cookie is refused.
+            let name = match enforce_auth(&state, &headers) {
+                Ok(Some(forced)) => forced,
+                Ok(None) => {
+                    let name = name.trim();
+                    if name.is_empty() || name.len() > MAX_NAME_CHARS {
+                        return Err(err(ErrorCode::NameTooLong));
+                    }
+                    name.to_owned()
+                }
+                Err(status) => {
+                    return Err((
+                        status,
+                        Json(serde_json::json!({ "error": "unauthenticated" })),
+                    ))
+                }
+            };
             if let Some(avatar) = &avatar
                 && avatar.color.len() > MAX_AVATAR_CHARS
             {
@@ -311,7 +490,7 @@ async fn fallback_event(
             let user_id =
                 match state
                     .world
-                    .join(&room, name, avatar, token.as_deref(), session_id, tx, dtx)
+                    .join(&room, &name, avatar, token.as_deref(), session_id, tx, dtx)
                 {
                     Ok(joined) => {
                         // The unbounded channel buffers the hello until the SSE
@@ -339,7 +518,7 @@ async fn fallback_event(
                 user_id.clone(),
                 FallbackSession {
                     room: room.clone(),
-                    name: name.to_owned(),
+                    name: name.clone(),
                     user_id: user_id.clone(),
                     session_id,
                     chat: Mutex::new(RateLimit::new()),
