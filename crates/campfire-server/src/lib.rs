@@ -26,6 +26,9 @@ pub async fn run(cfg: &config::Config) -> Result<()> {
     let local = socket.local_addr()?;
     let endpoint = make_endpoint(quinn_conf, socket)?;
     let metrics = metrics::Metrics::new();
+    // The public TCP port is a TLS front (`bootstrap`, README §6.2): it
+    // serves the Alt-Svc bootstrap browsers need to discover HTTP/3.
+    bootstrap::start(cfg)?;
     let state = api::AppState::with_metrics(cfg, metrics.clone());
     info!(%local, "campfire listening over HTTP/3 (QUIC)");
     let _tick = world::start_ticking_with(state.world.clone(), metrics.clone());
