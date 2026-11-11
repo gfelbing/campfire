@@ -98,6 +98,21 @@ export async function createWorld(
     }
   }
   world.addChild(tiles);
+  // The tile layer is static (tiles are never added, moved or flipped at
+  // runtime): bake it into one texture. Per-tile sprite quads leave
+  // sub-pixel seams (dark lines between tiles) whenever the camera sits at
+  // a fractional pixel offset — one texture has no interior quads, so it
+  // samples cleanly at any camera position or zoom. It also collapses the
+  // layer to a single draw call.
+  const tileIndex = world.getChildIndex(tiles);
+  world.removeChild(tiles);
+  const baked = app.renderer.generateTexture({
+    target: tiles,
+    resolution: app.renderer.resolution,
+  });
+  const tileSprite = new Sprite(baked);
+  world.addChildAt(tileSprite, tileIndex);
+  tiles.destroy({ children: true });
 
   const bubble = new Graphics();
   world.addChild(bubble);
