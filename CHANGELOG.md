@@ -4,6 +4,33 @@ All notable releases of campfire. Versions follow calendar-agnostic
 semver; releases are cut by tagging `vX.Y.Z` (the Docker image is built
 and pushed to GHCR on each tag).
 
+## [0.0.6] — 2026-11-11
+
+Patch release: the image build is now warning-free.
+
+### Changed
+
+- The image build installs Node 22 LTS (NodeSource) instead of the
+  Debian apt node 20, which sat below vitest's engine requirement and
+  made npm warn `EBADENGINE` for the whole install. Node 22 matches the
+  CI workflow.
+- The vendored moq-net now uses the renamed `AtomicUsize::try_update`
+  (the 0.3.23 source called the deprecated `fetch_update`, which the
+  pinned Rust 1.99.1 warns about).
+- The client build filters one upstream Rollup warning: zod (via
+  `@moq/*`) writes `@__PURE__` annotations at positions Rollup cannot
+  parse — the package targets esbuild, Rollup drops the comment and the
+  bundle is correct.
+
+### Fixed
+
+- Quieted the remaining build noise: `npm ci` runs with
+  `--no-audit --no-fund` in the image (the 10 moderate audit findings
+  are dev-only eslint-chain `minimatch` issues, never shipped), and the
+  entry chunk size hint gets a 1000 kB limit that still flags real
+  bloat (the single entry chunk is the whole embedded client by design;
+  Pixi is already dynamic-imported).
+
 ## [0.0.5] — 2026-11-11
 
 ### Added
@@ -36,6 +63,12 @@ and pushed to GHCR on each tag).
 - `tools/moq-spike` (the Phase 0 spike tool) — superseded by the app
   build and the browser e2e. `docs/moq-spike-results.md` stays as the
   historical Phase 0 artifact.
+
+### Fixed
+
+- The Dockerfile no longer copies the removed spike directory and now
+  copies `third_party/moq-net`, which the `[patch.crates-io]` entry in
+  the workspace `Cargo.toml` points at.
 
 ## [0.0.4] — 2026-11-11
 
