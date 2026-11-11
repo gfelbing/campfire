@@ -25,6 +25,10 @@ That is what killed the second participant's session whenever a first
 participant's tab reloaded and re-announced the same hang path. Upstream fixed
 the same defect after 0.3.23; this change mirrors that fix.
 
+A second, cosmetic change: `src/model/frame.rs` uses the renamed
+`AtomicUsize::try_update` (the 0.3.23 source calls the deprecated alias
+`fetch_update`, which the pinned Rust 1.99.1 warns about).
+
 ## Keeping it in sync
 
 Re-vendor when the workspace bumps `moq-net`: download the new crate
