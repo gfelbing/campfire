@@ -91,8 +91,18 @@ export async function createWorld(
         const sprite = new Sprite({ texture: new Texture({ source: texture.source, frame }) });
         sprite.x = x * ts;
         sprite.y = y * ts;
-        if (raw & FLIP_H) sprite.scale.x = -1;
-        if (raw & FLIP_V) sprite.scale.y = -1;
+        // Tiled flip bits mirror the tile within its own cell. A negative
+        // scale alone mirrors around the sprite's top-left anchor, which
+        // displaces the tile one cell left/up; anchoring the flipped axis at
+        // the cell's far edge keeps the quad inside the cell.
+        if (raw & FLIP_H) {
+          sprite.anchor.x = 1;
+          sprite.scale.x = -1;
+        }
+        if (raw & FLIP_V) {
+          sprite.anchor.y = 1;
+          sprite.scale.y = -1;
+        }
         tiles.addChild(sprite);
       }
     }
