@@ -132,7 +132,7 @@ Maps live on disk, mounted at runtime — never bundled into the binary:
 - `jitsiRoom` (string): a **meeting room** — everyone inside the rectangle is in the zone's call (it forms with the first occupant; walking in joins). The call area is the zone rectangle, not a circle.
 - `silentZone` (or a truthy `silent`): **do not disturb** — occupants never form or join a proximity bubble, drop out of one they were in, are marked with a 🔇 badge, and their audio is muted for everyone nearby.
 - `exitUrl` (string): walking onto the object navigates to another map. The URL is **relative to the current map's directory** (`conference.tmj` from `interiors/office` targets `interiors/conference`); a leading `/` targets from the `maps/` root, `..` climbs. A `#fragment` is allowed and ignored. Name and color survive the hop.
-- An object named `start` marks the **spawn area**: the nearest walkable tile to its center (falling back outward in a ring) is the spawn point, used identically by server and client.
+- An object named `start` (or carrying a truthy `start` property) marks the **spawn area**: the nearest walkable tile to its center (falling back outward in a ring) is the spawn point, used identically by server and client.
 
 In deployment, mount a directory of map folders with `--maps-dir /mnt/maps`; for development the repo's `maps/` is used. Map folders you add locally are ignored by git and are yours to manage.
 
