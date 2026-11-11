@@ -64,6 +64,9 @@ pub struct Zone {
     pub silent: bool,
     /// `exitUrl` property: walking onto this zone navigates elsewhere.
     pub exit_url: Option<String>,
+    /// Spawn area: the object is named `start` or carries a truthy
+    /// `start` property (both conventions occur in the wild).
+    pub start: bool,
 }
 
 impl Zone {
@@ -185,9 +188,7 @@ impl MapData {
         // A `start`-marked object area selects the spawn point (README
         // roadmap "Map enhancements"): the area's center, snapped to a
         // walkable tile when the center itself is blocked.
-        let spawn = zones
-            .iter()
-            .find(|z| z.name == "start")
+        let spawn = zones.iter().find(|z| z.start)
             .map(|z| {
                 let (zx, zy, zw, zh) = z.rect;
                 let (cx, cy) = (zx + zw / 2.0, zy + zh / 2.0);
@@ -245,7 +246,10 @@ fn zones(raw: &RawMap, _width: u32, _height: u32) -> Vec<Zone> {
             let jitsi = o.prop_str("jitsiRoom");
             let silent = o.prop_bool("silentZone") || o.prop_bool("silent");
             let exit = o.prop_str("exitUrl");
-            let is_start = o.name == "start";
+            // Two conventions mark the spawn area: an object named
+            // `start`, or a truthy `start` property (common in existing
+            // Tiled maps).
+            let is_start = o.name == "start" || o.prop_bool("start");
             if jitsi.is_none() && !silent && exit.is_none() && !is_start {
                 continue;
             }
@@ -255,6 +259,7 @@ fn zones(raw: &RawMap, _width: u32, _height: u32) -> Vec<Zone> {
                 jitsi_room: jitsi,
                 silent,
                 exit_url: exit,
+                start: is_start,
             });
         }
     }
@@ -530,6 +535,29 @@ mod tests {
         // Zone containment: point-in-rect.
         assert!(meeting.contains(2.5, 1.5));
         assert!(!meeting.contains(1.0, 1.0));
+    }
+
+    #[test]
+    fn start_property_marks_spawn_area() {
+        // The property convention: an object not named `start`, carrying
+        // a truthy `start` property.
+        let raw = serde_json::json!({
+            "type": "map",
+            "width": 8,
+            "height": 8,
+            "layers": [
+                {"type": "tilelayer", "name": "collision", "width": 8, "height": 8,
+                 "data": vec![0; 64]},
+                {"type": "objectgroup", "name": "floorLayer", "objects": [
+                    {"name": "from-conference", "x": 32, "y": 96, "width": 32, "height": 32,
+                     "properties": [{"name": "start", "type": "bool", "value": true}]}
+                ]}
+            ]
+        });
+        let m = MapData::parse("s", &serde_json::to_vec(&raw).unwrap()).unwrap();
+        assert!(m.zones.iter().any(|z| z.start));
+        // Object rect (1, 3, 1, 1) in tile units → center (1.5, 3.5).
+        assert_eq!(m.spawn, (1.5, 3.5));
     }
 
     #[test]
