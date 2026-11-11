@@ -113,22 +113,19 @@ impl Config {
         if !self.auth_openid_enabled {
             return Ok(None);
         }
-        let issuer = self
-            .auth_openid_issuer
-            .clone()
-            .ok_or_else(|| anyhow::anyhow!("--auth-openid-issuer is required when --auth-openid-enabled"))?;
-        let client_id = self
-            .auth_openid_client_id
-            .clone()
-            .ok_or_else(|| anyhow::anyhow!("--auth-openid-client-id is required when --auth-openid-enabled"))?;
+        let issuer = self.auth_openid_issuer.clone().ok_or_else(|| {
+            anyhow::anyhow!("--auth-openid-issuer is required when --auth-openid-enabled")
+        })?;
+        let client_id = self.auth_openid_client_id.clone().ok_or_else(|| {
+            anyhow::anyhow!("--auth-openid-client-id is required when --auth-openid-enabled")
+        })?;
         let client_secret = self
             .auth_openid_client_secret
             .clone()
             .ok_or_else(|| anyhow::anyhow!("--auth-openid-client-secret (or $CAMPFIRE_AUTH_CLIENT_SECRET) is required when --auth-openid-enabled"))?;
-        let redirect_uri = self
-            .auth_openid_redirect_uri
-            .clone()
-            .ok_or_else(|| anyhow::anyhow!("--auth-openid-redirect-uri is required when --auth-openid-enabled"))?;
+        let redirect_uri = self.auth_openid_redirect_uri.clone().ok_or_else(|| {
+            anyhow::anyhow!("--auth-openid-redirect-uri is required when --auth-openid-enabled")
+        })?;
         Ok(Some(AuthOpenId {
             issuer,
             client_id,

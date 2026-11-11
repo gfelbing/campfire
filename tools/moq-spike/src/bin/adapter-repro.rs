@@ -8,16 +8,15 @@
 
 use std::{str::FromStr, time::Duration};
 
+use moq_net::Version;
 use moq_spike::asyncmockwt::create_async_mock_pair;
 use moq_spike::mockwt_harness::run;
-use moq_net::Version;
 
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
         .init();
 
@@ -28,17 +27,15 @@ async fn main() -> std::io::Result<()> {
     tracing::info!(?version, "adapter-repro starting");
 
     // The publisher's origin (client side).
-    let (client_origin, cd) = moq_net::origin::Producer::new(moq_net::origin::Config::new(
-        moq_net::Hop::random(),
-    ));
+    let (client_origin, cd) =
+        moq_net::origin::Producer::new(moq_net::origin::Config::new(moq_net::Hop::random()));
     tokio::spawn(async move {
         let _ = run(cd).await;
     });
 
     // The SFU: one shared origin, both directions.
-    let (sfu, sd) = moq_net::origin::Producer::new(moq_net::origin::Config::new(
-        moq_net::Hop::random(),
-    ));
+    let (sfu, sd) =
+        moq_net::origin::Producer::new(moq_net::origin::Config::new(moq_net::Hop::random()));
     tokio::spawn(async move {
         let _ = run(sd).await;
     });
@@ -111,7 +108,12 @@ async fn main() -> std::io::Result<()> {
         .await
         .expect("announce timeout")
         .expect("broadcast");
-    let mut sub = broadcast.track("a").expect("track").subscribe(None).await.expect("sub");
+    let mut sub = broadcast
+        .track("a")
+        .expect("track")
+        .subscribe(None)
+        .await
+        .expect("sub");
 
     let mut seen = 0u64;
     let mut last = 0u64;

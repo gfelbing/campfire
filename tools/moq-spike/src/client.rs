@@ -19,13 +19,16 @@ use std::{
 
 use anyhow::Result;
 use clap::Parser;
-use moq_spike::{client_wt, tls, Bridge};
+use moq_spike::{Bridge, client_wt, tls};
 use tracing::{debug, info, warn};
 
 type WtEndpoint = wtransport::endpoint::Endpoint<wtransport::endpoint::endpoint_side::Client>;
 
 #[derive(Parser, Debug)]
-#[command(name = "moq-spike-client", about = "MoQ spike client (publisher + N subscribers)")]
+#[command(
+    name = "moq-spike-client",
+    about = "MoQ spike client (publisher + N subscribers)"
+)]
 struct Args {
     /// WebTransport URL of the spike SFU, e.g. https://localhost:4443/moq
     #[arg(long)]
@@ -180,7 +183,9 @@ async fn main() -> Result<()> {
         let mut v = b
             .create_track("v", track_info.clone())
             .expect("creating video track");
-        let mut a = b.create_track("a", track_info).expect("creating audio track");
+        let mut a = b
+            .create_track("a", track_info)
+            .expect("creating audio track");
         let video_fill = vec![0xA5u8; args.video_bytes];
         let audio_fill = vec![0x5Au8; args.audio_bytes];
         let video_every = (video_interval.as_millis() / audio_interval.as_millis()).max(1) as u64;
@@ -236,19 +241,24 @@ async fn main() -> Result<()> {
         handles.push(tokio::spawn(async move {
             // The session handle must live until the task ends: dropping it
             // aborts the session (moq-net treats it as the app giving up).
-            let MoqSession { session, origin, .. } = subscriber;
+            let MoqSession {
+                session, origin, ..
+            } = subscriber;
             // Late join (fast-start, gates T3/T7): the publisher has been
             // streaming since run_start; measure from the subscribe moment.
             if join_delay > Duration::ZERO {
                 tokio::time::sleep(join_delay).await;
             }
-            let stats = match run_subscriber(origin, &path, run_start, duration, max_age, stamp_prefix).await {
-                Ok(stats) => stats,
-                Err(err) => {
-                    warn!(subscriber = i, %err, "subscriber failed");
-                    serde_json::json!({ "error": err.to_string(), "subscriber": i })
-                }
-            };
+            let stats =
+                match run_subscriber(origin, &path, run_start, duration, max_age, stamp_prefix)
+                    .await
+                {
+                    Ok(stats) => stats,
+                    Err(err) => {
+                        warn!(subscriber = i, %err, "subscriber failed");
+                        serde_json::json!({ "error": err.to_string(), "subscriber": i })
+                    }
+                };
             drop(session);
             stats
         }));
@@ -322,10 +332,7 @@ async fn connect_session(endpoint: &WtEndpoint, url: &str) -> Result<MoqSession>
     Err(last_err.unwrap_or_else(|| anyhow::anyhow!("connect failed after {MAX_ATTEMPTS} attempts")))
 }
 
-async fn try_connect_session(
-    endpoint: &WtEndpoint,
-    url: &str,
-) -> Result<MoqSession> {
+async fn try_connect_session(endpoint: &WtEndpoint, url: &str) -> Result<MoqSession> {
     let (origin, origin_driver) =
         moq_net::origin::Producer::new(moq_net::origin::Config::new(moq_net::Hop::random()));
     tokio::spawn(async move {
@@ -350,7 +357,11 @@ async fn try_connect_session(
         let _ = moq_net::time::run(driver).await;
     });
     debug!("moq session established (version {version:?})");
-    Ok(MoqSession { session: moq_session, origin, version })
+    Ok(MoqSession {
+        session: moq_session,
+        origin,
+        version,
+    })
 }
 
 /// Subscribe to the publisher's broadcast and measure frame delivery.
@@ -463,10 +474,7 @@ fn finish_stats(
         }
         last_rx = Some(*rx);
         last_stamp = Some(*stamp);
-        let latency = rx
-            .duration_since(run_start)
-            .as_micros() as i128
-            - *stamp as i128;
+        let latency = rx.duration_since(run_start).as_micros() as i128 - *stamp as i128;
         if latency >= 0 {
             stats.push(latency as u128, *bytes);
         }
@@ -510,7 +518,10 @@ async fn reader_task(
                         }
                         let mut stamp_buf = [0u8; 8];
                         stamp_buf.copy_from_slice(&payload[..8]);
-                        (u64::from_le_bytes(stamp_buf) as u128, payload.len() as u64 - 8)
+                        (
+                            u64::from_le_bytes(stamp_buf) as u128,
+                            payload.len() as u64 - 8,
+                        )
                     } else {
                         (
                             rx.saturating_duration_since(run_start).as_micros(),
@@ -533,7 +544,13 @@ async fn reader_task(
             empty_groups += 1;
         }
     }
-    tracing::debug!(track = name, group_count, empty_groups, err_groups, "reader: track ended");
+    tracing::debug!(
+        track = name,
+        group_count,
+        empty_groups,
+        err_groups,
+        "reader: track ended"
+    );
 }
 
 #[derive(Default)]
@@ -568,8 +585,9 @@ impl FrameStats {
         };
         // Time from the subscribe request to the first delivered frame: the
         // fast-start metric (gate T3).
-        let first_frame_ms =
-            self.first_rx.map(|rx| rx.saturating_duration_since(subscribe_start).as_millis() as f64);
+        let first_frame_ms = self
+            .first_rx
+            .map(|rx| rx.saturating_duration_since(subscribe_start).as_millis() as f64);
         serde_json::json!({
             "samples": s.len(),
             "p50_us": p(50.0),

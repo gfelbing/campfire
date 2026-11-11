@@ -120,10 +120,13 @@ impl wt::Session for Session {
     type Error = Error;
 
     async fn accept_uni(&self) -> Result<RecvStream, Error> {
-        match self.inner.accept_uni().await.map_err(|e| log_err("accept_uni", e))? {
-            Some((_id, stream)) => {
-                Ok(RecvStream::new(stream))
-            }
+        match self
+            .inner
+            .accept_uni()
+            .await
+            .map_err(|e| log_err("accept_uni", e))?
+        {
+            Some((_id, stream)) => Ok(RecvStream::new(stream)),
             // None: the session's stream queue is drained for good.
             None => Err(Error::Closed),
         }
@@ -142,9 +145,9 @@ impl wt::Session for Session {
             }
             // A plain h3 request inside the WebTransport session: the MoQ
             // clients never send one; failing is the honest answer.
-            Some(AcceptedBi::Request(_request, _stream)) => {
-                Err(Error::Stream("unexpected h3 request in webtransport session".into()))
-            }
+            Some(AcceptedBi::Request(_request, _stream)) => Err(Error::Stream(
+                "unexpected h3 request in webtransport session".into(),
+            )),
             None => Err(Error::Closed),
         }
     }
@@ -172,7 +175,9 @@ impl wt::Session for Session {
 
     fn send_datagram(&self, payload: Bytes) -> Result<(), Error> {
         let mut sender = self.inner.datagram_sender();
-        sender.send_datagram(payload).map_err(|err| Error::Stream(err.to_string()))
+        sender
+            .send_datagram(payload)
+            .map_err(|err| Error::Stream(err.to_string()))
     }
 
     async fn recv_datagram(&self) -> Result<Bytes, Error> {

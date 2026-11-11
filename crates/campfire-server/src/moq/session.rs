@@ -25,8 +25,8 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use axum::extract::{Query, State};
 use axum::Extension;
+use axum::extract::{Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use moq_net::stats::{Registry as StatsRegistry, Tier};

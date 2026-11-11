@@ -12,18 +12,21 @@ use std::{net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
 
 use anyhow::Result;
 use axum::{
+    Router,
     extract::{Extension, State},
     http::StatusCode,
     response::{IntoResponse, Response},
     routing::connect,
-    Router,
 };
 use clap::Parser;
-use moq_spike::{h3wt, tls, Bridge};
+use moq_spike::{Bridge, h3wt, tls};
 use tracing::{debug, info, warn};
 
 #[derive(Parser, Debug)]
-#[command(name = "moq-spike-server", about = "MoQ SFU spike over h3/quinn WebTransport")]
+#[command(
+    name = "moq-spike-server",
+    about = "MoQ SFU spike over h3/quinn WebTransport"
+)]
 struct Args {
     /// UDP listen address (QUIC/HTTP/3 + WebTransport).
     #[arg(long, default_value = "127.0.0.1:4443")]

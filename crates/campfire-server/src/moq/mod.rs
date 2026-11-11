@@ -15,5 +15,5 @@ pub mod h3wt;
 pub mod session;
 pub mod tickets;
 
-pub use session::handle_moq;
 pub use session::MoqSfu;
+pub use session::handle_moq;

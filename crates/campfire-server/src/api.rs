@@ -15,8 +15,8 @@ use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
 use axum::extract::{Path as UrlPath, Query, State};
-use axum::http::{HeaderMap, StatusCode, Uri};
 use axum::http::header;
+use axum::http::{HeaderMap, StatusCode, Uri};
 use axum::response::sse::Event;
 use axum::response::{IntoResponse, Response, Sse};
 use axum::routing::{connect, get, post};
@@ -32,11 +32,11 @@ use tokio_stream::{Stream, StreamMap};
 use tracing::debug;
 
 use crate::config::Config;
+use crate::moq::handle_moq;
 use crate::realtime::{
     MAX_AVATAR_CHARS, MAX_CHAT_CHARS, MAX_NAME_CHARS, RateLimit, handle_wt, unix_ts, valid_room,
 };
 use crate::world::{RoomInfo, World};
-use crate::moq::handle_moq;
 
 /// Web client, built by Vite and embedded at compile time (README §3).
 static STATIC: Dir<'static> = include_dir!("$CARGO_MANIFEST_DIR/../../client/dist");
@@ -292,10 +292,7 @@ pub(crate) fn enforce_auth(
 /// `return_to` must be a same-origin absolute path (no `//`, no backslash,
 /// no CR/LF): an open redirect could bounce a signed-in user to another site.
 fn valid_return_to(s: &str) -> bool {
-    s.starts_with('/')
-        && !s.starts_with("//")
-        && s.len() <= 2048
-        && !s.contains(['\\', '\r', '\n'])
+    s.starts_with('/') && !s.starts_with("//") && s.len() <= 2048 && !s.contains(['\\', '\r', '\n'])
 }
 
 /// `GET /api/v1/auth` → whether auth is on and the signed-in name (if any).
@@ -305,8 +302,7 @@ async fn auth_status(State(state): State<AppState>, headers: HeaderMap) -> Json<
     let Some(auth) = &state.auth else {
         return Json(serde_json::json!({ "enabled": false }));
     };
-    let name = auth_cookie(&headers)
-        .and_then(|c| auth.identity_for_cookie(&c).map(|i| i.name));
+    let name = auth_cookie(&headers).and_then(|c| auth.identity_for_cookie(&c).map(|i| i.name));
     Json(match name {
         Some(name) => serde_json::json!({ "enabled": true, "name": name }),
         None => serde_json::json!({ "enabled": true }),
@@ -365,7 +361,10 @@ async fn auth_callback(State(state): State<AppState>, Query(q): Query<CallbackQu
             );
             (
                 StatusCode::FOUND,
-                [(header::LOCATION, return_to), (header::SET_COOKIE, set_cookie)],
+                [
+                    (header::LOCATION, return_to),
+                    (header::SET_COOKIE, set_cookie),
+                ],
             )
                 .into_response()
         }
@@ -383,9 +382,15 @@ async fn auth_logout(State(state): State<AppState>, headers: HeaderMap) -> Respo
     if let (Some(auth), Some(cookie)) = (&state.auth, auth_cookie(&headers)) {
         auth.logout(&cookie);
     }
-    let clear =
-        format!("{name}=; Path=/; HttpOnly; SameSite=Lax; Secure; Max-Age=0", name = AUTH_COOKIE);
-    (StatusCode::FOUND, [(header::LOCATION, "/"), (header::SET_COOKIE, &clear)]).into_response()
+    let clear = format!(
+        "{name}=; Path=/; HttpOnly; SameSite=Lax; Secure; Max-Age=0",
+        name = AUTH_COOKIE
+    );
+    (
+        StatusCode::FOUND,
+        [(header::LOCATION, "/"), (header::SET_COOKIE, &clear)],
+    )
+        .into_response()
 }
 
 // ---------------------------------------------------------------------------
@@ -471,7 +476,7 @@ async fn fallback_event(
                     return Err((
                         status,
                         Json(serde_json::json!({ "error": "unauthenticated" })),
-                    ))
+                    ));
                 }
             };
             if let Some(avatar) = &avatar

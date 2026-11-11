@@ -89,7 +89,9 @@ impl wt::Session for Session {
     }
 
     fn send_datagram(&self, payload: Bytes) -> Result<(), Error> {
-        self.conn.send_datagram(&payload).map_err(|err| Error::Stream(err.to_string()))
+        self.conn
+            .send_datagram(&payload)
+            .map_err(|err| Error::Stream(err.to_string()))
     }
 
     async fn recv_datagram(&self) -> Result<Bytes, Error> {
@@ -150,9 +152,7 @@ impl wt::SendStream for SendStream {
     }
 
     fn reset(&mut self, code: u32) {
-        let _ = self
-            .inner
-            .reset(wtransport::VarInt::from_u32(code));
+        let _ = self.inner.reset(wtransport::VarInt::from_u32(code));
     }
 
     async fn closed(&mut self) -> Result<(), Error> {
@@ -162,9 +162,7 @@ impl wt::SendStream for SendStream {
         let quic = self.inner.quic_stream();
         match quic.stopped().await {
             Ok(None) => Ok(()),
-            Ok(code) => Err(Error::Stream(format!(
-                "peer stop sending (code: {code:?})"
-            ))),
+            Ok(code) => Err(Error::Stream(format!("peer stop sending (code: {code:?})"))),
             Err(err) => Err(Error::Stream(err.to_string())),
         }
     }
@@ -194,7 +192,10 @@ impl wt::RecvStream for RecvStream {
     fn stop(&mut self, code: u32) {
         // `wtransport::RecvStream::stop` consumes the stream; send the
         // STOP_SENDING through the quinn handle instead.
-        let _ = self.inner.quic_stream_mut().stop(quinn::VarInt::from_u32(code));
+        let _ = self
+            .inner
+            .quic_stream_mut()
+            .stop(quinn::VarInt::from_u32(code));
     }
 
     async fn closed(&mut self) -> Result<(), Error> {

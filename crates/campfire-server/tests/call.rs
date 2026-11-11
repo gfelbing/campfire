@@ -114,9 +114,7 @@ async fn bubble_forms_and_carries_presence() {
     // Both are at spawn: within a tick or two the server forms the bubble
     // and broadcasts the roster room-wide.
     let ServerMsg::CallStart {
-        room,
-        participants,
-        ..
+        room, participants, ..
     } = a.recv().await
     else {
         panic!("expected call_start for alice");

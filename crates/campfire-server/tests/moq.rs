@@ -171,9 +171,8 @@ async fn connect_moq(
 async fn try_connect_moq(ep: &WtEndpoint, url: &str) -> Result<MoqClient, String> {
     // A local origin, exactly like the spike client: the session reads local
     // announces from it and writes remote announces into it.
-    let (origin, origin_driver) = moq_net::origin::Producer::new(
-        moq_net::origin::Config::new(moq_net::Hop::random()),
-    );
+    let (origin, origin_driver) =
+        moq_net::origin::Producer::new(moq_net::origin::Config::new(moq_net::Hop::random()));
     tokio::spawn(async move {
         let _ = moq_net::time::run(origin_driver).await;
     });
@@ -256,7 +255,10 @@ async fn publish_and_subscribe_within_a_call() {
     let writer = tokio::spawn(async move {
         for i in 0..50u64 {
             let ts = moq_net::Timestamp::from_micros(i * 20_000).unwrap();
-            if track.write_frame(ts, format!("frame-{i}").into_bytes()).is_err() {
+            if track
+                .write_frame(ts, format!("frame-{i}").into_bytes())
+                .is_err()
+            {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
@@ -288,20 +290,18 @@ async fn publish_and_subscribe_within_a_call() {
     let deadline = Instant::now() + RECV_TIMEOUT;
     while got < 10 && Instant::now() < deadline {
         match tokio::time::timeout(Duration::from_millis(500), b_sub.recv_group()).await {
-            Ok(Ok(Some(mut group))) => {
-                loop {
-                    match group.read_frame().await {
-                        Ok(Some(_frame)) => {
-                            got += 1;
-                            if got >= 10 {
-                                break;
-                            }
+            Ok(Ok(Some(mut group))) => loop {
+                match group.read_frame().await {
+                    Ok(Some(_frame)) => {
+                        got += 1;
+                        if got >= 10 {
+                            break;
                         }
-                        Ok(None) => break,
-                        Err(e) => panic!("read_frame error: {e}"),
                     }
+                    Ok(None) => break,
+                    Err(e) => panic!("read_frame error: {e}"),
                 }
-            }
+            },
             Ok(Ok(None)) => panic!("subscription ended (recv_group None)"),
             Ok(Err(e)) => panic!("recv_group error: {e}"),
             Err(_) => eprintln!("recv_group timeout, continuing"),
@@ -340,10 +340,7 @@ async fn outsider_without_ticket_is_rejected() {
     moq_rejected(connect_moq(&ep, addr, None).await, "a missing ticket");
     // A ticket that names no live call/user → rejected.
     let bogus = "deadbeef".repeat(8);
-    moq_rejected(
-        connect_moq(&ep, addr, Some(&bogus)).await,
-        "a bogus ticket",
-    );
+    moq_rejected(connect_moq(&ep, addr, Some(&bogus)).await, "a bogus ticket");
 }
 
 /// A media ticket is bound to the call id it was minted for. When that call
@@ -381,7 +378,10 @@ async fn stale_ticket_after_call_end_is_rejected() {
     let Some(ticket_a2) = a.recv_ticket().await else {
         panic!("no fresh ticket after the call re-formed");
     };
-    assert_ne!(ticket_a, ticket_a2, "a re-formed call gets a new id and ticket");
+    assert_ne!(
+        ticket_a, ticket_a2,
+        "a re-formed call gets a new id and ticket"
+    );
     // The fresh ticket is admitted — proving the earlier rejection was the
     // dead call id, not a blanket block of alice.
     let _fresh = moq_ok(

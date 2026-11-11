@@ -1,11 +1,7 @@
 //! TLS material for the spike: the repo's `certs/` (CN=localhost, SAN
 //! localhost/127.0.0.1/::1) on both sides, ring provider like the app.
 
-use std::{
-    path::Path,
-    sync::Arc,
-    time::Duration,
-};
+use std::{path::Path, sync::Arc, time::Duration};
 
 use anyhow::{Context, Result};
 use rustls::pki_types::pem::PemObject;

@@ -18,11 +18,13 @@ use std::{
 
 use bytes::Bytes;
 use web_transport_trait::poll;
-use web_transport_trait::poll::{RecvStream as _PollRecvStream, SendStream as _PollSendStream};
 use web_transport_trait::poll::Session as _PollSession;
+use web_transport_trait::poll::{RecvStream as _PollRecvStream, SendStream as _PollSendStream};
 use web_transport_trait::{RecvStream, SendStream, Session};
 
-use crate::mockwt::{create_mock_session_pair, MockError, MockRecvStream, MockSendStream, MockSession};
+use crate::mockwt::{
+    MockError, MockRecvStream, MockSendStream, MockSession, create_mock_session_pair,
+};
 
 /// A future that polls the shared mock session once per poll.
 struct SharedPoll<R> {
@@ -77,32 +79,38 @@ impl Session for AsyncMockSession {
         let inner = self.inner.clone();
         SharedPoll {
             inner,
-            f: Box::new(|s, cx| poll::Session::poll_accept_uni(s, cx).map(|r| r.map(AsyncMockRecv::new))),
+            f: Box::new(|s, cx| {
+                poll::Session::poll_accept_uni(s, cx).map(|r| r.map(AsyncMockRecv::new))
+            }),
         }
     }
 
     fn accept_bi(
         &self,
-    ) -> impl Future<Output = Result<(Self::SendStream, Self::RecvStream), Self::Error>> + Send {
+    ) -> impl Future<Output = Result<(Self::SendStream, Self::RecvStream), Self::Error>> + Send
+    {
         let inner = self.inner.clone();
         SharedPoll {
             inner,
             f: Box::new(|s, cx| {
-                poll::Session::poll_accept_bi(s, cx)
-                    .map(|r| r.map(|(send, recv)| (AsyncMockSend::new(send), AsyncMockRecv::new(recv))))
+                poll::Session::poll_accept_bi(s, cx).map(|r| {
+                    r.map(|(send, recv)| (AsyncMockSend::new(send), AsyncMockRecv::new(recv)))
+                })
             }),
         }
     }
 
     fn open_bi(
         &self,
-    ) -> impl Future<Output = Result<(Self::SendStream, Self::RecvStream), Self::Error>> + Send {
+    ) -> impl Future<Output = Result<(Self::SendStream, Self::RecvStream), Self::Error>> + Send
+    {
         let inner = self.inner.clone();
         SharedPoll {
             inner,
             f: Box::new(|s, cx| {
-                poll::Session::poll_open_bi(s, cx)
-                    .map(|r| r.map(|(send, recv)| (AsyncMockSend::new(send), AsyncMockRecv::new(recv))))
+                poll::Session::poll_open_bi(s, cx).map(|r| {
+                    r.map(|(send, recv)| (AsyncMockSend::new(send), AsyncMockRecv::new(recv)))
+                })
             }),
         }
     }
@@ -111,7 +119,9 @@ impl Session for AsyncMockSession {
         let inner = self.inner.clone();
         SharedPoll {
             inner,
-            f: Box::new(|s, cx| poll::Session::poll_open_uni(s, cx).map(|r| r.map(AsyncMockSend::new))),
+            f: Box::new(|s, cx| {
+                poll::Session::poll_open_uni(s, cx).map(|r| r.map(AsyncMockSend::new))
+            }),
         }
     }
 

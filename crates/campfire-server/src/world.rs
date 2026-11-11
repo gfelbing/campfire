@@ -231,7 +231,10 @@ impl World {
     pub fn mint_call_ticket(&self, room: &str, user: &str) -> Option<String> {
         let rooms = self.rooms.lock().unwrap();
         let entry = rooms.get(room)?;
-        let call = entry.calls.iter().find(|c| c.participants.contains_key(user))?;
+        let call = entry
+            .calls
+            .iter()
+            .find(|c| c.participants.contains_key(user))?;
         Some(self.tickets.mint(user, room, call.id))
     }
 
@@ -1084,12 +1087,7 @@ fn center_of_call(entry: &Room, call: &call::Call) -> (f32, f32) {
 /// headphone badge on everyone, and `ticket` mints a media ticket for each
 /// participant (docs/moq-sfu.md §7) — bystanders get the roster but no
 /// ticket.
-fn broadcast_call_start(
-    world: &World,
-    room: &str,
-    entry: &Room,
-    call: &call::Call,
-) {
+fn broadcast_call_start(world: &World, room: &str, entry: &Room, call: &call::Call) {
     let participants = call.participant_list();
     let zone = call.zone.clone();
     for (uid, m) in &entry.users {

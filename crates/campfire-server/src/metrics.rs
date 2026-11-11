@@ -337,6 +337,9 @@ mod tests {
         assert!(text.contains("# TYPE campfire_connections gauge"));
         // Counters go down too (gauges, not monotonic):
         m.conn_close();
-        assert!(m.render((0, 0, 0), &MoqGauges::default()).contains("campfire_connections 0"));
+        assert!(
+            m.render((0, 0, 0), &MoqGauges::default())
+                .contains("campfire_connections 0")
+        );
     }
 }

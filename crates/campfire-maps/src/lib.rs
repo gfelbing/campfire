@@ -188,7 +188,9 @@ impl MapData {
         // A `start`-marked object area selects the spawn point (README
         // roadmap "Map enhancements"): the area's center, snapped to a
         // walkable tile when the center itself is blocked.
-        let spawn = zones.iter().find(|z| z.start)
+        let spawn = zones
+            .iter()
+            .find(|z| z.start)
             .map(|z| {
                 let (zx, zy, zw, zh) = z.rect;
                 let (cx, cy) = (zx + zw / 2.0, zy + zh / 2.0);

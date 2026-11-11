@@ -156,9 +156,7 @@ impl Auth {
         if redirect_uri.is_empty() {
             anyhow::bail!("auth: --auth-openid-redirect-uri is required when auth is enabled");
         }
-        let http = reqwest::Client::builder()
-            .timeout(HTTP_TIMEOUT)
-            .build()?;
+        let http = reqwest::Client::builder().timeout(HTTP_TIMEOUT).build()?;
         Ok(Self {
             inner: Arc::new(Inner {
                 issuer,
@@ -264,11 +262,7 @@ impl Auth {
                 valid_until: Instant::now() + SESSION_TTL,
             },
         );
-        Ok((
-            cookie,
-            AuthIdentity { name },
-            pending.return_to,
-        ))
+        Ok((cookie, AuthIdentity { name }, pending.return_to))
     }
 
     async fn exchange_code(&self, code: &str) -> anyhow::Result<TokenResponse> {
@@ -313,11 +307,8 @@ impl Auth {
         // `aud` is checked by hand (it may be a string or an array).
         validation.validate_aud = false;
 
-        let data = jsonwebtoken::decode::<IdToken>(
-            id_token,
-            &JwkSet::to_decoding_key(jwk)?,
-            &validation,
-        )?;
+        let data =
+            jsonwebtoken::decode::<IdToken>(id_token, &JwkSet::to_decoding_key(jwk)?, &validation)?;
         let claims = data.claims;
         if !audience_matches(&claims.aud, &self.inner.client_id) {
             anyhow::bail!("auth: id_token audience does not include our client_id");
@@ -345,11 +336,7 @@ impl Auth {
             .error_for_status()?
             .json()
             .await?;
-        self.inner
-            .cache
-            .lock()
-            .unwrap()
-            .discovery = Some(discovery.clone());
+        self.inner.cache.lock().unwrap().discovery = Some(discovery.clone());
         Ok(discovery)
     }
 
@@ -376,11 +363,7 @@ impl Auth {
             .error_for_status()?
             .json()
             .await?;
-        self.inner
-            .cache
-            .lock()
-            .unwrap()
-            .jwks = Some((Instant::now(), set.clone()));
+        self.inner.cache.lock().unwrap().jwks = Some((Instant::now(), set.clone()));
         Ok(set)
     }
 
@@ -405,9 +388,7 @@ impl Auth {
     pub fn logout(&self, cookie: &str) -> Option<AuthIdentity> {
         let mut map = self.inner.sessions.lock().unwrap();
         let session = map.remove(cookie)?;
-        (session.valid_until > Instant::now()).then_some(AuthIdentity {
-            name: session.name,
-        })
+        (session.valid_until > Instant::now()).then_some(AuthIdentity { name: session.name })
     }
 
     /// Remove expired sessions (called opportunistically).
@@ -479,7 +460,9 @@ fn display_name(claims: &IdToken) -> Option<String> {
     {
         return Some(trim_name(n));
     }
-    if let Some(n) = &claims.name && !n.trim().is_empty() {
+    if let Some(n) = &claims.name
+        && !n.trim().is_empty()
+    {
         return Some(trim_name(n));
     }
     if let Some(e) = &claims.email {
@@ -496,7 +479,10 @@ fn display_name(claims: &IdToken) -> Option<String> {
 
 /// Trim and cap a name to the protocol's 24-char limit (README §11).
 fn trim_name(s: &str) -> String {
-    s.trim().chars().take(crate::realtime::MAX_NAME_CHARS).collect()
+    s.trim()
+        .chars()
+        .take(crate::realtime::MAX_NAME_CHARS)
+        .collect()
 }
 
 /// 32 random bytes, base64url (no padding) — for `state`, `nonce` and
@@ -525,9 +511,9 @@ fn urlencode(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::{SystemTime, UNIX_EPOCH};
     use jsonwebtoken::{Algorithm, EncodingKey, Header};
     use serde::Serialize;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     const ISSUER: &str = "https://idp.example.com";
     const CLIENT_ID: &str = "campfire";
@@ -660,7 +646,12 @@ m06WQFIIN0lN9hokdsX0++mbagUGylr9SVFzFBIIgwBEflh2/oVaD2+PkN+T/Egm
 
     #[test]
     fn display_name_prefers_preferred_username() {
-        let c = id_token("u-1", Some("Full Name"), Some("ada"), Some("ada@example.com"));
+        let c = id_token(
+            "u-1",
+            Some("Full Name"),
+            Some("ada"),
+            Some("ada@example.com"),
+        );
         assert_eq!(display_name(&c).as_deref(), Some("ada"));
     }
 
@@ -678,7 +669,10 @@ m06WQFIIN0lN9hokdsX0++mbagUGylr9SVFzFBIIgwBEflh2/oVaD2+PkN+T/Egm
             display_name(&id_token("u-123", None, None, None)).as_deref(),
             Some("u-123")
         );
-        assert_eq!(display_name(&id_token("", None, None, None)).as_deref(), None);
+        assert_eq!(
+            display_name(&id_token("", None, None, None)).as_deref(),
+            None
+        );
     }
 
     #[test]
@@ -695,7 +689,10 @@ m06WQFIIN0lN9hokdsX0++mbagUGylr9SVFzFBIIgwBEflh2/oVaD2+PkN+T/Egm
     fn audience_matches_string_and_array() {
         assert!(audience_matches(&serde_json::json!(CLIENT_ID), CLIENT_ID));
         assert!(!audience_matches(&serde_json::json!("other"), CLIENT_ID));
-        assert!(audience_matches(&serde_json::json!(["other", CLIENT_ID]), CLIENT_ID));
+        assert!(audience_matches(
+            &serde_json::json!(["other", CLIENT_ID]),
+            CLIENT_ID
+        ));
         assert!(!audience_matches(&serde_json::json!(["other"]), CLIENT_ID));
         assert!(!audience_matches(&serde_json::json!(42), CLIENT_ID));
     }
@@ -748,10 +745,7 @@ m06WQFIIN0lN9hokdsX0++mbagUGylr9SVFzFBIIgwBEflh2/oVaD2+PkN+T/Egm
     fn logout_drops_the_session() {
         let auth = test_auth();
         auth.insert_test_session("c", "Ada", "u", Instant::now() + SESSION_TTL);
-        assert_eq!(
-            auth.logout("c").map(|i| i.name),
-            Some("Ada".to_owned())
-        );
+        assert_eq!(auth.logout("c").map(|i| i.name), Some("Ada".to_owned()));
         assert!(auth.identity_for_cookie("c").is_none(), "gone after logout");
         assert!(auth.logout("c").is_none(), "second logout is a no-op");
     }
@@ -771,7 +765,12 @@ m06WQFIIN0lN9hokdsX0++mbagUGylr9SVFzFBIIgwBEflh2/oVaD2+PkN+T/Egm
     #[test]
     fn verify_rejects_wrong_issuer() {
         let auth = test_auth();
-        let token = sign(&claims("https://evil.example.com", CLIENT_ID, "n", now_secs() + 300));
+        let token = sign(&claims(
+            "https://evil.example.com",
+            CLIENT_ID,
+            "n",
+            now_secs() + 300,
+        ));
         assert!(auth.verify_id_token(&token, "n", &test_jwks()).is_err());
     }
 
@@ -793,7 +792,10 @@ m06WQFIIN0lN9hokdsX0++mbagUGylr9SVFzFBIIgwBEflh2/oVaD2+PkN+T/Egm
     fn verify_rejects_nonce_mismatch() {
         let auth = test_auth();
         let token = sign(&claims(ISSUER, CLIENT_ID, "nonce-real", now_secs() + 300));
-        assert!(auth.verify_id_token(&token, "nonce-other", &test_jwks()).is_err());
+        assert!(
+            auth.verify_id_token(&token, "nonce-other", &test_jwks())
+                .is_err()
+        );
     }
 
     #[test]
@@ -802,8 +804,9 @@ m06WQFIIN0lN9hokdsX0++mbagUGylr9SVFzFBIIgwBEflh2/oVaD2+PkN+T/Egm
         // FORGED_JWK serves key 2's public numbers under kid `k1`: the kid
         // check passes, so only the signature itself can (and must) fail.
         let token = sign(&claims(ISSUER, CLIENT_ID, "n", now_secs() + 300));
-        assert!(auth
-            .verify_id_token(&token, "n", &jwks_from(FORGED_JWK))
-            .is_err());
+        assert!(
+            auth.verify_id_token(&token, "n", &jwks_from(FORGED_JWK))
+                .is_err()
+        );
     }
 }
