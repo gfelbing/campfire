@@ -9,10 +9,10 @@ import { Connection } from "./net/connection";
 import type { ChatMsg, Dir, MovementBatch, UserBrief } from "./net/types";
 import { boot } from "./ui/boot";
 import { createChat, type ChatUI } from "./ui/chat";
-import { createPresence, type PresenceUI } from "./ui/presence";
+import { createPresence } from "./ui/presence";
 import { createStatus } from "./ui/status";
 import { createSidebar } from "./ui/sidebar";
-import { isWalkablePoint, parseMap, tileAt, zoneContains, type MapData, type Zone } from "./world/mapdata";
+import { isWalkablePoint, parseMap, tileAt, type MapData, type Zone } from "./world/mapdata";
 import { createWorld, drawBubble, followCamera } from "./world/render";
 
 declare global {
@@ -36,31 +36,6 @@ function blocked(map: MapData, x: number, y: number): boolean {
     !isWalkablePoint(map, x - AVATAR_R, y + AVATAR_R) ||
     !isWalkablePoint(map, x + AVATAR_R, y + AVATAR_R)
   );
-}
-
-/** Exit `exitUrl` → map id. The URL is **relative to the current map's
- *  directory** (`conference.tmj` from `interiors/office` targets
- *  `interiors/conference`); a leading `/` targets from the `maps/` root.
- *  The result strips the extension and collapses a repeated final directory
- *  segment (the server's rule, `office/office.json` → `office`). */
-function exitUrlToMapId(exitUrl: string, mapId: string): string {
-  const path = exitUrl.split("#")[0]!;
-  let parts: string[];
-  if (path.startsWith("/")) {
-    parts = path.split("/").filter((p) => p !== "" && p !== ".");
-  } else {
-    const base = mapId.split("/").slice(0, -1); // the current map's directory
-    parts = [...base, ...path.split("/").filter((p) => p !== "" && p !== ".")];
-  }
-  const resolved: string[] = [];
-  for (const part of parts) {
-    if (part === "..") resolved.pop();
-    else resolved.push(part);
-  }
-  const last = resolved[resolved.length - 1]!.replace(/\.\w+$/, "");
-  if (resolved.length > 1 && resolved[resolved.length - 2] === last) resolved.pop();
-  resolved[resolved.length - 1] = last;
-  return resolved.join("/");
 }
 
 /** BFS path from (sx, sy) to (tx, ty) over the walkable grid (4-neighbour),
@@ -133,14 +108,10 @@ async function main(): Promise<void> {
   let moving = false;
   let myId = "";
   let chat: ChatUI | null = null;
-  let presence: PresenceUI;
 
   // Click-to-walk (README roadmap "Map enhancements"): the path queue the
   // game loop consumes; keyboard input clears it.
   let walkPath: Array<[number, number]> = [];
-  // The exitUrl zone we are currently standing in (README roadmap "Map
-  // enhancements"): navigating again needs a fresh entry.
-  let exitArmed: Zone | null = null;
 
   // Room roster (id → brief).
   const roster = new Map<string, UserBrief>();
@@ -150,8 +121,10 @@ async function main(): Promise<void> {
   // Maps to {}. Refreshed from the connection callbacks (below) as well as
   // the render loop, so it stays current on background tabs whose rAF loop
   // is throttled; the positions are the last *received* ones (movement()),
-  // not the interpolated ones (update()).
+  // not the interpolated ones (update()). Stripped from the production
+  // bundle (C14): only the `build:e2e` client carries the hook.
   const refreshUsersHook = (): void => {
+    if (!__CAMPFIRE_DEBUG__) return;
     const out: Record<string, { name: string; x: number; y: number }> = {};
     const tiles = world.manager.latestPositions();
     for (const [id, u] of roster) {
@@ -296,6 +269,9 @@ async function main(): Promise<void> {
     },
     onCallMute: (id, a, v) => manager.onCallMute(id, a, v),
     onCallScreen: (id, on) => manager.onCallScreen(id, on),
+    // exitUrl zones (README roadmap "Map enhancements"): the server owns
+    // the URL → map-id rule and tells us the target; same name + color.
+    onNavigate: (map) => navigateToRoom(map, 50),
     onError: (code) => {
       chat?.system(`server error: ${code}`);
       manager.onError(code);
@@ -327,7 +303,7 @@ async function main(): Promise<void> {
 
   const sidebar = createSidebar();
   const ui = document.getElementById("ui")!; // the theater's overlay layer
-  presence = createPresence(sidebar.pane("players"));
+  const presence = createPresence(sidebar.pane("players"));
   chat = createChat(sidebar.pane("chat"), (t) => conn.sendChat(t), (on) => conn.sendTyping(on));
   const callUI = createCallUI(ui, {
     onHangup: () => manager.hangup(),
@@ -404,15 +380,8 @@ async function main(): Promise<void> {
       moving = false;
     }
 
-    // exitUrl zones (README roadmap "Map enhancements"): walking onto the
-    // tile navigates to the target map (the same name + color).
-    const cur = map.zones.find((z) => z.exitUrl !== undefined && zoneContains(z, x, y));
-    if (cur !== undefined && cur !== exitArmed) {
-      exitArmed = cur;
-      navigateToRoom(exitUrlToMapId(cur.exitUrl!, opts.room), 50);
-      return;
-    }
-    if (cur === undefined) exitArmed = null;
+    // exitUrl zones (README roadmap "Map enhancements"): the server detects
+    // the zone entry and sends `navigate` with the resolved map id.
 
     const ts = map.tileSize;
     world.local.setPos(x * ts, y * ts);

@@ -40,9 +40,10 @@ build: client-build
 
 # Docker image build. Dockerfile uses cache mounts (cargo registry/target,
 # npm download cache), so repeat builds only recompile what changed.
-# Extra args pass through: just docker -- -t campfire-test
+# Same target as the CI push (docker.yml, ghcr.io). Extra args pass through:
+# just docker -- -t campfire-test
 docker *args:
-	podman build -t registry.heimdal.vild.zone/campfire:latest "$@" .
+	podman build -t ghcr.io/gfelbing/campfire:latest "$@" .
 
 # Dev certs: a local CA plus a localhost server cert signed by it.
 #
@@ -115,31 +116,21 @@ loadtest *args:
 	cargo run -p campfire-loadtest --release -- \
 	  --url https://127.0.0.1:8443/wt "$@"
 
-# Headless browser E2E (README §11 Phase 9): needs a running server and
-# one-time `npm i` in tools/e2e.
+# E2E server build (C14): the client is built with its e2e debug hooks
+# (`build:e2e`, `CAMPFIRE_DEBUG=1`) and the server embeds client/dist, so a
+# server serving `just e2e` / `just moq-e2e` must be built this way.
+e2e-build:
+	cd client && npm run build:e2e
+	cargo build --workspace --release
+
+# Headless browser E2E (README §11 Phase 9): needs a running server built
+# with `just e2e-build` and one-time `npm i` in tools/e2e.
 e2e *args:
 	node tools/e2e/e2e.js --browser "$(command -v brave || command -v chromium || echo chromium)" "$@"
 
 # MoQ uplink E2E (docs/moq-sfu.md §9 Phase 2): two real browser clients
-# publish their media to the SFU; the spike subscribes. Needs a running
-# server, the release spike build, and one-time `npm i` in tools/e2e.
+# publish their media to the SFU and subscribe to each other. Needs a
+# running server built with `just e2e-build` and one-time `npm i` in
+# tools/e2e.
 moq-e2e *args:
-	cargo build --release -p moq-spike
 	node tools/e2e/moq.js --browser "$(command -v brave || command -v chromium || echo chromium)" "$@"
-
-# MoQ SFU spike, Tier 1 (docs/moq-sfu.md Phase 0): build the spike, run the
-# fan-out / fast-start / loss matrix (fast, no soak), and generate
-# docs/moq-spike-results.md. Loss runs in a private `unshare -rn` netns, so
-# it needs user+network namespace support (works rootless).
-moq-spike:
-	cargo build --release -p moq-spike
-	rm -rf /tmp/opencode/moq-matrix
-	bash tools/moq-spike/matrix.sh /tmp/opencode/moq-matrix
-	python3 tools/moq-spike/gen_report.py /tmp/opencode/moq-matrix
-
-# Full Tier-1 matrix including the 10-minute soak (T6/G3 proxy). Slow.
-moq-spike-full:
-	cargo build --release -p moq-spike
-	rm -rf /tmp/opencode/moq-matrix
-	SOAK_DUR=600s bash tools/moq-spike/matrix.sh /tmp/opencode/moq-matrix
-	python3 tools/moq-spike/gen_report.py /tmp/opencode/moq-matrix

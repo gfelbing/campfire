@@ -1523,9 +1523,7 @@ dependencies = [
 
 [[package]]
 name = "moq-net"
-version = "0.3.22"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "174689cfc88c2947952271a4139c501056fb58ee412b73aa43dc3cdcc3c2482b"
+version = "0.3.23"
 dependencies = [
  "arrayvec",
  "bytes",
@@ -1563,35 +1561,6 @@ dependencies = [
  "socket2",
  "thiserror",
  "tracing",
-]
-
-[[package]]
-name = "moq-spike"
-version = "0.0.1"
-dependencies = [
- "anyhow",
- "axum",
- "bytes",
- "clap",
- "futures-util",
- "h3",
- "h3-axum",
- "h3-datagram",
- "h3-quinn",
- "h3-webtransport",
- "kio",
- "moq-net",
- "moq-tokio",
- "quinn",
- "quinn-proto",
- "rustls",
- "serde_json",
- "thiserror",
- "tokio",
- "tracing",
- "tracing-subscriber",
- "web-transport-trait",
- "wtransport",
 ]
 
 [[package]]

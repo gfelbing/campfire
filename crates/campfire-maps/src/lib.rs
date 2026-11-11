@@ -405,6 +405,50 @@ impl Maps {
         let base = file.parent().unwrap_or(Path::new(""));
         std::fs::read(self.dir.join(base).join(path)).ok()
     }
+
+    /// Resolve an `exitUrl` zone property to a target map id (README
+    /// roadmap "Map enhancements"): the URL is relative to the current
+    /// map's file directory, a leading `/` targets from the maps root,
+    /// `.`/`..` segments collapse, and the result takes the [`map_id`]
+    /// shape (last extension dropped, a final segment repeating its parent
+    /// collapsed). `None` when the result does not name a loaded map.
+    pub fn resolve_exit_url(&self, from_id: &str, url: &str) -> Option<String> {
+        let path = url.split('#').next().unwrap_or("");
+        let mut segments: Vec<String> = if path.starts_with('/') {
+            Vec::new()
+        } else {
+            // The current map file's directory, as id segments.
+            let file = self.files.get(from_id)?;
+            file.parent()
+                .unwrap_or(Path::new(""))
+                .components()
+                .filter_map(|c| match c {
+                    std::path::Component::Normal(s) => Some(s.to_string_lossy().into_owned()),
+                    _ => None,
+                })
+                .collect()
+        };
+        for part in path.split('/') {
+            match part {
+                "" | "." => {}
+                ".." => {
+                    segments.pop();
+                }
+                p => segments.push(p.to_owned()),
+            }
+        }
+        let last = segments.pop()?;
+        let stem = last
+            .rsplit_once('.')
+            .map_or(last.as_str(), |(before, _)| before)
+            .to_owned();
+        if segments.last().is_some_and(|p| *p == stem) {
+            segments.pop();
+        }
+        segments.push(stem);
+        let id = segments.join("/");
+        self.maps.contains_key(&id).then_some(id)
+    }
 }
 
 /// Whether the id is a valid room id (also used as a map directory name).
@@ -591,6 +635,39 @@ mod tests {
         )));
         assert!(maps.asset("island", "tiles.png").is_some());
         assert!(maps.asset("island", "../office/office.json").is_none());
+    }
+
+    #[test]
+    fn exit_urls_resolve_to_loaded_maps() {
+        let maps = Maps::load(Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../maps"
+        )));
+        // Relative to the current map's directory; the fragment is dropped.
+        assert_eq!(
+            maps.resolve_exit_url("map-starter-kit/office", "conference.tmj"),
+            Some("map-starter-kit/conference".into())
+        );
+        assert_eq!(
+            maps.resolve_exit_url("map-starter-kit/office", "conference.tmj#from-office"),
+            Some("map-starter-kit/conference".into())
+        );
+        // `..` and the maps root.
+        assert_eq!(
+            maps.resolve_exit_url("map-starter-kit/office", "../island/island.json"),
+            Some("island".into())
+        );
+        assert_eq!(
+            maps.resolve_exit_url("office", "/island/island.json"),
+            Some("island".into())
+        );
+        // A self-link collapses to the map's own id (`map_id` rule).
+        assert_eq!(
+            maps.resolve_exit_url("office", "../office/office.json"),
+            Some("office".into())
+        );
+        // Unloaded targets resolve to nothing.
+        assert_eq!(maps.resolve_exit_url("office", "nowhere.json"), None);
     }
 
     /// Nested map ids: a map in a subdirectory is keyed by its relative

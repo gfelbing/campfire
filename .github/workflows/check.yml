@@ -43,8 +43,17 @@ jobs:
         with:
           node-version: 22
 
-      - name: install + build (tsc --noEmit && vite build)
-        run: npm --prefix client ci && npm --prefix client run build
+      - name: install
+        run: npm --prefix client ci
+
+      - name: lint (eslint)
+        run: npm --prefix client run lint
+
+      - name: unit tests (vitest)
+        run: npm --prefix client run test
+
+      - name: build (tsc --noEmit && vite build)
+        run: npm --prefix client run build
 
   e2e:
     runs-on: ubuntu-latest
@@ -62,11 +71,12 @@ jobs:
           node-version: 22
 
       # The client must build first: the server binary embeds client/dist
-      # at compile time (include_dir).
+      # at compile time (include_dir). `build:e2e` (CAMPFIRE_DEBUG=1) keeps
+      # the `window.__campfire_*` hooks the e2e suite polls (C14).
       - name: build client + server
         run: |
           npm --prefix client ci
-          npm --prefix client run build
+          npm --prefix client run build:e2e
           cargo build --release -p campfire-server
 
       # Dev certs (same recipe as the local dev loop): a local CA plus a

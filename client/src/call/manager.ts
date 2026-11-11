@@ -283,7 +283,7 @@ export class CallManager {
   async rejoinCall(participants: UserBrief[], ticket?: string): Promise<void> {
     if (this.phase.p === "joining") {
       // An auto-join is already in flight (media prompt open): let it
-      // finish with its own ticket (tickets are valid for 60 s).
+      // finish with its own ticket (tickets are valid for 30 s).
       this.roster = participants;
       return;
     }
@@ -377,7 +377,9 @@ export class CallManager {
     if (!ticket) return;
     if (!this.localStream) return;
     const seq = ++this.sessionSeq;
-    const url = `${location.origin}/moq?ticket=${encodeURIComponent(ticket)}`;
+    // The ticket is single-use and rides the path, never a query string
+    // (docs/moq-sfu.md §5).
+    const url = `${location.origin}/moq/${ticket}`;
     const name = `call/${this.room}/${this.selfId}.hang`;
     void MoqCall.start({
       url,

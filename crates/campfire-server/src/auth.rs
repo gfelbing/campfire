@@ -252,7 +252,8 @@ impl Auth {
         // (cached, refetched on key rotation).
         let header = jsonwebtoken::decode_header(&id_token)?;
         let jwks = self.jwks(header.kid.as_deref()).await?;
-        let claims = self.verify_id_token(&id_token, &pending.nonce, &jwks)?;
+        let claims =
+            self.verify_id_token(&id_token, &pending.nonce, &jwks, header.kid.as_deref())?;
         let name = display_name(&claims)
             .ok_or_else(|| anyhow::anyhow!("auth: id_token carried no usable name claim"))?;
 
@@ -289,20 +290,22 @@ impl Auth {
     }
 
     /// Validate the `id_token`: signature (the supplied JWKS), `iss`, `aud`,
-    /// `exp` and `nonce`. Returns the decoded claims.
+    /// `exp` and `nonce`. The caller parses the JOSE header once (Q6) and
+    /// passes the token's `kid`. Returns the decoded claims.
     fn verify_id_token(
         &self,
         id_token: &str,
         expected_nonce: &str,
         jwks: &JwkSet,
+        kid: Option<&str>,
     ) -> anyhow::Result<IdToken> {
-        // The JOSE header carries `kid` + `alg`; pick the matching JWK.
-        let header = jsonwebtoken::decode_header(id_token)?;
+        // Pick the JWK matching the header's `kid` (the header carries
+        // `alg` too, but the key's `alg` wins).
         let jwk = jwks
             .keys
             .iter()
-            .find(|k| JwkSet::kid_of(k) == header.kid.as_deref())
-            .ok_or_else(|| anyhow::anyhow!("auth: no JWKS key for kid {:?}", header.kid))?;
+            .find(|k| JwkSet::kid_of(k) == kid)
+            .ok_or_else(|| anyhow::anyhow!("auth: no JWKS key for kid {kid:?}"))?;
 
         let alg = JwkSet::alg_of(jwk);
         let mut validation = Validation::new(alg);
@@ -769,7 +772,7 @@ m06WQFIIN0lN9hokdsX0++mbagUGylr9SVFzFBIIgwBEflh2/oVaD2+PkN+T/Egm
         let auth = test_auth();
         let token = sign(&claims(ISSUER, CLIENT_ID, "nonce-1", now_secs() + 300));
         let claims = auth
-            .verify_id_token(&token, "nonce-1", &test_jwks())
+            .verify_id_token(&token, "nonce-1", &test_jwks(), Some("k1"))
             .expect("valid token");
         assert_eq!(claims.sub, "u-123");
     }
@@ -783,21 +786,30 @@ m06WQFIIN0lN9hokdsX0++mbagUGylr9SVFzFBIIgwBEflh2/oVaD2+PkN+T/Egm
             "n",
             now_secs() + 300,
         ));
-        assert!(auth.verify_id_token(&token, "n", &test_jwks()).is_err());
+        assert!(
+            auth.verify_id_token(&token, "n", &test_jwks(), Some("k1"))
+                .is_err()
+        );
     }
 
     #[test]
     fn verify_rejects_wrong_audience() {
         let auth = test_auth();
         let token = sign(&claims(ISSUER, "other-client", "n", now_secs() + 300));
-        assert!(auth.verify_id_token(&token, "n", &test_jwks()).is_err());
+        assert!(
+            auth.verify_id_token(&token, "n", &test_jwks(), Some("k1"))
+                .is_err()
+        );
     }
 
     #[test]
     fn verify_rejects_expired() {
         let auth = test_auth();
         let token = sign(&claims(ISSUER, CLIENT_ID, "n", now_secs() - 300));
-        assert!(auth.verify_id_token(&token, "n", &test_jwks()).is_err());
+        assert!(
+            auth.verify_id_token(&token, "n", &test_jwks(), Some("k1"))
+                .is_err()
+        );
     }
 
     #[test]
@@ -805,7 +817,7 @@ m06WQFIIN0lN9hokdsX0++mbagUGylr9SVFzFBIIgwBEflh2/oVaD2+PkN+T/Egm
         let auth = test_auth();
         let token = sign(&claims(ISSUER, CLIENT_ID, "nonce-real", now_secs() + 300));
         assert!(
-            auth.verify_id_token(&token, "nonce-other", &test_jwks())
+            auth.verify_id_token(&token, "nonce-other", &test_jwks(), Some("k1"))
                 .is_err()
         );
     }
@@ -817,7 +829,7 @@ m06WQFIIN0lN9hokdsX0++mbagUGylr9SVFzFBIIgwBEflh2/oVaD2+PkN+T/Egm
         // check passes, so only the signature itself can (and must) fail.
         let token = sign(&claims(ISSUER, CLIENT_ID, "n", now_secs() + 300));
         assert!(
-            auth.verify_id_token(&token, "n", &jwks_from(FORGED_JWK))
+            auth.verify_id_token(&token, "n", &jwks_from(FORGED_JWK), Some("k1"))
                 .is_err()
         );
     }

@@ -59,6 +59,9 @@ pub struct AppState {
     /// when set, a join without a valid session cookie is refused and a
     /// valid one forces the display name from the IdP.
     pub auth: Option<std::sync::Arc<crate::auth::Auth>>,
+    /// Live SSE fallback sessions, keyed by their per-session secret (S1).
+    /// State-owned, not process-global (Q1).
+    pub fallback: FallbackMap,
 }
 
 impl AppState {
@@ -97,6 +100,7 @@ impl AppState {
             metrics,
             moq,
             auth,
+            fallback: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 }
@@ -144,7 +148,7 @@ pub fn router(state: AppState) -> Router {
         .route("/wt", connect(handle_wt))
         // MoQ SFU media session (docs/moq-sfu.md §5): a second WebTransport
         // connection carrying the call's media, admitted by ticket.
-        .route("/moq", connect(handle_moq))
+        .route("/moq/{ticket}", connect(handle_moq))
         // The map in the URL path: `/play/office/office.json` picks the
         // office map. The server serves the SPA; the client takes the room
         // id from the path segment.
@@ -421,7 +425,7 @@ enum FallbackReq {
 
 /// One fallback (SSE+POST) session, keyed by its per-session secret — never
 /// by the user id, which is broadcast to the room (S1).
-struct FallbackSession {
+pub struct FallbackSession {
     room: String,
     name: String,
     user_id: String,
@@ -434,12 +438,7 @@ struct FallbackSession {
     rx: Mutex<Option<mpsc::UnboundedReceiver<ServerMsg>>>,
 }
 
-type FallbackMap = Arc<Mutex<HashMap<String, FallbackSession>>>;
-
-fn fallback_map() -> &'static FallbackMap {
-    static MAP: OnceLock<FallbackMap> = OnceLock::new();
-    MAP.get_or_init(|| Arc::new(Mutex::new(HashMap::new())))
-}
+pub type FallbackMap = Arc<Mutex<HashMap<String, FallbackSession>>>;
 
 /// Mint the per-session fallback secret: 32 random hex chars (S1). It keys
 /// the fallback map and authorizes `POST /rt/event` for that session, so a
@@ -534,7 +533,7 @@ async fn fallback_event(
             // the user id (S1: the id is broadcast to the room and would let
             // any member impersonate this session via POST /rt/event).
             let secret = fallback_secret();
-            fallback_map().lock().unwrap().insert(
+            state.fallback.lock().unwrap().insert(
                 secret.clone(),
                 FallbackSession {
                     room: room.clone(),
@@ -548,7 +547,7 @@ async fn fallback_event(
 
             // A join that never opens its SSE stream is a dead session.
             let world = state.world.clone();
-            let map = fallback_map().clone();
+            let map = state.fallback.clone();
             let secret_bg = secret.clone();
             let user_id_bg = user_id.clone();
             let session_id_bg = session_id;
@@ -575,7 +574,7 @@ async fn fallback_event(
             // `Leave` re-locks the map to remove this entry, and the mutex
             // is not reentrant.
             let (room, name, user_id, chat_allowed) = {
-                let guard = fallback_map().lock().unwrap();
+                let guard = state.fallback.lock().unwrap();
                 let session = guard
                     .get(&token)
                     .ok_or_else(|| err(ErrorCode::BadMessage))?;
@@ -637,7 +636,7 @@ async fn fallback_event(
                 // channel).
                 ClientMsg::Leave => {
                     state.world.leave(&room, &user_id);
-                    fallback_map().lock().unwrap().remove(&token);
+                    state.fallback.lock().unwrap().remove(&token);
                 }
                 // Keepalive (README §5): the session lives with the open SSE
                 // stream, not a command-stream idle timer — nothing to do.
@@ -667,7 +666,7 @@ async fn sse_stream(
     // Take the receiver under the same lock that guards it, so a token can
     // be claimed by at most one stream.
     let (room, user_id, rx, session_id) = {
-        let guard = fallback_map().lock().unwrap();
+        let guard = state.fallback.lock().unwrap();
         let session = guard
             .get(&token)
             .ok_or_else(|| (StatusCode::NOT_FOUND, format!("unknown token {token}")))?;
@@ -699,6 +698,7 @@ async fn sse_stream(
     let stream = CleanupOnEnd {
         inner: interleaved.map(|(_, ev)| ev).fuse(),
         world: state.world.clone(),
+        map: state.fallback.clone(),
         room,
         user_id,
         // The query token is the per-session secret (S1) and the map key.
@@ -715,6 +715,9 @@ async fn sse_stream(
 struct CleanupOnEnd<S> {
     inner: S,
     world: World,
+    /// The state-owned fallback map (Q1): the session's entry is removed
+    /// here when the stream ends.
+    map: FallbackMap,
     room: String,
     user_id: String,
     /// The per-session secret (the fallback map's key, S1) — not the
@@ -733,7 +736,7 @@ impl<S: Stream + Unpin> Stream for CleanupOnEnd<S> {
                     self.cleaned = true;
                     self.world
                         .discard(&self.room, &self.user_id, self.session_id);
-                    fallback_map().lock().unwrap().remove(&self.secret);
+                    self.map.lock().unwrap().remove(&self.secret);
                     debug!(user = %self.user_id, room = %self.room, "fallback session ended");
                 }
                 Poll::Ready(None)

@@ -80,6 +80,13 @@ export type ServerMsg =
   | { t: "call_end"; reason: string; zone?: string }
   | { t: "call_mute"; id: string; audio: boolean; video: boolean }
   | { t: "call_screen"; id: string; on: boolean }
+  | {
+      /** Stepped onto an `exitUrl` zone: the server resolved the URL to a
+       *  map id (README roadmap "Map enhancements"); navigate there with
+       *  the same name + color. */
+      t: "navigate";
+      map: string;
+    }
   | { t: "error"; code: ErrorCode };
 
 // --- client → server -------------------------------------------------------

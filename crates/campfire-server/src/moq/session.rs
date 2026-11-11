@@ -4,8 +4,8 @@
 //! WebTransport session per connection; the realtime `/wt` channel rides a
 //! second connection). Admission is a two-part check, both at CONNECT:
 //!
-//! 1. the `?ticket=…` query must name a live media ticket
-//!    ([`super::tickets`]), and
+//! 1. the `/moq/{ticket}` path segment must name a live, un-presented
+//!    media ticket ([`super::tickets`]; tickets are single-use), and
 //! 2. the ticket's call must still be active with the ticket's user in it
 //!    — a ticket outlives its call for up to its TTL, and a call can end
 //!    (or a user can walk away) before the client presents it.
@@ -26,11 +26,10 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use axum::Extension;
-use axum::extract::{Query, State};
+use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use moq_net::stats::{Registry as StatsRegistry, Tier};
-use serde::Deserialize;
 use tracing::{info, warn};
 
 use crate::metrics::Metrics;
@@ -106,19 +105,13 @@ impl MoqSfu {
     }
 }
 
-/// `?ticket=…` query on `/moq`.
-#[derive(Deserialize)]
-pub struct MoqQuery {
-    pub ticket: Option<String>,
-}
-
-/// Accept the WebTransport upgrade on `/moq`, admit the session (ticket +
-/// call membership), and hand it to moq-net.
+/// Accept the WebTransport upgrade on `/moq/{ticket}`, admit the session
+/// (single-use ticket + call membership), and hand it to moq-net.
 pub async fn handle_moq(
     State(state): State<crate::api::AppState>,
     Extension(conn): Extension<quinn::Connection>,
     headers: HeaderMap,
-    Query(query): Query<MoqQuery>,
+    Path(ticket): Path<String>,
     upgrade: h3_axum::WebTransportUpgrade,
 ) -> Response {
     let sfu = &state.moq;
@@ -130,12 +123,8 @@ pub async fn handle_moq(
         sfu.metrics.moq_session_reject();
         return status.into_response();
     }
-    // 1. Ticket: unknown, missing, or expired.
-    let Some(ticket) = query.ticket else {
-        sfu.metrics.moq_session_reject();
-        return StatusCode::FORBIDDEN.into_response();
-    };
-    let Some(info) = sfu.tickets.validate(&ticket) else {
+    // 1. Ticket: unknown, expired, or already presented (single use).
+    let Some(info) = sfu.tickets.admit(&ticket) else {
         sfu.metrics.moq_session_reject();
         return StatusCode::FORBIDDEN.into_response();
     };

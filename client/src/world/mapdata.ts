@@ -31,8 +31,6 @@ export interface Zone {
   jitsiRoom?: string;
   /** `silentZone`: proximity audio is muted inside. */
   silent?: boolean;
-  /** `exitUrl`: walking onto this zone navigates elsewhere. */
-  exitUrl?: string;
   /** Spawn area: the object is named `start` or has a truthy `start`
    *  property. */
   start?: boolean;
@@ -119,19 +117,18 @@ export function parseMap(id: string, raw: TiledMap): MapData {
           const ts = raw.tilewidth;
           const jitsi = prop(o, "jitsiRoom");
           const silent = prop(o, "silentZone") || prop(o, "silent");
-          const exit = prop(o, "exitUrl");
           // Spawn area: an object named `start`, or a truthy `start`
           // property — the server's `prop_bool` accepts any truthy value,
           // so match it here (a `start: "yes"` object is a spawn area on
-          // both sides).
+          // both sides). `exitUrl` zones are the server's to detect
+          // (`navigate` message); the client ignores them.
           const isStart = o.name === "start" || Boolean(prop(o, "start"));
-          if (jitsi === undefined && !silent && exit === undefined && !isStart) continue;
+          if (jitsi === undefined && !silent && !isStart) continue;
           zones.push({
             name: o.name,
             rect: [o.x / ts, o.y / ts, o.width / ts, o.height / ts],
             jitsiRoom: typeof jitsi === "string" ? jitsi : undefined,
             silent: Boolean(silent),
-            exitUrl: typeof exit === "string" ? exit : undefined,
             start: isStart,
           });
         }

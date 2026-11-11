@@ -1,11 +1,12 @@
-//! Media tickets (docs/moq-sfu.md §5): short-lived bearer tokens that
-//! authorize one MoQ session on the SFU.
+//! Media tickets (docs/moq-sfu.md §5): short-lived single-use bearer
+//! tokens that authorize one MoQ session on the SFU.
 //!
 //! The world mints a ticket when a user becomes a call participant
 //! (`call_start`) and again on reconnect (`hello`); the client presents it
-//! in the `/moq` WebTransport CONNECT query (`?ticket=…`). A ticket is a
-//! bearer token — it only ever travels over the owner's own encrypted
-//! session — and stays valid until its TTL expires. The SFU additionally
+//! as the `/moq/{ticket}` path segment on its WebTransport CONNECT (never
+//! in a query string). A ticket is a bearer token — it only ever travels
+//! over the owner's own encrypted session — and is consumed on first
+//! admission, so a leaked ticket cannot be replayed. The SFU additionally
 //! re-checks call membership on CONNECT ([`crate::moq::session`]), so a
 //! ticket whose call has already ended is refused.
 
@@ -17,8 +18,9 @@ use std::{
 
 use rand::RngCore;
 
-/// A ticket's time to live.
-pub const TICKET_TTL: Duration = Duration::from_secs(60);
+/// A ticket's time to live. Short: the client presents the ticket within
+/// milliseconds of minting; a ticket left unused that long is a leak.
+pub const TICKET_TTL: Duration = Duration::from_secs(30);
 
 /// What a presented ticket authorizes: the presenting user, their room, and
 /// the call the ticket was minted for.
@@ -90,17 +92,31 @@ impl TicketRegistry {
     }
 
     /// Validate a presented ticket: `None` when unknown or expired
-    /// (expired entries are dropped on the way out).
+    /// (expired entries are dropped on the way out). Does not consume.
     pub fn validate(&self, id: &str) -> Option<TicketInfo> {
-        let mut map = self.inner.map.lock().unwrap();
+        let map = self.inner.map.lock().unwrap();
         let entry = map.get(id)?;
         if entry.minted.elapsed() >= self.inner.ttl {
-            map.remove(id);
             return None;
         }
         Some(TicketInfo {
             user: entry.user.clone(),
             room: entry.room.clone(),
+            call_id: entry.call_id,
+        })
+    }
+
+    /// Admit a presented ticket: validate it and consume it (single use).
+    /// `None` when unknown, expired, or already presented.
+    pub fn admit(&self, id: &str) -> Option<TicketInfo> {
+        let mut map = self.inner.map.lock().unwrap();
+        let entry = map.remove(id)?;
+        if entry.minted.elapsed() >= self.inner.ttl {
+            return None;
+        }
+        Some(TicketInfo {
+            user: entry.user,
+            room: entry.room,
             call_id: entry.call_id,
         })
     }
@@ -161,5 +177,15 @@ mod tests {
         let a = reg.mint("u_1", "office", 1);
         let b = reg.mint("u_1", "office", 1);
         assert_ne!(a, b);
+    }
+
+    #[test]
+    fn admit_consumes_the_ticket() {
+        let reg = TicketRegistry::new();
+        let t = reg.mint("u_1", "office", 1);
+        assert!(reg.admit(&t).is_some());
+        // A replay is refused, even inside the TTL.
+        assert_eq!(reg.admit(&t), None);
+        assert_eq!(reg.validate(&t), None);
     }
 }

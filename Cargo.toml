@@ -5,13 +5,12 @@ members = [
     "crates/campfire-protocol",
     "crates/campfire-maps",
     "tools/loadtest",
-    "tools/moq-spike",
 ]
 
 [workspace.package]
 version = "0.0.1"
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.99.1"
 license-file = "LICENSE"
 repository = "https://github.com/campfire/campfire"
 
@@ -30,16 +29,11 @@ h3-datagram = "0.0"
 h3-quinn = "0.0"
 h3-webtransport = "0.1"
 hmac = "0.12"
-kio = "0.6.4"
 http = "1"
 http-body-util = "0.1"
 include_dir = "0.7"
 jsonwebtoken = "9"
 quinn = "0.11"
-# Pinned to the exact version quinn 0.11.12 links against: the spike's
-# custom congestion controller implements quinn-proto's `Controller`
-# trait, so a version drift would produce a second, incompatible copy.
-quinn-proto = "=0.11.19"
 rand = "0.8"
 rcgen = "0.13"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
@@ -54,8 +48,10 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 thiserror = "2"
 wtransport = { version = "0.7", features = ["quinn"] }
 
-# MoQ spike (tools/moq-spike, docs/moq-sfu.md Phase 0)
-moq-net = "0.3.22"
+# MoQ SFU (crates/campfire-server). Pinned to the vendored copy in
+# third_party/moq-net (see third_party/moq-net/PATCH.md for the local fix
+# and how to re-vendor on a bump).
+moq-net = "0.3.23"
 moq-tokio = { version = "0.19.35", default-features = false }
 web-transport-trait = "0.4"
 
@@ -67,3 +63,7 @@ campfire-maps = { path = "crates/campfire-maps" }
 lto = "thin"
 codegen-units = 1
 strip = "symbols"
+
+# Serve moq-net from the vendored, patched copy (third_party/moq-net/PATCH.md).
+[patch.crates-io]
+moq-net = { path = "third_party/moq-net" }

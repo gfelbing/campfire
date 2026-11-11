@@ -46,6 +46,10 @@ export interface ConnHandlers {
   onCallEnd: (reason: string, zone?: string) => void;
   onCallMute: (id: string, audio: boolean, video: boolean) => void;
   onCallScreen: (id: string, on: boolean) => void;
+  /** Stepped onto an `exitUrl` zone: the server resolved the URL to a map
+   *  id (README roadmap "Map enhancements"); navigate there with the same
+   *  name + color. */
+  onNavigate: (map: string) => void;
   onError: (code: string) => void;
   onStatus: (s: ConnStatus) => void;
 }
@@ -289,6 +293,9 @@ export class Connection {
       case "call_screen":
         this.handlers.onCallScreen(msg.id, msg.on);
         break;
+      case "navigate":
+        this.handlers.onNavigate(msg.map);
+        break;
       case "error":
         console.warn("server error:", msg.code);
         this.handlers.onError(msg.code);
@@ -326,19 +333,26 @@ export class Connection {
 
 /** Feed raw bytes, invoking `onLine` for every complete `\n`-terminated line. */
 export function lineReader(onLine: (line: string) => void) {
-  let buf = "";
-  // One decoder for the whole stream: `{ stream: true }` carries a multibyte
-  // character split across chunks into the next decode (a fresh decoder per
-  // chunk would replace it with U+FFFD and corrupt the JSON line).
-  const decoder = new TextDecoder("utf-8", { stream: true });
+  let pending: Uint8Array = new Uint8Array(0);
+  // Decode each complete line as a whole: `\n` (0x0A) can never appear
+  // inside a UTF-8 multibyte sequence (all other bytes are >= 0x80), so an
+  // undecoded tail can never contain a line break, and a multibyte
+  // character split across chunks is reassembled by the decode of the
+  // complete line. (Relies on no decoder state: a per-chunk decode with
+  // `{ stream: true }` is not guaranteed to carry an incomplete sequence
+  // in every engine.)
+  const decoder = new TextDecoder("utf-8");
   return (chunk: Uint8Array) => {
-    buf += decoder.decode(chunk);
+    const data = new Uint8Array(pending.length + chunk.length);
+    data.set(pending);
+    data.set(chunk, pending.length);
+    let start = 0;
     let idx: number;
-    while ((idx = buf.indexOf("\n")) >= 0) {
-      const line = buf.slice(0, idx);
-      buf = buf.slice(idx + 1);
-      if (line.length > 0) onLine(line);
+    while ((idx = data.indexOf(0x0a, start)) >= 0) {
+      if (idx > start) onLine(decoder.decode(data.subarray(start, idx)));
+      start = idx + 1;
     }
+    pending = data.slice(start);
   };
 }
 

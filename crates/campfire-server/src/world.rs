@@ -47,7 +47,7 @@ const MOVES_PER_SEC: usize = 30;
 /// Maximum avatar speed in tiles per second (README §5).
 const MAX_SPEED: f32 = 8.0;
 
-/// Id of a connected user, e.g. `u_1f3a9c02`.
+/// Id of a connected user, e.g. `u_1f3a9c02be47d158`.
 pub type UserId = String;
 
 /// A user present in one room.
@@ -123,8 +123,6 @@ pub enum JoinError {
 pub struct World {
     maps: Arc<campfire_maps::Maps>,
     rooms: Arc<Mutex<HashMap<String, Room>>>,
-    id_counter: Arc<AtomicU64>,
-    nonce: Arc<Mutex<[u8; 4]>>,
     /// One per connected session; lets a stale session's disconnect lose to
     /// a newer session that already restored the same token (README §5).
     session_counter: Arc<AtomicU64>,
@@ -186,13 +184,9 @@ pub(crate) fn zone_maps() -> campfire_maps::Maps {
 impl World {
     /// A world over the loaded maps (each registered as a room).
     pub fn new(maps: campfire_maps::Maps) -> Self {
-        let mut nonce = [0u8; 4];
-        rand::thread_rng().fill_bytes(&mut nonce);
         Self {
             maps: Arc::new(maps),
             rooms: Arc::default(),
-            id_counter: Arc::new(AtomicU64::new(0)),
-            nonce: Arc::new(Mutex::new(nonce)),
             session_counter: Arc::new(AtomicU64::new(0)),
             reconnect_window: RECONNECT_WINDOW,
             call_counter: Arc::new(AtomicU64::new(0)),
@@ -262,12 +256,16 @@ impl World {
         self.maps.get(room)
     }
 
-    /// Generate a fresh user id (`u_` + 8 hex digits), identity-free per
-    /// README §14 (logs carry no nicknames or personal data).
+    /// Generate a fresh user id (`u_` + 16 random hex digits), unguessable
+    /// per README §14 (logs carry no nicknames or personal data; ids must
+    /// not be predictable).
     fn next_user_id(&self) -> String {
-        let n = self.id_counter.fetch_add(1, Ordering::Relaxed);
-        let key = u32::from_le_bytes(*self.nonce.lock().unwrap()) ^ (n as u32);
-        format!("u_{key:08x}")
+        let mut bytes = [0u8; 8];
+        rand::thread_rng().fill_bytes(&mut bytes);
+        format!(
+            "u_{}",
+            bytes.iter().map(|b| format!("{b:02x}")).collect::<String>()
+        )
     }
 
     /// Generate a fresh reconnect token: 32 random hex chars (README §5).
@@ -513,6 +511,7 @@ impl World {
             if (dx * dx + dy * dy).sqrt() > MAX_SPEED * dt {
                 continue;
             }
+            let prev = member.pos;
             member.pos = (entry.x, entry.y);
             member.dir = entry.d;
             member.moving = entry.moving;
@@ -520,67 +519,91 @@ impl World {
             member.last_move_at = now;
             member.move_window_count += 1;
             member.dirty = true;
+            // exitUrl zones (README roadmap "Map enhancements"): stepping
+            // onto one navigates to the resolved target map. The server
+            // owns the URL → map-id rule (C7); the client just follows.
+            for z in &map.zones {
+                let Some(url) = &z.exit_url else {
+                    continue;
+                };
+                if z.contains(entry.x, entry.y) && !z.contains(prev.0, prev.1) {
+                    if let Some(target) = self.maps.resolve_exit_url(room, url) {
+                        let _ = member.tx.send(ServerMsg::Navigate { map: target });
+                    }
+                    break;
+                }
+            }
         }
     }
 
     /// One 50 ms tick (README §5): first expire gone members whose
     /// reconnect window has elapsed (a real leave, with notification), then
     /// for every room batch the dirty members into datagram-sized movement
-    /// JSON and fan it out to all members.
+    /// JSON and fan it out to all members. Calls that end during the tick
+    /// fire their hooks only after the rooms lock is dropped (B2).
     pub fn tick(&self) {
-        let mut rooms = self.rooms.lock().unwrap();
-        let window = self.reconnect_window;
-        let expired: Vec<(String, String)> = rooms
-            .iter()
-            .flat_map(|(room, entry)| {
-                entry
-                    .users
-                    .iter()
-                    .filter(|(_, m)| m.gone_at.is_some_and(|t| t.elapsed() >= window))
-                    .map(|(id, _)| (room.clone(), id.clone()))
-            })
-            .collect();
-        for (room, id) in &expired {
-            let ended = remove_from_room(&mut rooms, room, id);
-            for call_id in ended {
-                self.call_ended(call_id);
-            }
-        }
-        for (room, room_entry) in rooms.iter_mut() {
-            let map = self.maps.get(room);
-            let ended = update_bubbles(self, room, room_entry, Instant::now(), map);
-            for call_id in ended {
-                self.call_ended(call_id);
-            }
-            if !room_entry.users.values().any(|m| m.dirty) {
-                continue;
-            }
-            let entries: Vec<MovementEntry> = room_entry
-                .users
+        let ended = {
+            let mut rooms = self.rooms.lock().unwrap();
+            let window = self.reconnect_window;
+            let expired: Vec<(String, String)> = rooms
                 .iter()
-                .filter(|(_, m)| m.dirty)
-                .map(|(uid, m)| MovementEntry {
-                    id: uid.clone(),
-                    x: m.pos.0,
-                    y: m.pos.1,
-                    d: m.dir,
-                    moving: m.moving,
-                    seq: m.seq,
-                    silent: map.is_some_and(|map| {
-                        map.zones
-                            .iter()
-                            .any(|z| z.silent && z.contains(m.pos.0, m.pos.1))
-                    }),
+                .flat_map(|(room, entry)| {
+                    entry
+                        .users
+                        .iter()
+                        .filter(|(_, m)| m.gone_at.is_some_and(|t| t.elapsed() >= window))
+                        .map(|(id, _)| (room.clone(), id.clone()))
                 })
                 .collect();
-            for chunk in encode_batches(&entries) {
-                for m in room_entry.users.values() {
-                    let _ = m.dtx.send(chunk.clone());
+            let mut ended: Vec<u64> = Vec::new();
+            for (room, id) in &expired {
+                ended.extend(remove_from_room(&mut rooms, room, id));
+            }
+            for (room, room_entry) in rooms.iter_mut() {
+                let map = self.maps.get(room);
+                ended.extend(update_bubbles(self, room, room_entry, Instant::now(), map));
+                if !room_entry.users.values().any(|m| m.dirty) {
+                    continue;
+                }
+                let entries: Vec<MovementEntry> = room_entry
+                    .users
+                    .iter()
+                    .filter(|(_, m)| m.dirty)
+                    .map(|(uid, m)| MovementEntry {
+                        id: uid.clone(),
+                        x: m.pos.0,
+                        y: m.pos.1,
+                        d: m.dir,
+                        moving: m.moving,
+                        seq: m.seq,
+                        silent: map.is_some_and(|map| {
+                            map.zones
+                                .iter()
+                                .any(|z| z.silent && z.contains(m.pos.0, m.pos.1))
+                        }),
+                    })
+                    .collect();
+                // Q5: each datagram must reach every member's channel, so
+                // one clone per member is inherent — but the last member
+                // takes the buffer by move, dropping one clone per chunk.
+                let members: Vec<&Member> = room_entry.users.values().collect();
+                for chunk in encode_batches(&entries) {
+                    let Some((last, rest)) = members.split_last() else {
+                        continue;
+                    };
+                    for m in rest {
+                        let _ = m.dtx.send(chunk.clone());
+                    }
+                    let _ = last.dtx.send(chunk);
+                }
+                for m in room_entry.users.values_mut() {
+                    m.dirty = false;
                 }
             }
-            for m in room_entry.users.values_mut() {
-                m.dirty = false;
-            }
+            ended
+        };
+        for call_id in ended {
+            self.call_ended(call_id);
         }
     }
 
@@ -840,32 +863,52 @@ fn update_bubbles(
     now: Instant,
     map: Option<&campfire_maps::MapData>,
 ) -> Vec<u64> {
-    // Silent zones (README roadmap "Map enhancements"): silent-zone
-    // occupants never join a proximity bubble (zone calls are separate).
-    let in_silent = |x: f32, y: f32| -> bool {
-        map.is_some_and(|map| map.zones.iter().any(|z| z.silent && z.contains(x, y)))
-    };
-    // A call's zone rectangle: a zone call is bounded by its zone rect (a
-    // zone call whose zone has emptied out lets everyone drop, ending the
-    // call); a proximity bubble is the one-tile radius around the centroid
-    // of connected participants.
-    let zone_rect = |zone: &Option<String>| -> Option<&campfire_maps::Zone> {
-        let name = zone.as_ref()?;
-        map.and_then(|map| {
-            map.zones.iter().find(|z| {
-                z.jitsi_room.as_deref() == Some(name.as_str())
-                    || (z.jitsi_room.is_none() && z.name == *name)
-            })
-        })
-    };
+    let ended = bubble_leaves(entry, now, map);
+    // A newly created call ends the tick (one creation per tick keeps the
+    // roster broadcast ordered, like a join).
+    if create_zone_call(world, room, entry, map) {
+        return ended;
+    }
+    if create_proximity_call(world, room, entry, map) {
+        return ended;
+    }
+    bubble_joins(world, room, entry, map);
+    ended
+}
 
-    // Leaves first: gone members keep their seat (reconnect grace), opted
-    // out members and participants outside their call's area drop out
-    // immediately — for every concurrent call.
+/// True when `(x, y)` is inside a silent zone (README roadmap "Map
+/// enhancements"): silent-zone occupants never join a proximity bubble
+/// (zone calls are separate).
+fn in_silent_zone(map: Option<&campfire_maps::MapData>, x: f32, y: f32) -> bool {
+    map.is_some_and(|map| map.zones.iter().any(|z| z.silent && z.contains(x, y)))
+}
+
+/// A call's zone rectangle: a zone call is bounded by its zone rect (a
+/// zone call whose zone has emptied out lets everyone drop, ending the
+/// call); a proximity bubble is the one-tile radius around the centroid
+/// of connected participants.
+fn zone_rect<'a>(
+    map: Option<&'a campfire_maps::MapData>,
+    zone: &'a Option<String>,
+) -> Option<&'a campfire_maps::Zone> {
+    let name = zone.as_ref()?;
+    map.and_then(|map| {
+        map.zones.iter().find(|z| {
+            z.jitsi_room.as_deref() == Some(name.as_str())
+                || (z.jitsi_room.is_none() && z.name == *name)
+        })
+    })
+}
+
+/// Bubble leaves: gone members keep their seat (reconnect grace), opted
+/// out members and participants outside their call's area drop out
+/// immediately — for every concurrent call. Returns the ids of the calls
+/// that ended.
+fn bubble_leaves(entry: &mut Room, now: Instant, map: Option<&campfire_maps::MapData>) -> Vec<u64> {
     let mut dropped: Vec<String> = Vec::new();
     for ci in 0..entry.calls.len() {
         let call = &entry.calls[ci];
-        let rect = zone_rect(&call.zone);
+        let rect = zone_rect(map, &call.zone);
         for id in call.participants.keys() {
             let Some(m) = entry.users.get(id) else {
                 continue; // gone: stays in the bubble (reconnect grace)
@@ -893,7 +936,7 @@ fn update_bubbles(
             }
             // A proximity bubble never spans a silent zone: occupants who
             // walk into one drop out of the bubble.
-            if call.zone.is_none() && in_silent(m.pos.0, m.pos.1) {
+            if call.zone.is_none() && in_silent_zone(map, m.pos.0, m.pos.1) {
                 dropped.push(id.clone());
             }
         }
@@ -904,14 +947,23 @@ fn update_bubbles(
             ended.push(call_id);
         }
     }
+    ended
+}
 
-    // Creation: each occupied jitsi zone can carry its own call (the zone
-    // is the call area, so a lone occupant starts it and everyone who
-    // walks in joins); then, if no proximity bubble is live, two eligible
-    // users within the bubble radius of each other form one (id-sorted so
-    // the pair — and thus the designated offerer — is deterministic).
-    let in_any_call =
-        |entry: &Room, id: &str| entry.calls.iter().any(|c| c.participants.contains_key(id));
+/// True when `id` is already a participant of any of the room's calls.
+fn in_any_call(entry: &Room, id: &str) -> bool {
+    entry.calls.iter().any(|c| c.participants.contains_key(id))
+}
+
+/// Creation, part one: each occupied jitsi zone can carry its own call
+/// (the zone is the call area, so a lone occupant starts it and everyone
+/// who walks in joins). Returns true when a call was created.
+fn create_zone_call(
+    world: &World,
+    room: &str,
+    entry: &mut Room,
+    map: Option<&campfire_maps::MapData>,
+) -> bool {
     if let Some(map) = map {
         for zone in &map.zones {
             let Some(jitsi) = &zone.jitsi_room else {
@@ -954,58 +1006,67 @@ fn update_bubbles(
             };
             broadcast_call_start(world, room, entry, &call);
             entry.calls.push(call);
-            return ended;
+            return true;
         }
     }
-    {
-        let mut created = false;
-        let mut candidates: Vec<(String, (f32, f32))> = entry
-            .users
-            .iter()
-            .filter(|(uid, m)| {
-                !m.bubble_off
-                    && m.gone_at.is_none()
-                    && !in_any_call(entry, uid)
-                    && !in_silent(m.pos.0, m.pos.1)
-            })
-            .map(|(uid, m)| (uid.clone(), m.pos))
-            .collect();
-        candidates.sort_by(|a, b| a.0.cmp(&b.0));
-        'pair: for i in 0..candidates.len() {
-            for j in i + 1..candidates.len() {
-                if dist(candidates[i].1, candidates[j].1) < BUBBLE_RADIUS {
-                    let a = candidates[i].clone();
-                    let b = candidates[j].clone();
-                    let call = call::Call {
-                        zone: None,
-                        ..call::Call::new(
-                            world.next_call_id(),
-                            entry
-                                .users
-                                .iter()
-                                .filter(|(uid, _)| uid.as_str() == a.0 || uid.as_str() == b.0)
-                                .map(|(uid, m)| (uid.clone(), m.name.clone())),
-                        )
-                    };
-                    broadcast_call_start(world, room, entry, &call);
-                    entry.calls.push(call);
-                    created = true;
-                    break 'pair;
-                }
+    false
+}
+
+/// Creation, part two: if no proximity bubble is live, two eligible users
+/// within the bubble radius of each other form one (id-sorted so the pair
+/// — and thus the designated offerer — is deterministic). Returns true
+/// when a call was created.
+fn create_proximity_call(
+    world: &World,
+    room: &str,
+    entry: &mut Room,
+    map: Option<&campfire_maps::MapData>,
+) -> bool {
+    let mut candidates: Vec<(String, (f32, f32))> = entry
+        .users
+        .iter()
+        .filter(|(uid, m)| {
+            !m.bubble_off
+                && m.gone_at.is_none()
+                && !in_any_call(entry, uid)
+                && !in_silent_zone(map, m.pos.0, m.pos.1)
+        })
+        .map(|(uid, m)| (uid.clone(), m.pos))
+        .collect();
+    candidates.sort_by(|a, b| a.0.cmp(&b.0));
+    for i in 0..candidates.len() {
+        for j in i + 1..candidates.len() {
+            if dist(candidates[i].1, candidates[j].1) < BUBBLE_RADIUS {
+                let a = candidates[i].clone();
+                let b = candidates[j].clone();
+                let call = call::Call {
+                    zone: None,
+                    ..call::Call::new(
+                        world.next_call_id(),
+                        entry
+                            .users
+                            .iter()
+                            .filter(|(uid, _)| uid.as_str() == a.0 || uid.as_str() == b.0)
+                            .map(|(uid, m)| (uid.clone(), m.name.clone())),
+                    )
+                };
+                broadcast_call_start(world, room, entry, &call);
+                entry.calls.push(call);
+                return true;
             }
         }
-        if created {
-            return ended;
-        }
     }
+    false
+}
 
-    // Joins: at most one per tick — the nearest eligible user inside a
-    // call's area (zone rect or bubble radius) who is not already in
-    // another call. One join per tick keeps the roster broadcast ordered
-    // and trickle-paced.
+/// Joins: at most one per tick — the nearest eligible user inside a
+/// call's area (zone rect or bubble radius) who is not already in
+/// another call. One join per tick keeps the roster broadcast ordered
+/// and trickle-paced.
+fn bubble_joins(world: &World, room: &str, entry: &mut Room, map: Option<&campfire_maps::MapData>) {
     'calls: for ci in 0..entry.calls.len() {
         let call = &entry.calls[ci];
-        let rect = zone_rect(&call.zone);
+        let rect = zone_rect(map, &call.zone);
         let mut best: Option<(f32, String)> = None;
         for (uid, m) in &entry.users {
             if m.bubble_off || m.gone_at.is_some() || call.contains(uid) || in_any_call(entry, uid)
@@ -1013,7 +1074,7 @@ fn update_bubbles(
                 continue;
             }
             // Silent-zone occupants never join a proximity bubble.
-            if call.zone.is_none() && in_silent(m.pos.0, m.pos.1) {
+            if call.zone.is_none() && in_silent_zone(map, m.pos.0, m.pos.1) {
                 continue;
             }
             let inside = match rect {
@@ -1050,7 +1111,6 @@ fn update_bubbles(
             break 'calls;
         }
     }
-    ended
 }
 
 /// The centroid of the call's connected participants.

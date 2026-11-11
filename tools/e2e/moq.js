@@ -6,33 +6,28 @@
  * Drives the real client in headless Brave/Chromium with fake media:
  *   1. both pages auto-join via `/?room=…&name=…` and stand still on the
  *      spawn tile, so the server's bubble engine pulls them into a call;
- *   2. each client opens one MoQ session on `/moq?ticket=…` carrying the
+ *   2. each client opens one MoQ session on `/moq/{ticket}` carrying the
  *      uplink (announces `call/<room>/<user-id>.hang`) and every downlink —
  *      asserted via the `window.__campfire_moq` / `window.__campfire_moq_down`
  *      debug hooks;
  *   3. the downlinks must render: decoded video frames, received audio
  *      bytes, and the playback delay/jitter within a sane budget;
- *   4. the Rust spike client subscribes to A's broadcast as a third call
- *      member (B's ticket) and must receive video AND audio objects;
- *   5. the SFU's own `/metrics` object counter must have moved;
- *   6. B shares their screen (fake display, headless): A must gain a
+ *   4. the SFU's own `/metrics` object counter must have moved;
+ *   5. B shares their screen (fake display, headless): A must gain a
  *      screen tile and decode its `s` rendition; stopping the share drops
  *      the tile;
- *   7. B mutes / camera-off: A's tile must show the presence badges, and
+ *   6. B mutes / camera-off: A's tile must show the presence badges, and
  *      the camera-off must stop video delivery (rendition omitted);
- *   8. A refreshes the tab: the token re-join must restore the identity,
+ *   7. A refreshes the tab: the token re-join must restore the identity,
  *      relive A's uplink, and B's downlink to A must follow the
  *      re-announced broadcast;
- *   9. B walks away and leaves the room, the call ends, and A's session
+ *   8. B walks away and leaves the room, the call ends, and A's session
  *      stops.
  *
  * The dev server (port 8443) must be running, like `just e2e`.
  *
  * Usage: node tools/e2e/moq.js [--url https://localhost:8443] [--browser /path]
  */
-
-const { spawn } = require("child_process");
-const path = require("path");
 
 const puppeteer = require("puppeteer-core");
 
@@ -50,13 +45,8 @@ const NAME_A = `moqa-${STAMP}`;
 const NAME_B = `moqb-${STAMP}`;
 const BROWSER = arg("browser", "brave");
 const ROOM = arg("room", "island");
-const SUB_DURATION = arg("duration", "8s");
-const REPO_ROOT = path.resolve(__dirname, "..", "..");
-const SPIKE_BIN = arg("bin", path.join(REPO_ROOT, "target", "release", "moq-spike-client"));
-const CA_CERT = path.join(REPO_ROOT, "certs", "ca.pem");
 // Latency budget for the downlink playback delay and jitter-buffer depth
-// (the spike's glass-to-glass number is the acceptance figure; this is a
-// sanity bound, docs/moq-sfu.md §9 Phase 3).
+// (a sanity bound, docs/moq-sfu.md §9 Phase 3).
 const MAX_LATENCY_MS = 1000;
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -135,56 +125,34 @@ const tileBadge = (page, name, badgeSel) =>
 const screenTiles = (page) =>
   page.evaluate(() => document.querySelectorAll(".theater-tile.screen").length);
 
-/** Run the spike subscriber and resolve with its parsed JSON report. */
-function runSpikeSubscriber(ticket, subPath) {
-  return new Promise((resolve, reject) => {
-    const argv = [
-      "--url", `${URL_BASE}/moq`,
-      "--ticket", ticket,
-      "--sub-path", subPath,
-      "--no-publish",
-      // Browser payloads are encoded media, not the spike's stamped frames.
-      "--no-stamp",
-      "--subscribers", "1",
-      "--duration", SUB_DURATION,
-      "--max-age", "2s",
-      "--ca", CA_CERT,
-    ];
-    console.log("   spike subscriber:", argv.join(" "));
-    const child = spawn(SPIKE_BIN, argv, { cwd: REPO_ROOT });
-    let out = "";
-    let err = "";
-    child.stdout.on("data", (d) => (out += d));
-    child.stderr.on("data", (d) => (err += d));
-    child.on("close", (code) => {
-      if (code !== 0) {
-        reject(new Error(`spike exited ${code}:\n${err.slice(-2000)}`));
-        return;
-      }
-      try {
-        resolve(JSON.parse(out));
-      } catch (e) {
-        reject(new Error(`spike output not JSON: ${out.slice(0, 500)}`));
-      }
-    });
-    child.on("error", reject);
-  });
-}
-
 /** The downlink must be live with decoded video, received audio, and the
  *  playback delay / jitter buffer within budget. */
 async function assertDownlinkLive(page, label, timeoutMs) {
-  const v = await waitUntil(async () => {
+  // A freshly subscribed downlink first plays the SFU's cached groups
+  // (catch-up): the delay starts high and falls to steady state. Poll
+  // until it is live with video + audio AND the delay/jitter have
+  // converged within budget — sampling the first live frame would read
+  // the catch-up peak, not the steady state.
+  try {
+    return await waitUntil(async () => {
+      const d = await soleDown(page);
+      const ok =
+        d &&
+        d.status === "live" &&
+        d.frames >= 5 &&
+        d.audioBytes > 0 &&
+        Number.isFinite(d.delay) &&
+        d.delay >= 0 &&
+        d.delay <= MAX_LATENCY_MS &&
+        Number.isFinite(d.jitter) &&
+        d.jitter >= 0 &&
+        d.jitter <= MAX_LATENCY_MS;
+      return ok ? d : undefined;
+    }, `${label}: downlink live with video + audio within latency budget`, timeoutMs ?? 30_000);
+  } catch (e) {
     const d = await soleDown(page);
-    return d && d.status === "live" && d.frames >= 5 && d.audioBytes > 0 ? d : undefined;
-  }, `${label}: downlink live with video + audio`, timeoutMs ?? 30_000);
-  if (!Number.isFinite(v.delay) || v.delay < 0 || v.delay > MAX_LATENCY_MS) {
-    throw new Error(`${label}: playback delay ${v.delay} ms out of budget`);
+    throw new Error(`${label}: ${e.message} (last downlink: ${JSON.stringify(d)})`);
   }
-  if (!Number.isFinite(v.jitter) || v.jitter < 0 || v.jitter > MAX_LATENCY_MS) {
-    throw new Error(`${label}: jitter buffer ${v.jitter} ms out of budget`);
-  }
-  return v;
 }
 
 (async () => {
@@ -230,19 +198,28 @@ async function assertDownlinkLive(page, label, timeoutMs) {
     console.log("2. presence settled (room clean: exactly A + B)…");
     // A run that ended seconds earlier may still be in the room: its
     // avatars sit on the spawn tile through the server's 30 s reconnect
-    // window (longer if a headless close left the QUIC connection open —
-    // worst case observed ~90 s), and they would join our bubble and keep
-    // the call alive after our B walks away. Wait for them to drain (own
-    // entries too: the first load joins over TCP and the client reloads
-    // over HTTP/3, leaving a stale own entry).
-    await waitUntil(async () => {
-      const a = await presenceNames(pageA);
-      return (
-        a.length === 2 &&
-        a.some((n) => n?.includes(NAME_B)) &&
-        a.filter((n) => n?.includes(NAME_A)).length === 1
-      );
-    }, "A sees exactly A + B", 90_000);
+    // window — and a headless close can leave the QUIC connection open,
+    // so the server may take ~90 s to even notice the disconnect
+    // (worst case observed). 90 s + 30 s + margin: wait 180 s. The
+    // entries drain for sure (the tick purges expired seats), so this
+    // only costs time when a previous run interfered. (Own entries too:
+    // the first load joins over TCP and the client reloads over HTTP/3,
+    // leaving a stale own entry.)
+    await (async () => {
+      let names = [];
+      try {
+        await waitUntil(async () => {
+          names = await presenceNames(pageA);
+          return (
+            names.length === 2 &&
+            names.some((n) => n?.includes(NAME_B)) &&
+            names.filter((n) => n?.includes(NAME_A)).length === 1
+          );
+        }, "A sees exactly A + B", 180_000);
+      } catch (e) {
+        throw new Error(`${e.message} — A sees: ${JSON.stringify(names)}`);
+      }
+    })();
     await waitUntil(async () => {
       const b = await presenceNames(pageB);
       return (
@@ -289,23 +266,7 @@ async function assertDownlinkLive(page, label, timeoutMs) {
     await waitUntil(async () => (await theaterState(pageB)) === "live", "B's column live", 15_000);
     console.log("   downlinks rendered, latency within budget");
 
-    console.log("6. spike subscriber: A's broadcast, admitted with B's ticket…");
-    const ticket = new URL(hookB.url).searchParams.get("ticket");
-    if (!ticket) throw new Error("B's session URL carries no ticket");
-    const report = await runSpikeSubscriber(ticket, hookA.name);
-    const sub = report.subscribers?.[0];
-    if (!sub || sub.error) throw new Error(`subscriber failed: ${JSON.stringify(sub)}`);
-    console.log(`   negotiated: ${report.negotiated_version}`);
-    console.log(`   video: ${sub.video?.samples} objects, audio: ${sub.audio?.samples} objects`);
-    if (!sub.video || sub.video.samples < 10) {
-      throw new Error(`video fan-out failed: ${JSON.stringify(sub.video)}`);
-    }
-    if (!sub.audio || sub.audio.samples < 10) {
-      throw new Error(`audio fan-out failed: ${JSON.stringify(sub.audio)}`);
-    }
-    console.log("   video + audio objects delivered");
-
-    console.log("7. SFU metrics: campfire_moq_objects_in_total…");
+    console.log("6. SFU metrics: campfire_moq_objects_in_total…");
     const metrics = await pageA.evaluate(async () => {
       const res = await fetch("/metrics");
       return res.text();
@@ -316,7 +277,7 @@ async function assertDownlinkLive(page, label, timeoutMs) {
     }
     console.log(`   campfire_moq_objects_in_total = ${m[1]}`);
 
-    console.log("8. screen share B → A (fake display)…");
+    console.log("7. screen share B → A (fake display)…");
     await pageB.$eval(".call-screen", (el) => el.click());
     await waitUntil(async () => (await callBtn(pageB, "screen"))?.on === true, "B's share on", 15_000);
     await waitUntil(async () => (await screenTiles(pageA)) >= 1, "A shows B's screen tile", 30_000);
@@ -331,7 +292,7 @@ async function assertDownlinkLive(page, label, timeoutMs) {
     await waitUntil(async () => (await screenTiles(pageA)) === 0, "A's screen tile gone", 15_000);
     console.log("   share started, rendered, stopped");
 
-    console.log("9. mute / camera-off presence + delivery…");
+    console.log("8. mute / camera-off presence + delivery…");
     // Mute: the badge appears on A's tile; the meter still shows (the
     // tap is pre-gain), but e2e asserts the presence signal only.
     await pageB.$eval(".call-mute", (el) => el.click());
@@ -358,7 +319,7 @@ async function assertDownlinkLive(page, label, timeoutMs) {
     await waitUntil(async () => !(await tileBadge(pageA, NAME_B, ".tile-cam")), "A's tile camera back");
     console.log("   badges follow presence; video delivery follows the catalog");
 
-    console.log("10. tab refresh: A reloads, token re-join…");
+    console.log("9. tab refresh: A reloads, token re-join…");
     await pageA.reload({ waitUntil: "domcontentloaded" });
     await waitUntil(async () => {
       const a = await presenceNames(pageA);
@@ -384,7 +345,7 @@ async function assertDownlinkLive(page, label, timeoutMs) {
     }, "B's downlink to A live after A's reload (re-announce)", 45_000);
     console.log("   identity, uplink and both downlinks restored");
 
-    console.log("11. walk-away: B leaves, A's session stops…");
+    console.log("10. walk-away: B leaves, A's session stops…");
     await pageB.keyboard.down("ArrowRight");
     await sleep(4_000);
     await pageB.keyboard.up("ArrowRight");

@@ -55,7 +55,7 @@ Browser A              campfire binary (one process, one port)          Browser 
 NDJSON (unchanged)  │   │  bubble state = SFU authorization        │ NDJSON
                     │   ▼
 /wt → …            └─ SFU (new `moq` module)
-/moq?ticket=…  ◄──►  │  track registry + per-track fan-out
+/moq/{ticket} ◄──►   │  track registry + per-track fan-out
 WebTransport (own    │  media tickets (minted by world on call_start)
 QUIC conn, 443/UDP)  ▼
 encode once:        h3 endpoint (existing quinn endpoint, same socket)
@@ -112,10 +112,10 @@ New module `crates/campfire-server/src/moq/`:
 - `fanout.rs` — per-track fan-out task: incoming object → each subscriber's
   outgoing stream; keyframe cache; behind-keyframe reset; per-subscriber
   backpressure.
-- `tickets.rs` — media tickets: random 32-byte id, 60 s TTL, maps to
-  `(user, room)`. Minted by `world` on `call_start` and on the reconnect
-  `hello` (fresh ticket each time); stored in the world or a small `Arc`
-  registry next to it.
+- `tickets.rs` — media tickets: random 32-byte id, 30 s TTL, single-use
+  (consumed on admission), maps to `(user, room)`. Minted by `world` on
+  `call_start` and on the reconnect `hello` (fresh ticket each time); stored
+  in the world or a small `Arc` registry next to it.
 
 Integration points (existing files):
 
@@ -159,7 +159,7 @@ New `client/src/call/moq.ts` (split as needed), built on the Phase 0
 libraries — the WebCodecs pipelines are **provided by `@moq/publish` /
 `@moq/watch`**, not hand-rolled:
 
-- `MoqSession` — `@moq/net` connection on `/moq?ticket=…` (WebTransport).
+- `MoqSession` — `@moq/net` connection on `/moq/{ticket}` (WebTransport).
 - **Uplink** (one per local stream): `@moq/publish` (or its headless
   `Publish.Broadcast` API below the `<moq-publish>` element) over
   `getUserMedia` / `getDisplayMedia`. Mute stops the published tracks; the
@@ -224,10 +224,15 @@ Helm values and README K8s section for stale TURN mentions.
 
 ## 9. Phases
 
-**Phase 0 — Spike** (`tools/moq-spike/`, automated; no app changes)
+**Phase 0 — Spike** (automated; no app changes)
 
-Two tiers, both scripted. A justfile target runs the whole matrix, emits
-JSON, and generates `docs/moq-spike-results.md`.
+_Tooling removed 2026-11-11 (superseded by the app build and the browser
+E2E). The tier design, decision rules and the findings in §10 stay as the
+record of what drove the SFU configuration._
+
+Two tiers, both scripted. A justfile target ran the whole matrix, emitted
+JSON, and generated `docs/moq-spike-results.md` (kept as the historical
+artifact).
 
 - **Tier 1 — no browser.** Spike binary on `127.0.0.1:4443/UDP` (reuses
   `certs/`): h3 + WebTransport on `/moq`, the moq-net SFU session over the
@@ -237,7 +242,7 @@ JSON, and generates `docs/moq-spike-results.md`.
   user+network namespace (`unshare -rn`, non-interactive, host `lo`
   untouched; 0/5/20 % loss + 100 ms jitter).
 - **Tier 2 — headless browser.** Playwright-driven headless Chromium
-  (dev-only dependency in `tools/moq-spike/`) with fake media
+  (dev-only dependency, now removed) with fake media
   (`--use-fake-ui-for-media-stream`
   `--use-fake-device-for-media-screen-capture`,
   `--autoplay-policy=no-user-gesture-required`): publisher tabs
@@ -550,7 +555,8 @@ JSON, and generates `docs/moq-spike-results.md`.
 
 ## 10. Phase 0 findings (Tier 1)
 
-Measured by the spike, in `tools/moq-spike/`, over `unshare -rn` netem
+Measured by the spike (since removed; the tool ran in `tools/moq-spike/`)
+over `unshare -rn` netem
 (0/5/20 % loss + 100 ms jitter, both directions) and the host (no loss).
 These are the reasons the media path needed non-default quinn/moq-net
 tuning, and the numbers behind the gate verdict in
@@ -621,7 +627,7 @@ just over the T5 gate; at `0.7` it measures 727 ms (results doc).
 - Quinn 0.11's **pacer is dead code** (constructed in `Path`, never consulted
   in the send path), so the congestion window is the only rate lever.
 
-`MediaCc` (`tools/moq-spike/src/cc.rs`) runs the window at
+`MediaCc` (was `tools/moq-spike/src/cc.rs`, since removed) runs the window at
 `max(128 KB floor, 3 × BDP)`, BDP = delivery-rate EWMA × **smoothed** RTT; it
 ignores isolated loss events and only halves on persistent congestion. That
 is safe on the spike's model (no bottleneck to protect); a production SFU on a

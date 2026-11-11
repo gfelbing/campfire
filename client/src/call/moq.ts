@@ -1,7 +1,7 @@
 //! MoQ call session (docs/moq-sfu.md §9, Phases 2–3): one session per call,
 //! both directions.
 //!
-//! One `@moq/net` connection on `/moq?ticket=…` carries the uplink (our
+//! One `@moq/net` connection on `/moq/{ticket}` carries the uplink (our
 //! `call/<room>/<user-id>.hang` broadcast: renditions `v` = camera, `a` =
 //! mic, `s` = screen while sharing) and every downlink (one `@moq/watch`
 //! pipeline per participant: Broadcast → Video Source/Decoder/Renderer →
@@ -28,7 +28,7 @@ import { Signal } from "@moq/signals";
 
 /** Options for one call session. */
 export interface MoqCallOpts {
-  /** Full `/moq?ticket=…` URL. */
+  /** Full `/moq/{ticket}` URL. */
   url: string;
   /** Our broadcast path: `call/<room>/<user-id>.hang`. */
   name: string;
@@ -67,7 +67,8 @@ export interface DownlinkView {
   jitter: number;
 }
 
-/** State exposed for the e2e harness and the dev loop (debug hook). */
+/** State exposed for the e2e harness (debug hook; the `build:e2e` client
+ *  only, C14). */
 export interface MoqDebugInfo {
   url: string;
   name: string;
@@ -77,7 +78,8 @@ export interface MoqDebugInfo {
   error: string | null;
 }
 
-/** Per-participant downlink state for the e2e harness (debug hook). */
+/** Per-participant downlink state for the e2e harness (debug hook; the
+ *  `build:e2e` client only, C14). */
 export interface MoqDownHook {
   status: DownlinkStatus;
   frames: number;
@@ -94,7 +96,10 @@ declare global {
   }
 }
 
+/** Write a patch into the e2e debug hook. No-op in the production bundle
+ *  (C14): the hook only exists in the `build:e2e` client. */
 function setHook(patch: Partial<MoqDebugInfo>): void {
+  if (!__CAMPFIRE_DEBUG__) return;
   window.__campfire_moq = {
     url: "",
     name: "",
@@ -243,15 +248,16 @@ export class MoqCall {
           opts.onLog(`moq session closed: ${err.message}`);
         }
       });
-      // The downlink hook is polled by the e2e harness; refresh at 1 Hz.
-      call.refreshHook();
-      call.hookTimer = window.setInterval(() => call.refreshHook(), 1000);
+      // 1 Hz timer: refreshes the e2e downlink hook (gated by the debug
+      // flag) and polls downlink status for the UI tile's state label.
+      call.refreshDownlinks();
+      call.hookTimer = window.setInterval(() => call.refreshDownlinks(), 1000);
       return call;
     } catch (err) {
       call.stop();
       const msg = String(err);
       setHook({ state: "failed", error: msg });
-      throw new Error(`moq call failed: ${msg}`);
+      throw new Error(`moq call failed: ${msg}`, { cause: err });
     }
   }
 
@@ -360,7 +366,7 @@ export class MoqCall {
     camEnabled.set(camSource.out.track.peek() === "v");
     scrEnabled.set(scrSource.out.track.peek() === "s");
     this.downlinks.set(id, d);
-    this.refreshHook();
+    this.refreshDownlinks();
     return this.viewOf(d);
   }
 
@@ -370,7 +376,7 @@ export class MoqCall {
     if (!d) return;
     this.downlinks.delete(id);
     this.teardown(d);
-    this.refreshHook();
+    this.refreshDownlinks();
   }
 
   /** Gate the uplink camera rendition (camera off / auto voice-only: the
@@ -460,7 +466,7 @@ export class MoqCall {
       window.clearInterval(this.hookTimer);
       this.hookTimer = null;
     }
-    window.__campfire_moq_down = {};
+    if (__CAMPFIRE_DEBUG__) window.__campfire_moq_down = {};
     setHook({ state: "stopped" });
   }
 
@@ -545,18 +551,24 @@ export class MoqCall {
     }
   }
 
-  private refreshHook(): void {
+  /** Poll downlink state once: notify the manager on a status transition
+   *  (it re-pushes the roster so the UI tile's state label updates) and,
+   *  in the e2e client only, refresh the `__campfire_moq_down` hook
+   *  (C14). */
+  private refreshDownlinks(): void {
     const down: Record<string, MoqDownHook> = {};
     for (const [id, d] of this.downlinks) {
       const v = this.viewOf(d);
-      down[id] = {
-        status: v.status,
-        frames: v.frames,
-        screenFrames: v.screenFrames,
-        audioBytes: v.audioBytes,
-        delay: v.delay,
-        jitter: v.jitter,
-      };
+      if (__CAMPFIRE_DEBUG__) {
+        down[id] = {
+          status: v.status,
+          frames: v.frames,
+          screenFrames: v.screenFrames,
+          audioBytes: v.audioBytes,
+          delay: v.delay,
+          jitter: v.jitter,
+        };
+      }
       // Notify the manager on a status transition (it re-pushes the
       // roster so the UI tile's state label updates).
       if (v.status !== d.lastStatus) {
@@ -564,6 +576,6 @@ export class MoqCall {
         this.onDownlinkChange?.(id, v.status);
       }
     }
-    window.__campfire_moq_down = down;
+    if (__CAMPFIRE_DEBUG__) window.__campfire_moq_down = down;
   }
 }

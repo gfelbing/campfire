@@ -1,8 +1,8 @@
 //! Phase 1 acceptance tests (docs/moq-sfu.md §9): the SFU wired into the
 //! production server. A spike-style client (moq-net over a `wtransport`
 //! WebTransport connection, exactly the Phase 0 tier-1 client) publishes
-//! and subscribes through the real `/moq` route with a minted media
-//! ticket, and a user outside the call is rejected.
+//! and subscribes through the real `/moq/{ticket}` route with a minted
+//! media ticket, and a user outside the call is rejected.
 //!
 //! The realtime `/wt` channel and the MoQ `/moq` channel are separate
 //! WebTransport connections to the same server, mirroring the production
@@ -140,20 +140,23 @@ fn endpoint() -> WtEndpoint {
     wtransport::Endpoint::client(config).unwrap()
 }
 
-/// Connect a MoQ session to `/moq`, retrying the whole WebTransport + MoQ
-/// handshake on failure (the h3 SETTINGS race, docs/moq-sfu.md / spike
-/// `connect_session`). A rejected ticket (403 before the upgrade) also
-/// surfaces here as a connect error, so a failed admission and a flaky
-/// connect are both retried — bounded, so a genuine rejection still fails.
+/// Connect a MoQ session to `/moq/{ticket}`, retrying the whole
+/// WebTransport and MoQ handshake on failure (the h3 SETTINGS race,
+/// `docs/moq-sfu.md` / spike `connect_session`). A rejected ticket (403
+/// before the upgrade) also surfaces here as a connect error, so a failed
+/// admission and a flaky connect are both retried — bounded, so a genuine
+/// rejection still fails. Tickets are single-use, so a retry only ever
+/// succeeds when the earlier attempt failed before the ticket was consumed
+/// (the h3 race does).
 async fn connect_moq(
     ep: &WtEndpoint,
     addr: SocketAddr,
     ticket: Option<&str>,
 ) -> Result<MoqClient, String> {
-    let mut url = format!("https://{addr}/moq");
-    if let Some(t) = ticket {
-        url.push_str(&format!("?ticket={t}"));
-    }
+    let url = match ticket {
+        Some(t) => format!("https://{addr}/moq/{t}"),
+        None => format!("https://{addr}/moq"),
+    };
     const MAX_ATTEMPTS: u32 = 40;
     let mut last_err = String::new();
     for _ in 1..=MAX_ATTEMPTS {

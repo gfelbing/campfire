@@ -67,6 +67,7 @@ pub async fn start_server_with_world() -> (
         metrics: metrics.clone(),
         moq,
         auth: None,
+        fallback: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
     };
     let app = campfire_server::api::router(state);
     tokio::spawn(campfire_server::run_endpoint_with_metrics(

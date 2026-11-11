@@ -53,8 +53,8 @@ export function attachKeys(): void {
 
 /** Desired velocity in tiles/s from the key state (walk 4, run 8 — README §5). */
 export function desiredVelocity(dtTiles: number): { vx: number; vy: number; moving: boolean } {
-  let vx = (keys.right ? 1 : 0) - (keys.left ? 1 : 0);
-  let vy = (keys.down ? 1 : 0) - (keys.up ? 1 : 0);
+  const vx = (keys.right ? 1 : 0) - (keys.left ? 1 : 0);
+  const vy = (keys.down ? 1 : 0) - (keys.up ? 1 : 0);
   if (vx === 0 && vy === 0) return { vx: 0, vy: 0, moving: false };
   const len = Math.hypot(vx, vy);
   const speed = keys.run ? 8 : 4;

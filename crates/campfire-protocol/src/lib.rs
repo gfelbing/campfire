@@ -225,6 +225,13 @@ pub enum ServerMsg {
         id: String,
         on: bool,
     },
+    /// The user stepped onto an `exitUrl` zone: the server resolved the URL
+    /// to a target map id (README roadmap "Map enhancements"; the server is
+    /// the rule owner) and the client navigates there with the same name
+    /// and color.
+    Navigate {
+        map: String,
+    },
     Error {
         code: ErrorCode,
     },
