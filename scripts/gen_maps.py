@@ -49,16 +49,11 @@ def write_png(path, width, height, pixels):
 
 
 def tile_pixels(base):
-    """One 32x32 tile: flat color with a 1px darker outline so the grid reads."""
-    dark = tuple(max(0, c - 30) for c in base)
-    rows = []
-    for y in range(TILE_SIZE):
-        row = []
-        for x in range(TILE_SIZE):
-            edge = x == 0 or y == 0 or x == TILE_SIZE - 1 or y == TILE_SIZE - 1
-            row.append(dark if edge else base)
-        rows.append(row)
-    return rows
+    """One 32x32 tile: a flat color. No per-tile outline — a 1px dark edge
+    around every tile reads as black grid lines between tiles in the
+    browser (it flickers with the sub-pixel camera offset), and adjacent
+    same-color tiles should run together seamlessly."""
+    return [[base] * TILE_SIZE for _ in range(TILE_SIZE)]
 
 
 def write_tileset():
