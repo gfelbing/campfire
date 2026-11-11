@@ -27,7 +27,7 @@ use std::time::Instant;
 
 use axum::extract::{Query, State};
 use axum::Extension;
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use moq_net::stats::{Registry as StatsRegistry, Tier};
 use serde::Deserialize;
@@ -122,10 +122,19 @@ pub struct MoqQuery {
 pub async fn handle_moq(
     State(state): State<crate::api::AppState>,
     Extension(conn): Extension<quinn::Connection>,
+    headers: HeaderMap,
     Query(query): Query<MoqQuery>,
     upgrade: h3_axum::WebTransportUpgrade,
 ) -> Response {
     let sfu = &state.moq;
+    // 0. Auth (README §11): a valid session cookie is required when auth is
+    //    on. The ticket below is the primary gate (it is minted only for a
+    //    user already in a call, which itself needs auth); this is
+    //    defense-in-depth against a leaked ticket.
+    if let Err(status) = crate::api::enforce_auth(&state, &headers) {
+        sfu.metrics.moq_session_reject();
+        return status.into_response();
+    }
     // 1. Ticket: unknown, missing, or expired.
     let Some(ticket) = query.ticket else {
         sfu.metrics.moq_session_reject();

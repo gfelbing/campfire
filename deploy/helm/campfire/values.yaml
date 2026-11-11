@@ -89,3 +89,29 @@ resources:
 
 # Optional extra args passed to the campfire binary verbatim.
 extraArgs: []
+
+# OpenID Connect authentication (README §11, authorization-code flow for a
+# confidential client). When enabled, a visitor must sign in through the
+# configured IdP before joining a room; the display name is forced from the
+# IdP's id_token (a client can no longer choose its own). The redirect URI is
+# derived from `domain` as `https://<domain>/auth/callback` — it must be
+# registered with the IdP exactly.
+auth:
+  openid:
+    enabled: false
+    client:
+      # The issuer (the id_token's `iss`; discovery is fetched from
+      # `<issuer>/.well-known/openid-configuration`).
+      issuer: ""
+      # The client id registered with the IdP.
+      id: ""
+      # The client secret. Prefer `secretRef` (a Kubernetes Secret) over
+      # putting the secret in values: values.yaml is usually in VCS. If both
+      # are set, `secretRef` wins.
+      secret: ""
+      secretRef:
+        # Name of a Kubernetes Secret holding the client secret. Empty = use
+        # the inline `secret` above.
+        name: ""
+        # Key inside that Secret.
+        key: client-secret

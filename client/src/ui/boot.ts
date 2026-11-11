@@ -18,10 +18,43 @@ const COLORS = ["#e05f38", "#4a90d9", "#58a858", "#9b59b6", "#d4a017", "#16a2a2"
  *
  *  Room switching (README §11 Phase 7) reloads the page with the choices in
  *  the URL (`/?room=…&name=…&color=…`): when all three are present the form
- *  is skipped entirely and the values are returned as-is. */
+ *  is skipped entirely and the values are returned as-is.
+ *
+ *  Auth (README §11): when the server has OpenID Connect enabled, the name is
+ *  forced from the signed-in identity and a visitor without a session is
+ *  redirected to the IdP. That check runs first, before the URL fast path. */
 export function boot(): Promise<BootOptions> {
   const root = document.getElementById("boot")!;
+  return resolveForcedName().then((forcedName) => runBoot(root, forcedName));
+}
 
+/** Probe `/api/v1/auth` (README §11).
+ *
+ *  - `null` — auth is disabled (or the probe failed), so the name is free.
+ *  - a string — the signed-in identity's name, which overrides whatever the
+ *    URL or form would have chosen (the server enforces it anyway).
+ *
+ *  When auth is on and the visitor has no session, the page is redirected to
+ *  the IdP and this promise never settles (the document is navigating away).
+ */
+async function resolveForcedName(): Promise<string | null> {
+  let data: { enabled: boolean; name?: string };
+  try {
+    const res = await fetch("/api/v1/auth", { credentials: "same-origin" });
+    if (!res.ok) return null;
+    data = (await res.json()) as { enabled: boolean; name?: string };
+  } catch {
+    return null; // probe failed (e.g. an older server): degrade to no-auth
+  }
+  if (!data.enabled) return null;
+  if (data.name) return data.name;
+  // Auth on, no session: send the visitor to the IdP, returning to this page.
+  const returnTo = window.location.pathname + window.location.search;
+  window.location.replace(`/auth/login?return_to=${encodeURIComponent(returnTo)}`);
+  return new Promise<string>(() => {}); // page is navigating away
+}
+
+function runBoot(root: HTMLElement, forcedName: string | null): Promise<BootOptions> {
   const params = new URLSearchParams(window.location.search);
   // The map id can be in the path: `/play/interiors/office.tmj` →
   // room `interiors/office` (the file's path under `maps/`, extension
@@ -38,7 +71,9 @@ export function boot(): Promise<BootOptions> {
     return segments.join("/");
   })();
   const urlRoom = pathRoom ? decodeURIComponent(pathRoom) : params.get("room");
-  const urlName = params.get("name")?.trim();
+  // With auth on, the name comes from the signed-in identity (the server
+  // enforces it), not from the URL.
+  const urlName = forcedName ?? params.get("name")?.trim();
   const urlColor = params.get("color");
   if (urlRoom && urlName && urlColor) {
     root.style.display = "none";
@@ -73,11 +108,17 @@ export function boot(): Promise<BootOptions> {
   const error = root.querySelector<HTMLElement>("#error")!;
   const form = root.querySelector<HTMLFormElement>("#join-form")!;
 
-  // Restore the last used name.
-  try {
-    nameInput.value = localStorage.getItem(NAME_KEY) ?? "";
-  } catch {
-    // storage unavailable (private mode) — no persisted name
+  // With auth on the name is the signed-in identity: prefilled, read-only.
+  // Otherwise restore the last used name.
+  if (forcedName) {
+    nameInput.value = forcedName;
+    nameInput.readOnly = true;
+  } else {
+    try {
+      nameInput.value = localStorage.getItem(NAME_KEY) ?? "";
+    } catch {
+      // storage unavailable (private mode) — no persisted name
+    }
   }
 
   // Avatar color swatches.
@@ -145,10 +186,13 @@ export function boot(): Promise<BootOptions> {
         return;
       }
       error.textContent = "";
-      try {
-        localStorage.setItem(NAME_KEY, name);
-      } catch {
-        // ignore storage failures
+      // Don't persist an auth-forced name as the "last used" one.
+      if (!forcedName) {
+        try {
+          localStorage.setItem(NAME_KEY, name);
+        } catch {
+          // ignore storage failures
+        }
       }
       // From the landing page, the map id goes into the path (reload keeps
       // the name and color); with a path room the join happens right here.

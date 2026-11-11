@@ -49,6 +49,34 @@ pub struct Config {
     /// (the port then falls back to `--listen`'s).
     #[arg(long, value_parser = parse_external)]
     pub external: Option<SocketAddr>,
+
+    /// Enable OpenID Connect authentication (README §11). When enabled, a
+    /// visitor must sign in through the IdP before joining, and the display
+    /// name is forced from the id_token. Requires the four
+    /// `--auth-openid-*` fields below.
+    #[arg(long)]
+    pub auth_openid_enabled: bool,
+
+    /// OIDC issuer — the id_token's `iss`; discovery is fetched from
+    /// `<issuer>/.well-known/openid-configuration`. Required when auth is on.
+    #[arg(long)]
+    pub auth_openid_issuer: Option<String>,
+
+    /// OIDC client id, registered with the IdP. Required when auth is on.
+    #[arg(long)]
+    pub auth_openid_client_id: Option<String>,
+
+    /// OIDC client secret (confidential client). May also come from the
+    /// `CAMPFIRE_AUTH_CLIENT_SECRET` env var — the Helm chart injects it from
+    /// a Kubernetes Secret so the secret never sits in the manifest.
+    /// Required when auth is on.
+    #[arg(long, env = "CAMPFIRE_AUTH_CLIENT_SECRET")]
+    pub auth_openid_client_secret: Option<String>,
+
+    /// Absolute redirect URI registered with the IdP (`…/auth/callback`).
+    /// Required when auth is on.
+    #[arg(long)]
+    pub auth_openid_redirect_uri: Option<String>,
 }
 
 /// `--external` accepts `ip:port` or a bare `ip`. A bare IP is stored with
@@ -64,9 +92,49 @@ fn parse_external(s: &str) -> Result<SocketAddr, String> {
     Ok(SocketAddr::new(ip, 0))
 }
 
+/// The resolved OIDC client configuration (auth enabled).
+#[derive(Debug, Clone)]
+pub struct AuthOpenId {
+    pub issuer: String,
+    pub client_id: String,
+    pub client_secret: String,
+    pub redirect_uri: String,
+}
+
 impl Config {
     pub fn idle_timeout(&self) -> Duration {
         Duration::from_secs(self.idle_timeout_secs)
+    }
+
+    /// The resolved OIDC configuration, `None` when auth is disabled. Errors
+    /// when auth is enabled but a required field is missing (fail fast at
+    /// startup, not mid-handshake).
+    pub fn auth_openid(&self) -> anyhow::Result<Option<AuthOpenId>> {
+        if !self.auth_openid_enabled {
+            return Ok(None);
+        }
+        let issuer = self
+            .auth_openid_issuer
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("--auth-openid-issuer is required when --auth-openid-enabled"))?;
+        let client_id = self
+            .auth_openid_client_id
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("--auth-openid-client-id is required when --auth-openid-enabled"))?;
+        let client_secret = self
+            .auth_openid_client_secret
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("--auth-openid-client-secret (or $CAMPFIRE_AUTH_CLIENT_SECRET) is required when --auth-openid-enabled"))?;
+        let redirect_uri = self
+            .auth_openid_redirect_uri
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("--auth-openid-redirect-uri is required when --auth-openid-enabled"))?;
+        Ok(Some(AuthOpenId {
+            issuer,
+            client_id,
+            client_secret,
+            redirect_uri,
+        }))
     }
 
     /// Address to advertise to peers (`--external` or `listen`). A bare-IP

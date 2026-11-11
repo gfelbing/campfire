@@ -17,7 +17,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use axum::Extension;
 use axum::extract::State;
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use bytes::Bytes;
 use campfire_protocol::{
@@ -69,8 +69,16 @@ pub(crate) const MAX_AVATAR_CHARS: usize = 16;
 pub async fn handle_wt(
     State(state): State<AppState>,
     Extension(conn): Extension<quinn::Connection>,
+    headers: HeaderMap,
     upgrade: h3_axum::WebTransportUpgrade,
 ) -> Response {
+    // Auth (README §11): when enabled, a valid session cookie is required
+    // before the upgrade, and the IdP name is forced onto the join. A 401
+    // here (before `accept`) rejects the upgrade outright.
+    let forced_name = match crate::api::enforce_auth(&state, &headers) {
+        Ok(name) => name,
+        Err(status) => return status.into_response(),
+    };
     match upgrade.accept().await {
         Ok(session) => {
             let session_id = session.session_id();
@@ -80,6 +88,7 @@ pub async fn handle_wt(
                 session,
                 conn,
                 state.metrics.clone(),
+                forced_name,
             ));
             StatusCode::OK.into_response()
         }
@@ -132,6 +141,7 @@ async fn session_task(
     session: WebTransportSession,
     conn: quinn::Connection,
     metrics: Metrics,
+    forced_name: Option<String>,
 ) {
     metrics.session_open();
     // (room, user id) once joined, so the datagram tasks can attribute
@@ -204,7 +214,16 @@ async fn session_task(
             // session's disconnect must not clobber a newer session that
             // already restored the same token.
             let session_id = world.next_session_id();
-            run_command_stream(&world, stream, who, dtx, session_id, metrics.clone()).await
+            run_command_stream(
+                &world,
+                stream,
+                who,
+                dtx,
+                session_id,
+                metrics.clone(),
+                forced_name,
+            )
+            .await
         }
         None => debug!("no command stream"),
     }
@@ -227,6 +246,7 @@ async fn run_command_stream<S>(
     dtx: mpsc::UnboundedSender<Vec<u8>>,
     session_id: u64,
     metrics: Metrics,
+    forced_name: Option<String>,
 ) where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + 'static,
 {
@@ -294,6 +314,7 @@ async fn run_command_stream<S>(
                         &dtx,
                         session_id,
                         &metrics,
+                        forced_name.as_deref(),
                     ) {
                         break 'read;
                     }
@@ -331,6 +352,7 @@ fn dispatch(
     dtx: &mpsc::UnboundedSender<Vec<u8>>,
     session_id: u64,
     metrics: &Metrics,
+    forced_name: Option<&str>,
 ) -> bool {
     match campfire_protocol::from_line::<ClientMsg>(line) {
         Ok(ClientMsg::Join {
@@ -345,10 +367,19 @@ fn dispatch(
             if !valid_room(&room) {
                 return send(tx, ErrorCode::BadMessage);
             }
-            let name = name.trim();
-            if name.is_empty() || name.len() > MAX_NAME_CHARS {
-                return send(tx, ErrorCode::NameTooLong);
-            }
+            // Auth (README §11): the IdP-forced name overrides the client's
+            // (it is already trimmed and capped to MAX_NAME_CHARS).
+            let name = match forced_name {
+                Some(forced) => forced.to_owned(),
+                None => {
+                    let name = name.trim();
+                    if name.is_empty() || name.len() > MAX_NAME_CHARS {
+                        return send(tx, ErrorCode::NameTooLong);
+                    }
+                    name.to_owned()
+                }
+            };
+            let name = name.as_str();
             if let Some(avatar) = &avatar
                 && avatar.color.len() > MAX_AVATAR_CHARS
             {

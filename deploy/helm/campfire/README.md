@@ -64,6 +64,37 @@ passes `--maps-dir` explicitly:
   (`maps.hostPath.path`, default `/srv/campfire/maps`) instead; the PVC is
   not created. Pin the pod to the node that has the directory.
 
+## Authentication (OpenID Connect)
+
+Disabled by default. When enabled, a visitor must sign in through the
+configured IdP (authorization-code flow, confidential client) before joining
+a room, and the display name is **forced** from the IdP's `id_token` — a
+client can no longer choose its own.
+
+```yaml
+auth:
+  openid:
+    enabled: true
+    client:
+      issuer: https://idp.example.com   # the id_token's `iss`; discovery is
+                                        # fetched from its /.well-known/...
+      id: campfire
+      secretRef:                        # preferred: a Kubernetes Secret
+        name: campfire-oidc
+        key: client-secret
+      # secret: "inline-value"          # or inline (secretRef wins if both set)
+```
+
+Notes:
+
+- The redirect URI is derived from `domain` as
+  `https://<domain>/auth/callback` and must be registered with the IdP
+  exactly.
+- Prefer `secretRef` over the inline `secret`: values.yaml is usually in
+  VCS, the secret never is.
+- Sessions live in the server process (in-memory) behind an HttpOnly
+  `campfire_auth` cookie (8 h TTL); a pod restart signs everyone out.
+
 ## Key values
 
 ```yaml
@@ -89,6 +120,8 @@ service: { type: ClusterIP }
 resources: {}
 extraArgs: []                      # extra campfire CLI args, e.g. [--log-json]
 maps: { kind: persistentVolume }   # or hostPath: { path: /srv/campfire/maps }
+auth:                              # OpenID Connect; see "Authentication"
+  openid: { enabled: false }
 ```
 
 Note: the Traefik CRDs (routes) live in the chart's namespace and reference

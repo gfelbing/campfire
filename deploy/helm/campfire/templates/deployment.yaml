@@ -42,9 +42,33 @@ spec:
             {{- end }}
             - --maps-dir
             - {{ .Values.maps.mountPath | quote }}
+            {{- if .Values.auth.openid.enabled }}
+            # OpenID Connect auth (README §11). The client secret arrives via
+            # the env var below (never as an arg: args leak into logs and
+            # `kubectl describe`).
+            - --auth-openid-enabled
+            - --auth-openid-issuer
+            - {{ .Values.auth.openid.client.issuer | quote }}
+            - --auth-openid-client-id
+            - {{ .Values.auth.openid.client.id | quote }}
+            - --auth-openid-redirect-uri
+            - "https://{{ .Values.domain }}/auth/callback"
+            {{- end }}
             {{- range .Values.extraArgs }}
             - {{ . | quote }}
             {{- end }}
+          {{- if .Values.auth.openid.enabled }}
+          env:
+            - name: CAMPFIRE_AUTH_CLIENT_SECRET
+              {{- if .Values.auth.openid.client.secretRef.name }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.auth.openid.client.secretRef.name }}
+                  key: {{ .Values.auth.openid.client.secretRef.key | default "client-secret" }}
+              {{- else }}
+              value: {{ .Values.auth.openid.client.secret | quote }}
+              {{- end }}
+          {{- end }}
           ports:
             {{- /* one port number, both transports — see Dockerfile */}}
             - name: https

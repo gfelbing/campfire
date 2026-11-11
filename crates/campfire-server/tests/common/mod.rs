@@ -66,6 +66,7 @@ pub async fn start_server_with_world() -> (
         static_dir: None,
         metrics: metrics.clone(),
         moq,
+        auth: None,
     };
     let app = campfire_server::api::router(state);
     tokio::spawn(campfire_server::run_endpoint_with_metrics(
