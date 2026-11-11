@@ -62,6 +62,8 @@ export interface CallUiHooks {
   onLocalScreen: (on: boolean) => void;
   /** A local log/system line (errors, connection issues). */
   onLog: (text: string) => void;
+  /** Bubble notification sound: `"enter"` on entering, `"leave"` on leaving. */
+  onCallSound: (sound: "enter" | "leave") => void;
 }
 
 /** The signaling surface the manager needs (implemented by `Connection`). */
@@ -247,6 +249,7 @@ export class CallManager {
   onCallLeave(id: string): void {
     if (this.phase.p !== "in-call") return;
     if (id === this.selfId) {
+      this.hooks.onCallSound("leave");
       this.reset("you left the call");
       return;
     }
@@ -261,6 +264,10 @@ export class CallManager {
   /** The room's call ended (room-wide). */
   onCallEnd(reason: string): void {
     if (this.phase.p === "idle") return;
+    // Leave sound only if we had actually entered: an in-flight rejoin
+    // ("joining") never did, and a self `call_leave` that reached us
+    // first already played its own (its reset made us "idle").
+    if (this.phase.p === "in-call") this.hooks.onCallSound("leave");
     this.reset(`call ended (${reason})`);
   }
 
@@ -356,6 +363,7 @@ export class CallManager {
     this.setPhase({ p: "in-call", participants: others });
     this.maybeAutoVoiceOnly();
     this.pushPeers();
+    this.hooks.onCallSound("enter");
     this.startSession(ticket);
   }
 
