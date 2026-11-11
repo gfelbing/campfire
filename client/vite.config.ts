@@ -17,6 +17,18 @@ export default defineConfig({
     outDir: "dist",
     emptyOutDir: true,
     target: "es2022",
+    rollupOptions: {
+      onwarn(warning, defaultHandler) {
+        // zod (via @moq/*) writes `@__PURE__` annotations where Rollup
+        // cannot parse them — the package targets esbuild, whose parser
+        // accepts them. Rollup drops the comment and warns; the bundle
+        // is correct, so keep the build log clean for our own sources.
+        if (warning.code === "INVALID_ANNOTATION" && warning.id?.includes("node_modules/zod/")) {
+          return;
+        }
+        defaultHandler(warning);
+      },
+    },
   },
   server: {
     port: 5173,
