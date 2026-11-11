@@ -24,9 +24,10 @@ COPY rust-toolchain.toml Cargo.toml Cargo.lock ./
 COPY crates ./crates
 # The tools are workspace members: cargo loads every member's manifest
 # before building, so their sources must be present even though only the
-# server is compiled.
+# server is compiled. third_party/moq-net is not a member but the
+# [patch.crates-io] path in Cargo.toml must exist for cargo to load.
 COPY tools/loadtest ./tools/loadtest
-COPY tools/moq-spike ./tools/moq-spike
+COPY third_party/moq-net ./third_party/moq-net
 COPY client ./client
 COPY maps ./maps
 # BuildKit-style cache mounts (docker ≥ 19.03 with BuildKit, podman ≥ 2.0):
