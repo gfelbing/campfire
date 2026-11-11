@@ -1,7 +1,7 @@
 {
   "name": "campfire-client",
   "private": true,
-  "version": "0.0.1",
+  "version": "0.0.5",
   "type": "module",
   "description": "Campfire web client: TS + Vite + PixiJS, built and embedded into the server binary.",
   "scripts": {
