@@ -2,8 +2,8 @@
 """Generate the bundled Campfire maps as Tiled JSON (orthogonal).
 
 Layers:
-- ground:     visual layer rendered by the client (tileset `campfire`, 3 tiles:
-              0 water, 1 floor, 2 wall/rock)
+- ground:     visual layer rendered by the client (tileset `campfire`, GID 1
+              water, 2 floor, 3 wall/rock; GID 0 is the "no tile" sentinel)
 - collision:  walkability layer used by the server (GID 0 walkable, non-zero
               blocked) — the client ignores it
 
@@ -18,10 +18,20 @@ import zlib
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 OUT = os.path.join(ROOT, "maps")
 
-# Tile colors (r, g, b) for the 3-tile tileset.
-WATER = (29, 53, 87)
-FLOOR = (233, 228, 216)
-WALL = (74, 78, 87)
+# The tileset image holds the 3 ground tiles in this order (top to bottom);
+# the tileset's firstgid is 1, so the tiles' GIDs are 1, 2, 3. GID 0 is the
+# "no tile" sentinel and must never be used for a visible tile (it renders
+# as empty background).
+WATER_GID = 1
+FLOOR_GID = 2
+WALL_GID = 3
+
+# Tile colors (r, g, b) for the 3-tile tileset, in image order.
+TILE_COLORS = [
+    (29, 53, 87),     # water
+    (233, 228, 216),  # floor
+    (74, 78, 87),     # wall/rock
+]
 TILE_SIZE = 32
 
 
@@ -59,7 +69,7 @@ def tile_pixels(base):
 def write_tileset():
     """One self-contained tiles.png per map directory (each map carries
     its own tilesets; nothing lives in client/src/assets)."""
-    tiles = [WATER, FLOOR, WALL]
+    tiles = TILE_COLORS
     pixels = []
     for t in tiles:
         pixels.extend(tile_pixels(t))
@@ -153,7 +163,7 @@ for x in range(14, 26):
     if x != 19:
         collision[14][x] = 1
 # Visual: floor everywhere, walls where the collision says so.
-ground = [[2 if collision[y][x] else 1 for x in range(w)] for y in range(h)]
+ground = [[WALL_GID if collision[y][x] else FLOOR_GID for x in range(w)] for y in range(h)]
 save("office.json", tiled(w, h, ground, collision))
 
 # --- island: 36x28, water ring + a small rock cluster ----------------------
@@ -177,11 +187,11 @@ for y in range(h):
         if collision[y][x] == 1 and (
             x == 0 or x == w - 1 or y == 0 or y == h - 1
         ):
-            row.append(0)  # water
+            row.append(WATER_GID)  # water
         elif collision[y][x] == 1:
-            row.append(2)  # rock
+            row.append(WALL_GID)  # rock
         else:
-            row.append(1)  # floor
+            row.append(FLOOR_GID)  # floor
     ground.append(row)
 save("island.json", tiled(w, h, ground, collision))
 
