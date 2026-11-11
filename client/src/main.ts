@@ -3,6 +3,7 @@
 
 import { CallManager } from "./call/manager";
 import { createCallUI } from "./call/callui";
+import { playCallSound } from "./call/sound";
 import { attachKeys, desiredVelocity, keys } from "./input/keys";
 import { Connection } from "./net/connection";
 import type { ChatMsg, Dir, MovementBatch, UserBrief } from "./net/types";
@@ -328,6 +329,7 @@ async function main(): Promise<void> {
     onLocalMute: (a, v) => callUI.setLocalMute(a, v),
     onLocalScreen: (on) => callUI.setLocalScreen(on),
     onLog: (t) => chat?.system(t),
+    onCallSound: (s) => playCallSound(s),
   }, opts.room);
   const status = createStatus(
     sidebar.pane("menu"),
