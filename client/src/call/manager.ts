@@ -42,6 +42,10 @@ export interface PeerView {
   /** The screen-share downlink's paint target (only while they share). */
   screen: HTMLCanvasElement | null;
   state: DownlinkState;
+  /** Downlink playback delay from the live edge, ms (0 while no downlink). */
+  delay: number;
+  /** Downlink jitter buffer depth, ms (0 while no downlink). */
+  jitter: number;
   /** Presence from `call_mute` (default on). */
   audioOn: boolean;
   videoOn: boolean;
@@ -98,6 +102,9 @@ export class CallManager {
   /** Monotonic guard for in-flight session starts (a reset must not let a
    *  late start attach). */
   private sessionSeq = 0;
+  /** 1 s refresh of the tiles' latency labels while in the call (the
+   *  downlink delay/jitter move on their own, not with roster events). */
+  private statsTimer: number | null = null;
   /** Room name (broadcast path `call/<room>/<user-id>.hang`). */
   private room: string;
 
@@ -456,6 +463,8 @@ export class CallManager {
           cameraStream: dl?.stream ?? null,
           screen: pres.screen ? (dl?.screenCanvas ?? null) : null,
           state: dl?.status ?? "subscribing",
+          delay: dl?.delay ?? 0,
+          jitter: dl?.jitter ?? 0,
           audioOn: pres.audio,
           videoOn: pres.video,
           screenOn: pres.screen,
@@ -466,6 +475,15 @@ export class CallManager {
 
   private setPhase(phase: CallPhase): void {
     this.phase = phase;
+    // The tiles' latency labels refresh on a 1 s tick while in the call:
+    // the downlink delay/jitter move on their own, not with roster or
+    // presence events, so a periodic re-push keeps them current.
+    if (phase.p === "in-call" && this.statsTimer === null) {
+      this.statsTimer = window.setInterval(() => this.pushPeers(), 1000);
+    } else if (phase.p !== "in-call" && this.statsTimer !== null) {
+      window.clearInterval(this.statsTimer);
+      this.statsTimer = null;
+    }
     this.hooks.onPhase(phase);
   }
 
