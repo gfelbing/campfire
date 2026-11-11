@@ -54,6 +54,11 @@ export type ConnStatus = "connected" | "reconnecting" | "disconnected";
 
 const BACKOFF_MS = [1000, 2000, 4000, 8000, 16000, 30000];
 
+/// Keepalive cadence (README §5): the server reaps a command stream idle
+/// for 300 s, so 25 s leaves a wide margin. The ping writes through
+/// whatever transport is current, so a reconnect needs no restart.
+const PING_INTERVAL_MS = 25_000;
+
 export class Connection {
   private transport: WTConn | SSEConn | null = null;
   private attempt = 0;
@@ -62,6 +67,12 @@ export class Connection {
   /** Generation counter: cancels a pending reconnect timer when the
    *  connection is closed or the page enters the back/forward cache. */
   private reconnectGen = 0;
+  /** The transport generation whose death we already handled. A single
+   *  WebTransport death reports itself through several readers at once
+   *  (`closed`, the command stream and the datagrams); dedupe on the
+   *  generation so exactly one reconnect is scheduled per death, not one
+   *  per reporter. */
+  private downGen = 0;
   /** Whether the bfcache `pagehide`/`pageshow` hooks are installed. */
   private bfcacheHooked = false;
   private closing = false;
@@ -75,6 +86,8 @@ export class Connection {
    *  ghost behind for the reconnect window. Session-scoped storage means a
    *  fresh browser session correctly starts as a new user. */
   private token = "";
+  /** Keepalive ping timer (README §5); see `PING_INTERVAL_MS`. */
+  private pingTimer: number | null = null;
 
   constructor(
     private room: string,
@@ -120,12 +133,32 @@ export class Connection {
         }
       });
     }
+    this.startPing();
     this.connectOnce();
+  }
+
+  /** Send a keepalive every `PING_INTERVAL_MS` (README §5): a stationary
+   *  user sends no movement or chat, and the server reaps a command stream
+   *  idle for 300 s — without the ping, such a session (and with it the
+   *  identity and position) is lost after the 10 s reconnect window. */
+  private startPing(): void {
+    if (this.pingTimer !== null) return;
+    this.pingTimer = window.setInterval(() => {
+      this.transport?.sendMsg({ t: "ping" });
+    }, PING_INTERVAL_MS);
+  }
+
+  private stopPing(): void {
+    if (this.pingTimer !== null) {
+      window.clearInterval(this.pingTimer);
+      this.pingTimer = null;
+    }
   }
 
   close(): void {
     this.reconnectGen += 1;
     this.closing = true;
+    this.stopPing();
     this.transport?.close();
     this.transport = null;
   }
@@ -196,6 +229,8 @@ export class Connection {
    *  (older generation) are ignored. */
   onTransportDown(gen: number): void {
     if (this.closing || gen !== this.connGen) return;
+    if (gen === this.downGen) return; // this death already handled
+    this.downGen = gen;
     this.transport = null;
     const pending = this.reconnectGen;
     const delay = BACKOFF_MS[Math.min(this.attempt, BACKOFF_MS.length - 1)];

@@ -229,7 +229,7 @@ async function assertDownlinkLive(page, label, timeoutMs) {
 
     console.log("2. presence settled (room clean: exactly A + B)…");
     // A run that ended seconds earlier may still be in the room: its
-    // avatars sit on the spawn tile through the server's 10 s reconnect
+    // avatars sit on the spawn tile through the server's 30 s reconnect
     // window (longer if a headless close left the QUIC connection open —
     // worst case observed ~90 s), and they would join our bubble and keep
     // the call alive after our B walks away. Wait for them to drain (own
@@ -392,7 +392,7 @@ async function assertDownlinkLive(page, label, timeoutMs) {
     // re-form around A, so "stopped" is a terminal state (a B that
     // rejoined within bubble radius would legitimately start a fresh call
     // and uplink). It also covers a lost walk-away (datagrams are
-    // unreliable): B's seat then drains with its 10 s reconnect window and
+    // unreliable): B's seat then drains with its 30 s reconnect window and
     // the call ends at the purge.
     await pageB.close();
     await waitUntil(
@@ -401,7 +401,7 @@ async function assertDownlinkLive(page, label, timeoutMs) {
         return h && h.state === "stopped";
       },
       "A's session stopped after B left",
-      40_000,
+      60_000,
     );
     console.log("   session torn down with the call");
 

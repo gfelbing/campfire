@@ -101,7 +101,11 @@ export type ClientMsg =
   | { t: "call_mute"; audio: boolean; video: boolean }
   /** Presence: we started/stopped screen sharing (camera track replaced). */
   | { t: "call_screen"; on: boolean }
-  | { t: "call_leave" };
+  | { t: "call_leave" }
+  /** Keepalive (README §5): the server ignores it; the stream activity
+   *  alone resets the server's idle timeout, so a stationary user keeps
+   *  their session (and identity + position) alive. */
+  | { t: "ping" };
 
 // --- datagrams -------------------------------------------------------------
 
