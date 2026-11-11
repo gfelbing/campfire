@@ -2,7 +2,7 @@
 //!
 //! A single [`World`] behind `Arc<Mutex<..>>` is plenty for Phase 3: the lock
 //! is held only for short, non-awaiting mutations. A 50 ms tick task
-//! (spawend by [`start_ticking`]) batches every dirty member into one
+//! (spawned by [`start_ticking_with`]) batches every dirty member into one
 //! movement datagram per room (README §5); per-room owner tasks from README §7
 //! are the next step if the lock ever shows up in a profile.
 
@@ -226,18 +226,6 @@ impl World {
         &self.tickets
     }
 
-    /// Mint a media ticket for `user` when they sit in a call in `room`
-    /// (docs/moq-sfu.md §5). `None` for bystanders.
-    pub fn mint_call_ticket(&self, room: &str, user: &str) -> Option<String> {
-        let rooms = self.rooms.lock().unwrap();
-        let entry = rooms.get(room)?;
-        let call = entry
-            .calls
-            .iter()
-            .find(|c| c.participants.contains_key(user))?;
-        Some(self.tickets.mint(user, room, call.id))
-    }
-
     /// The SFU's CONNECT check (docs/moq-sfu.md §5): the ticket's call must
     /// still exist in its room with the ticket's user in it.
     pub fn call_active(&self, room: &str, call_id: u64, user: &str) -> bool {
@@ -416,6 +404,11 @@ impl World {
         let brief = UserBrief {
             id: id.clone(),
             name: name.to_owned(),
+            color: room_entry
+                .users
+                .get(&id)
+                .and_then(|m| m.avatar.as_ref())
+                .map(|a| a.color.clone()),
         };
         for (uid, m) in &room_entry.users {
             if uid != &id {
@@ -780,13 +773,8 @@ impl World {
     }
 }
 
-/// Spawn the 50 ms tick loop (README §5); returns its handle so the caller
-/// can stop it.
-pub fn start_ticking(world: World) -> tokio::task::JoinHandle<()> {
-    start_ticking_with(world, crate::metrics::Metrics::new())
-}
-
-/// [`start_ticking`], with tick-duration metrics (README §11 Phase 8).
+/// Spawn the 50 ms tick loop (README §5) with tick-duration metrics
+/// (README §11 Phase 8); returns its handle so the caller can stop it.
 pub fn start_ticking_with(
     world: World,
     metrics: crate::metrics::Metrics,
@@ -1155,6 +1143,7 @@ fn user_snapshot(entry: &Room, map: Option<&campfire_maps::MapData>) -> Vec<User
                     .iter()
                     .any(|z| z.silent && z.contains(m.pos.0, m.pos.1))
             }),
+            color: m.avatar.as_ref().map(|a| a.color.clone()),
         })
         .collect()
 }
@@ -1458,7 +1447,6 @@ mod tests {
         while a.rx.try_recv().is_ok() {} // drain join noise
         while b.rx.try_recv().is_ok() {}
         // a stands in the silent zone (tiles 0..2, 0..2), b right outside it —
-        // close enough for a bubble if a were eligible.
         // close enough for a bubble if a were eligible.
         place(&world, "zonetest", &a.id, 1.5, 1.5);
         place(&world, "zonetest", &b.id, 3.5, 1.5);

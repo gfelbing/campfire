@@ -1,0 +1,99 @@
+# PR / main checks: Rust (fmt, clippy, tests), the client build (tsc + vite),
+# and the headless e2e suite (README §11 Phase 9). The `docker` workflow only
+# builds + pushes on version tags; this catches regressions before a tag.
+
+name: check
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: check-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # `just check` is fmt+lint+test; the plain `cargo fmt` there would
+      # modify files and never fail, so the format gate runs as a check
+      # first, then `just check` provides the clippy + test gates.
+      - name: fmt (check)
+        run: cargo fmt --all --check
+
+      - name: install just
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSfL \
+            https://github.com/casey/just/releases/latest/download/just-linux-x86_64 \
+            -o just && chmod +x just && sudo mv just /usr/local/bin/
+
+      - name: lint + test
+        run: just check
+
+  client:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: install + build (tsc --noEmit && vite build)
+        run: npm --prefix client ci && npm --prefix client run build
+
+  e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: install just
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSfL \
+            https://github.com/casey/just/releases/latest/download/just-linux-x86_64 \
+            -o just && chmod +x just && sudo mv just /usr/local/bin/
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # The client must build first: the server binary embeds client/dist
+      # at compile time (include_dir).
+      - name: build client + server
+        run: |
+          npm --prefix client ci
+          npm --prefix client run build
+          cargo build --release -p campfire-server
+
+      # Dev certs (same recipe as the local dev loop): a local CA plus a
+      # localhost server cert. e2e.js launches the browser with
+      # --ignore-certificate-errors, so no CA trust is needed.
+      - name: dev certs
+        run: just certs
+
+      - name: start server (background)
+        run: |
+          target/release/campfire --listen "[::]:8443" \
+            --cert certs/cert.pem --key certs/key.pem > server.log 2>&1 &
+          for i in $(seq 1 30); do
+            if curl -sk -o /dev/null https://localhost:8443/healthz; then
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "server did not come up:"
+          cat server.log
+          exit 1
+
+      - name: e2e
+        run: |
+          cd tools/e2e && npm i
+          node tools/e2e/e2e.js --browser "$(command -v google-chrome-stable || command -v google-chrome)"
+
+      - name: server log (on failure)
+        if: failure()
+        run: cat server.log || true

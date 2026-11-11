@@ -121,10 +121,6 @@ export class CallManager {
     this.selfId = id;
   }
 
-  get selfIdValue(): string {
-    return this.selfId;
-  }
-
   /** Whether we are currently in a call. */
   inCall(): boolean {
     return this.phase.p === "in-call";

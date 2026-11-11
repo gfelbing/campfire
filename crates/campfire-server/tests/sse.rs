@@ -141,7 +141,10 @@ async fn sse_fallback_join_and_chat_roundtrip() {
     let hello: serde_json::Value = serde_json::from_str(&events[0]).unwrap();
     assert_eq!(hello["t"], "hello");
     assert_eq!(hello["room"], "office");
-    assert_eq!(hello["you"], token_a);
+    let you_a = hello["you"].as_str().unwrap().to_owned();
+    // The join token is a per-session secret, not the room-public user id (S1).
+    assert!(you_a.starts_with("u_"), "user id: {you_a}");
+    assert_ne!(you_a, token_a);
     assert_eq!(hello["users"].as_array().unwrap().len(), 1);
 
     // 3. Client B joins; A's stream hears the `joined` event.
@@ -166,7 +169,9 @@ async fn sse_fallback_join_and_chat_roundtrip() {
     let events = read_events(&mut sse_b, 1).await;
     let hello_b: serde_json::Value = serde_json::from_str(&events[0]).unwrap();
     assert_eq!(hello_b["t"], "hello");
-    assert_eq!(hello_b["you"], token_b);
+    let you_b = hello_b["you"].as_str().unwrap().to_owned();
+    assert!(you_b.starts_with("u_"), "user id: {you_b}");
+    assert_ne!(you_b, token_b);
     assert_eq!(hello_b["users"].as_array().unwrap().len(), 2);
 
     // 5. B chats; A hears it, and B hears its own echo.
@@ -180,7 +185,7 @@ async fn sse_fallback_join_and_chat_roundtrip() {
     let events = read_events(&mut sse, 1).await;
     let chat: serde_json::Value = serde_json::from_str(&events[0]).unwrap();
     assert_eq!(chat["t"], "chat");
-    assert_eq!(chat["from"], token_b);
+    assert_eq!(chat["from"], you_b);
     assert_eq!(chat["text"], "hi all");
 
     let events = read_events(&mut sse_b, 1).await;
@@ -188,9 +193,19 @@ async fn sse_fallback_join_and_chat_roundtrip() {
     assert_eq!(echo["t"], "chat");
     assert_eq!(echo["text"], "hi all");
 
-    // 6. Unknown token → 404; a join with a bogus room → 400.
+    // 6. Unknown token → 404; the room-public user id as a token → 400 (S1:
+    //    the relay identity is the per-session secret, never the user id); a
+    //    join with a bogus room → 400.
     let (status, _) = get_sse(&mut send_req, "u_bogus000").await;
     assert_eq!(status, 404);
+    let (status, body) = post_json(
+        &mut send_req,
+        &format!(
+            r#"{{"type":"msg","payload":{{"token":"{you_b}","msg":{{"t":"chat","text":"impersonation attempt"}}}}}}"#
+        ),
+    )
+    .await;
+    assert_eq!(status, 400, "user id is not a session token (S1): {body}");
     let (status, body) = post_json(
         &mut send_req,
         r#"{"type":"join","payload":{"room":"nope","name":"eve"}}"#,

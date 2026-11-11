@@ -48,6 +48,9 @@ pub const SESSION_TTL: Duration = Duration::from_secs(8 * 60 * 60);
 const JWKS_REFRESH: Duration = Duration::from_secs(5 * 60);
 /// Maximum in-flight logins kept at once (bounds the pending map).
 const PENDING_CAP: usize = 10_000;
+/// Maximum concurrent verified sessions (bounds the session map; the oldest
+/// is evicted past the cap, so a callback flood cannot grow it unboundedly).
+const SESSION_CAP: usize = 10_000;
 /// Outbound HTTP timeout for discovery / JWKS / token exchange.
 const HTTP_TIMEOUT: Duration = Duration::from_secs(15);
 
@@ -254,7 +257,7 @@ impl Auth {
             .ok_or_else(|| anyhow::anyhow!("auth: id_token carried no usable name claim"))?;
 
         let cookie = random_token();
-        self.inner.sessions.lock().unwrap().insert(
+        self.insert_session(
             cookie.clone(),
             AuthSession {
                 name: name.clone(),
@@ -391,14 +394,23 @@ impl Auth {
         (session.valid_until > Instant::now()).then_some(AuthIdentity { name: session.name })
     }
 
-    /// Remove expired sessions (called opportunistically).
-    pub fn reap_expired(&self) {
+    /// Store a verified session, bounding the map: expired entries are reaped
+    /// first, and if the map is still at the cap the oldest session is
+    /// dropped, so a callback flood cannot grow memory unboundedly (mirrors
+    /// [`Auth::insert_pending`]).
+    fn insert_session(&self, cookie: String, session: AuthSession) {
+        let mut map = self.inner.sessions.lock().unwrap();
         let now = Instant::now();
-        self.inner
-            .sessions
-            .lock()
-            .unwrap()
-            .retain(|_, s| s.valid_until > now);
+        map.retain(|_, s| s.valid_until > now);
+        if map.len() >= SESSION_CAP
+            && let Some(oldest) = map
+                .iter()
+                .min_by_key(|(_, s)| s.valid_until)
+                .map(|(k, _)| k.clone())
+        {
+            map.remove(&oldest);
+        }
+        map.insert(cookie, session);
     }
 
     /// Test-only: seed a session directly (the real path mints one from a

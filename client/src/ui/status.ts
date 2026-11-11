@@ -16,8 +16,6 @@ export interface StatusUI {
   setRoom(room: string): void;
   setUsers(n: number): void;
   bumpUsers(delta: number): void;
-  /** Is the room's call running, and are we in it? (badge) */
-  setCallState(active: boolean, inCall: boolean): void;
   setConn(s: ConnState): void;
 }
 
@@ -126,12 +124,6 @@ export function createStatus(
     bumpUsers: (delta) => {
       users = Math.max(0, users + delta);
       usersEl.textContent = userText(users);
-    },
-    setCallState: (active, us) => {
-      // Kept for parity with the badge state in main.ts; the toggle here
-      // only controls our own opt-out.
-      void active;
-      void us;
     },
     setConn: (s) => {
       panel.dataset.conn = s;

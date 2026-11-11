@@ -55,7 +55,7 @@ const BYTES_PER_SEC: usize = 256 * 1024;
 const CHAT_PER_SEC: usize = 1;
 /// A chat line longer than this is refused (README §14).
 pub(crate) const MAX_CHAT_CHARS: usize = 500;
-/// Room id: `1..=32` chars of `[a-z0-9_-]` (README §5).
+/// Room id: `1..=64` chars of `[a-z0-9_-]` (README §5).
 pub(crate) const MAX_ROOM_CHARS: usize = 64;
 /// Name: trimmed, `1..=24` chars (README §14).
 pub(crate) const MAX_NAME_CHARS: usize = 24;
@@ -235,6 +235,9 @@ async fn session_task(
     // connection instead of sessions no one accepts. Harmless if the
     // connection is already gone.
     conn.close(quinn::VarInt::from_u32(0), b"campfire: session ended");
+    // Pair the session_open() at the top: the live-session gauge must not
+    // only ever grow.
+    metrics.session_close();
 }
 
 /// Read `join`/`chat`/`typing` lines, enforce limits, and relay through the
@@ -373,7 +376,7 @@ fn dispatch(
                 Some(forced) => forced.to_owned(),
                 None => {
                     let name = name.trim();
-                    if name.is_empty() || name.len() > MAX_NAME_CHARS {
+                    if name.is_empty() || name.chars().count() > MAX_NAME_CHARS {
                         return send(tx, ErrorCode::NameTooLong);
                     }
                     name.to_owned()
@@ -485,7 +488,7 @@ fn dispatch(
     }
 }
 
-/// Room ids: `1..=32` chars of `[a-z0-9_-]`.
+/// Room ids: `1..=64` chars of `[a-z0-9_-]`.
 pub(crate) fn valid_room(room: &str) -> bool {
     (1..=MAX_ROOM_CHARS).contains(&room.len())
         && room.split('/').all(|seg| {

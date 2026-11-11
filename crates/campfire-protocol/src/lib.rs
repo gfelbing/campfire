@@ -15,9 +15,6 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-/// Marker documenting the wire encoding used across the protocol.
-pub const WIRE_ENCODING: &str = "ndjson";
-
 /// Direction an avatar faces.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Dir {
@@ -37,11 +34,14 @@ pub struct Avatar {
     pub color: String,
 }
 
-/// Another user, by id and name only (presence events).
+/// Another user, by id, name and (optional) chosen color (presence events).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UserBrief {
     pub id: String,
     pub name: String,
+    /// The user's chosen avatar color (`#rrggbb`); present when they set one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
 }
 
 /// Full state of a user as seen in a room snapshot (`hello`).
@@ -56,6 +56,9 @@ pub struct UserState {
     /// enhancements"). Only sent when true.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub sz: bool,
+    /// The user's chosen avatar color (`#rrggbb`); present when they set one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
 }
 
 /// A chat message (history entries and live events share this shape).
@@ -82,8 +85,6 @@ pub enum ErrorCode {
     NameTooLong,
     /// Chat text exceeds the length limit.
     ChatTooLong,
-    /// Room id exceeds the length limit.
-    RoomTooLong,
     /// Room id is not a known map.
     UnknownRoom,
     /// Call signaling state violation: not in the room together, sender
@@ -305,6 +306,7 @@ mod tests {
                 y: 12.0,
                 d: Dir::South,
                 sz: false,
+                color: Some("#e05f38".into()),
             }],
             chat: vec![ChatMsg {
                 from: "u_77ab".into(),
@@ -315,6 +317,7 @@ mod tests {
             call: vec![UserBrief {
                 id: "u_77ab".into(),
                 name: "jules".into(),
+                color: None,
             }],
             // A minted media ticket (docs/moq-sfu.md §7): 32 random bytes,
             // hex-encoded.

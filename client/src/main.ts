@@ -22,7 +22,7 @@ declare global {
   }
 }
 
-/// Local position sends: 10 Hz while moving, 2 Hz while idle (README §5).
+/// Local position sends: 15 Hz while moving, 2 Hz while idle (README §5).
 const SEND_EVERY_MS = 66; // 15 Hz — the README §5 per-user cap (was 10 Hz)
 const IDLE_EVERY_MS = 500;
 /// Avatar radius in tiles for local collision checks.
@@ -193,7 +193,6 @@ async function main(): Promise<void> {
       if (id !== myId) world.manager.setInCall(id, inCall.has(id));
     }
     world.local.setInCall(inCall.has(myId));
-    status.setCallState(inCall.size > 0, inCall.has(myId));
     presence.setInCall(inCall);
   };
 
@@ -312,6 +311,20 @@ async function main(): Promise<void> {
   // Sidebar next to the map (README roadmap "UI redesign"): Main Menu
   // (status + media), Players, Chat — each existing component mounts into
   // its pane. The call theater overlays the map from `#ui`.
+  /** Leave this room immediately (the server broadcasts `left` and tears
+   *  the session down), then reload into `room` with the same name + color.
+   *  The delay lets the `left` broadcast land before navigation kills the
+   *  session (README §11 Phase 7). */
+  const navigateToRoom = (room: string, delayMs: number): void => {
+    conn.sendLeave();
+    window.setTimeout(() => {
+      window.location.href =
+        `/play/${room.split("/").map(encodeURIComponent).join("/")}/` +
+        `?name=${encodeURIComponent(opts.name)}` +
+        `&color=${encodeURIComponent(opts.color)}`;
+    }, delayMs);
+  };
+
   const sidebar = createSidebar();
   const ui = document.getElementById("ui")!; // the theater's overlay layer
   presence = createPresence(sidebar.pane("players"));
@@ -334,22 +347,11 @@ async function main(): Promise<void> {
   const status = createStatus(
     sidebar.pane("menu"),
     (off) => manager.setBubble(off),
-    (room) => {
-      // Room switch (README §11 Phase 7): leave this room immediately
-      // (the server broadcasts `left` and tears the session down), then
-      // reload into the target room with the same name + color.
-      conn.sendLeave();
-      window.setTimeout(() => {
-        window.location.href =
-          `/play/${room.split("/").map(encodeURIComponent).join("/")}/` +
-          `?name=${encodeURIComponent(opts.name)}` +
-          `&color=${encodeURIComponent(opts.color)}`;
-      }, 150);
-    },
+    (room) => navigateToRoom(room, 150),
   );
   status.setRoom(opts.room);
 
-  // Game loop: integrate local movement, draw, send at ≤10 Hz.
+  // Game loop: integrate local movement, draw, send at ≤15 Hz (2 Hz idle).
   let lastSend = 0;
   let prev = performance.now();
   const tick = (now: number): void => {
@@ -386,6 +388,7 @@ async function main(): Promise<void> {
       const d = Math.hypot(dx, dy);
       if (d < 0.05) {
         walkPath.shift();
+        if (walkPath.length === 0) moving = false; // the path is done
       } else {
         const speed = keys.run ? 8 : 4;
         const step = Math.min(speed * dt, d);
@@ -396,6 +399,9 @@ async function main(): Promise<void> {
         if (!blocked(map, x, ny)) y = ny;
         dir = Math.abs(dx) >= Math.abs(dy) ? (dx > 0 ? "e" : "w") : dy > 0 ? "s" : "n";
       }
+    } else {
+      // No key held, no path: stop bobbing and drop to the 2 Hz idle rate.
+      moving = false;
     }
 
     // exitUrl zones (README roadmap "Map enhancements"): walking onto the
@@ -403,14 +409,7 @@ async function main(): Promise<void> {
     const cur = map.zones.find((z) => z.exitUrl !== undefined && zoneContains(z, x, y));
     if (cur !== undefined && cur !== exitArmed) {
       exitArmed = cur;
-      const target = exitUrlToMapId(cur.exitUrl!, opts.room);
-      conn.sendLeave();
-      window.setTimeout(() => {
-        window.location.href =
-          `/play/${target.split("/").map(encodeURIComponent).join("/")}/` +
-          `?name=${encodeURIComponent(opts.name)}` +
-          `&color=${encodeURIComponent(opts.color)}`;
-      }, 50);
+      navigateToRoom(exitUrlToMapId(cur.exitUrl!, opts.room), 50);
       return;
     }
     if (cur === undefined) exitArmed = null;
@@ -469,6 +468,14 @@ main().catch((err) => {
   const boot = document.getElementById("boot");
   if (boot) {
     boot.style.display = "grid";
-    boot.innerHTML = `<main><h1>🔥 Campfire</h1><p>Something went wrong: ${String(err)}</p></main>`;
+    // textContent only: `err` can carry user-influenceable text (URL
+    // params, server error bodies) — innerHTML would be a DOM XSS sink.
+    const mainEl = document.createElement("main");
+    const h1 = document.createElement("h1");
+    h1.textContent = "🔥 Campfire";
+    const p = document.createElement("p");
+    p.textContent = `Something went wrong: ${String(err)}`;
+    mainEl.append(h1, p);
+    boot.replaceChildren(mainEl);
   }
 });

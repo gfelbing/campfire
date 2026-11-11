@@ -25,6 +25,7 @@ use bytes::Bytes;
 use campfire_protocol::{Avatar, ChatMsg, ClientMsg, ErrorCode, ServerMsg, to_line};
 use futures_util::StreamExt;
 use include_dir::{Dir, include_dir};
+use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::{IntervalStream, UnboundedReceiverStream};
@@ -418,7 +419,8 @@ enum FallbackReq {
     },
 }
 
-/// One fallback (SSE+POST) session, keyed by user id (== relay token).
+/// One fallback (SSE+POST) session, keyed by its per-session secret — never
+/// by the user id, which is broadcast to the room (S1).
 struct FallbackSession {
     room: String,
     name: String,
@@ -437,6 +439,15 @@ type FallbackMap = Arc<Mutex<HashMap<String, FallbackSession>>>;
 fn fallback_map() -> &'static FallbackMap {
     static MAP: OnceLock<FallbackMap> = OnceLock::new();
     MAP.get_or_init(|| Arc::new(Mutex::new(HashMap::new())))
+}
+
+/// Mint the per-session fallback secret: 32 random hex chars (S1). It keys
+/// the fallback map and authorizes `POST /rt/event` for that session, so a
+/// room member cannot impersonate another member's session with their id.
+fn fallback_secret() -> String {
+    let mut bytes = [0u8; 16];
+    rand::thread_rng().fill_bytes(&mut bytes);
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// `POST /rt/event` — join or relay one stream message.
@@ -467,7 +478,7 @@ async fn fallback_event(
                 Ok(Some(forced)) => forced,
                 Ok(None) => {
                     let name = name.trim();
-                    if name.is_empty() || name.len() > MAX_NAME_CHARS {
+                    if name.is_empty() || name.chars().count() > MAX_NAME_CHARS {
                         return Err(err(ErrorCode::NameTooLong));
                     }
                     name.to_owned()
@@ -519,8 +530,12 @@ async fn fallback_event(
                         return Err(err(code));
                     }
                 };
+            // The session's relay identity is a per-session secret, never
+            // the user id (S1: the id is broadcast to the room and would let
+            // any member impersonate this session via POST /rt/event).
+            let secret = fallback_secret();
             fallback_map().lock().unwrap().insert(
-                user_id.clone(),
+                secret.clone(),
                 FallbackSession {
                     room: room.clone(),
                     name: name.clone(),
@@ -534,45 +549,65 @@ async fn fallback_event(
             // A join that never opens its SSE stream is a dead session.
             let world = state.world.clone();
             let map = fallback_map().clone();
+            let secret_bg = secret.clone();
             let user_id_bg = user_id.clone();
             let session_id_bg = session_id;
             tokio::spawn(async move {
                 tokio::time::sleep(Duration::from_secs(60)).await;
                 let mut guard = map.lock().unwrap();
-                // Only this join's session: a rejoin with the same token
-                // replaces the map entry with a newer session id.
-                if let Some(s) = guard.get(&user_id_bg)
+                // The secret is unique to this join; the session id is a
+                // second check in case the key scheme ever changes.
+                if let Some(s) = guard.get(&secret_bg)
                     && s.session_id == session_id_bg
                     && s.rx.lock().unwrap().is_some()
                 {
-                    guard.remove(&user_id_bg);
+                    guard.remove(&secret_bg);
                     world.leave(&room, &user_id_bg);
                 }
             });
 
-            Ok(Json(serde_json::json!({ "token": user_id })))
+            Ok(Json(serde_json::json!({ "token": secret })))
         }
         FallbackReq::Msg { token, msg } => {
-            let guard = fallback_map().lock().unwrap();
-            let Some(session) = guard.get(&token) else {
-                return Err(err(ErrorCode::BadMessage));
+            // `token` is the per-session secret; the identity is the stored
+            // user id, never the token (S1). Copy the session's fields out
+            // under the map lock and drop the lock before any world call:
+            // `Leave` re-locks the map to remove this entry, and the mutex
+            // is not reentrant.
+            let (room, name, user_id, chat_allowed) = {
+                let guard = fallback_map().lock().unwrap();
+                let session = guard
+                    .get(&token)
+                    .ok_or_else(|| err(ErrorCode::BadMessage))?;
+                // Rate-limit chat here, while the session's limiter is still
+                // reachable (it lives in the map entry).
+                let chat_allowed = match &msg {
+                    ClientMsg::Chat { text } => {
+                        if text.chars().count() > MAX_CHAT_CHARS {
+                            return Err(err(ErrorCode::ChatTooLong));
+                        }
+                        let mut chat = session.chat.lock().unwrap();
+                        chat.allow(1, 1)
+                    }
+                    _ => true,
+                };
+                (
+                    session.room.clone(),
+                    session.name.clone(),
+                    session.user_id.clone(),
+                    chat_allowed,
+                )
             };
-            let (room, name) = (session.room.clone(), session.name.clone());
+            if !chat_allowed {
+                state.metrics.rate_limit_hit();
+                return Err(err(ErrorCode::RateLimited));
+            }
             match msg {
                 ClientMsg::Chat { text } => {
-                    if text.chars().count() > MAX_CHAT_CHARS {
-                        return Err(err(ErrorCode::ChatTooLong));
-                    }
-                    let mut chat = session.chat.lock().unwrap();
-                    if !chat.allow(1, 1) {
-                        state.metrics.rate_limit_hit();
-                        return Err(err(ErrorCode::RateLimited));
-                    }
-                    drop(chat);
                     state.world.broadcast_chat(
                         &room,
                         ChatMsg {
-                            from: token,
+                            from: user_id,
                             name,
                             text,
                             ts: unix_ts(),
@@ -580,28 +615,28 @@ async fn fallback_event(
                     );
                 }
                 ClientMsg::Typing { on } => {
-                    state.world.broadcast_typing(&room, &token, on);
+                    state.world.broadcast_typing(&room, &user_id, on);
                 }
                 // Bubble opt-out and call mute/screen: same world methods
                 // as the WebTransport path (README §5); fallback clients
                 // get presence, chat and calls.
                 ClientMsg::Bubble { off } => {
-                    let _ = state.world.set_bubble(&room, &token, off);
+                    let _ = state.world.set_bubble(&room, &user_id, off);
                 }
                 ClientMsg::CallMute { audio, video } => {
-                    let _ = state.world.call_mute(&room, &token, audio, video);
+                    let _ = state.world.call_mute(&room, &user_id, audio, video);
                 }
                 ClientMsg::CallScreen { on } => {
-                    let _ = state.world.call_screen(&room, &token, on);
+                    let _ = state.world.call_screen(&room, &user_id, on);
                 }
                 ClientMsg::CallLeave => {
-                    let _ = state.world.call_leave(&room, &token);
+                    let _ = state.world.call_leave(&room, &user_id);
                 }
                 // Intentional leave (room switcher): immediate `Left`, and
                 // the session is gone (the SSE stream ends with the member's
                 // channel).
                 ClientMsg::Leave => {
-                    state.world.leave(&room, &token);
+                    state.world.leave(&room, &user_id);
                     fallback_map().lock().unwrap().remove(&token);
                 }
                 // Keepalive (README §5): the session lives with the open SSE
@@ -666,6 +701,8 @@ async fn sse_stream(
         world: state.world.clone(),
         room,
         user_id,
+        // The query token is the per-session secret (S1) and the map key.
+        secret: token,
         session_id,
         cleaned: false,
     };
@@ -680,6 +717,9 @@ struct CleanupOnEnd<S> {
     world: World,
     room: String,
     user_id: String,
+    /// The per-session secret (the fallback map's key, S1) — not the
+    /// user id.
+    secret: String,
     session_id: u64,
     cleaned: bool,
 }
@@ -693,7 +733,7 @@ impl<S: Stream + Unpin> Stream for CleanupOnEnd<S> {
                     self.cleaned = true;
                     self.world
                         .discard(&self.room, &self.user_id, self.session_id);
-                    fallback_map().lock().unwrap().remove(&self.user_id);
+                    fallback_map().lock().unwrap().remove(&self.secret);
                     debug!(user = %self.user_id, room = %self.room, "fallback session ended");
                 }
                 Poll::Ready(None)
@@ -710,21 +750,24 @@ impl<S: Stream + Unpin> Stream for CleanupOnEnd<S> {
 /// `GET /play/{id}/...` → the SPA; the client takes the map id from the
 /// path's second segment (`/play/office/office.json` → room `office`).
 async fn play(State(state): State<AppState>) -> Response {
-    serve_static(&state, "index.html").unwrap_or_else(|| StatusCode::NOT_FOUND.into_response())
+    serve_static(&state, "index.html")
+        .await
+        .unwrap_or_else(|| StatusCode::NOT_FOUND.into_response())
 }
 
 async fn handle_static(State(state): State<AppState>, uri: Uri) -> Response {
     let path = uri.path().trim_start_matches('/');
     let path = if path.is_empty() { "index.html" } else { path };
-    serve_static(&state, path).unwrap_or_else(|| {
+    serve_static(&state, path).await.unwrap_or_else(|| {
         debug!(path, "static miss");
         StatusCode::NOT_FOUND.into_response()
     })
 }
 
 /// Serve one static file: the runtime dir (dev) when configured, otherwise
-/// the compile-time embed.
-fn serve_static(state: &AppState, path: &str) -> Option<Response> {
+/// the compile-time embed. The dev path's disk read runs on the blocking
+/// pool so it cannot stall an async worker (Q2).
+async fn serve_static(state: &AppState, path: &str) -> Option<Response> {
     // No path traversal.
     if Path::new(path)
         .components()
@@ -732,16 +775,44 @@ fn serve_static(state: &AppState, path: &str) -> Option<Response> {
     {
         return None;
     }
-    let (bytes, mime) = if let Some(dir) = &state.static_dir {
-        let mut buf = Vec::new();
-        let mut file = std::fs::File::open(dir.join(path)).ok()?;
-        file.read_to_end(&mut buf).ok()?;
-        (buf, mime_for(path))
+    let (bytes, mime, dev) = if let Some(dir) = state.static_dir.clone() {
+        let mime = mime_for(path);
+        let path = path.to_owned();
+        let bytes = tokio::task::spawn_blocking(move || {
+            let mut buf = Vec::new();
+            let mut file = std::fs::File::open(dir.join(path)).ok()?;
+            file.read_to_end(&mut buf).ok()?;
+            Some(Bytes::from(buf))
+        })
+        .await
+        .ok()??;
+        (bytes, mime, true)
     } else {
         let file = STATIC.get_file(path)?;
-        (file.contents().to_vec(), mime_for(path))
+        (Bytes::from_static(file.contents()), mime_for(path), false)
     };
-    Some((StatusCode::OK, [(header::CONTENT_TYPE, mime)], bytes).into_response())
+    Some(
+        (
+            StatusCode::OK,
+            [
+                (header::CONTENT_TYPE, mime),
+                (header::CACHE_CONTROL, cache_control(path, dev)),
+            ],
+            bytes,
+        )
+            .into_response(),
+    )
+}
+
+/// Cache policy (Q3): `index.html` and the dev dir are never cached
+/// (un-hashed files); embedded prod assets are content-hashed by the
+/// bundler and can be cached immutably.
+fn cache_control(path: &str, dev: bool) -> &'static str {
+    if dev || path == "index.html" {
+        "no-cache"
+    } else {
+        "public, max-age=31536000, immutable"
+    }
 }
 
 fn mime_for(path: &str) -> &'static str {
@@ -752,6 +823,7 @@ fn mime_for(path: &str) -> &'static str {
         Some("json") => "application/json",
         Some("png") => "image/png",
         Some("jpg") => "image/jpeg",
+        Some("webp") => "image/webp",
         Some("svg") => "image/svg+xml",
         Some("ico") => "image/x-icon",
         Some("txt") => "text/plain; charset=utf-8",

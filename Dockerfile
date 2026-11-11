@@ -11,7 +11,9 @@
 # bootstrap. UDP is not forwarded by `docker run -p` unless you ask for
 # /udp explicitly — hence both.
 
-FROM rust:1-slim AS build
+# Pinned to rust-toolchain.toml (the rust:* images honor it via rustup, but
+# a valid base tag is a hard requirement — `rust:1-slim` does not exist).
+FROM rust:1.99.1-slim AS build
 RUN apt-get update \
     && apt-get install -y --no-install-recommends nodejs npm \
     && rm -rf /var/lib/apt/lists/*
@@ -27,7 +29,6 @@ COPY tools/loadtest ./tools/loadtest
 COPY tools/moq-spike ./tools/moq-spike
 COPY client ./client
 COPY maps ./maps
-COPY justfile ./
 # BuildKit-style cache mounts (docker ≥ 19.03 with BuildKit, podman ≥ 2.0):
 # the npm download cache, the cargo registry/git caches and the target dir
 # survive between builds, so repeat builds only recompile what changed.

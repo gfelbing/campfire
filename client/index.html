@@ -3,6 +3,15 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <!-- Everything is same-origin (the server embeds the bundle).
+         'unsafe-eval' is a PixiJS requirement (its shader compiler evals);
+         the blob worker is Pixi's own inline code. The CSP still blocks
+         remote scripts and objects. The inline style exception covers the
+         UI's attribute styles. -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self' 'unsafe-eval'; worker-src 'self' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data:; media-src 'self' blob:; connect-src 'self'; object-src 'none'; base-uri 'self'"
+    />
     <title>Campfire</title>
     <link rel="stylesheet" href="/src/style.css" />
     <link rel="icon" href="data:," />

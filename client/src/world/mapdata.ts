@@ -33,7 +33,7 @@ export interface Zone {
   silent?: boolean;
   /** `exitUrl`: walking onto this zone navigates elsewhere. */
   exitUrl?: string;
-  /** Spawn area: the object is named `start` or has a `start: true`
+  /** Spawn area: the object is named `start` or has a truthy `start`
    *  property. */
   start?: boolean;
 }
@@ -121,8 +121,10 @@ export function parseMap(id: string, raw: TiledMap): MapData {
           const silent = prop(o, "silentZone") || prop(o, "silent");
           const exit = prop(o, "exitUrl");
           // Spawn area: an object named `start`, or a truthy `start`
-          // property (existing maps in the wild use the property).
-          const isStart = o.name === "start" || prop(o, "start") === true;
+          // property — the server's `prop_bool` accepts any truthy value,
+          // so match it here (a `start: "yes"` object is a spawn area on
+          // both sides).
+          const isStart = o.name === "start" || Boolean(prop(o, "start"));
           if (jitsi === undefined && !silent && exit === undefined && !isStart) continue;
           zones.push({
             name: o.name,

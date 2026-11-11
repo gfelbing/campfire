@@ -14,11 +14,15 @@ export interface UserState {
   /** `sz`: the user stands inside a silentZone (README roadmap "Map
    *  enhancements"). Only sent when true. */
   sz?: boolean;
+  /** The user's chosen avatar color (`#rrggbb`); present when they set one. */
+  color?: string;
 }
 
 export interface UserBrief {
   id: string;
   name: string;
+  /** The user's chosen avatar color (`#rrggbb`); present when they set one. */
+  color?: string;
 }
 
 export interface ChatMsg {
@@ -34,7 +38,6 @@ export type ErrorCode =
   | "room_full"
   | "name_too_long"
   | "chat_too_long"
-  | "room_too_long"
   | "unknown_room"
   | "call_not_allowed";
 

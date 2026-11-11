@@ -13,6 +13,9 @@ interface MapInfo {
 
 const NAME_KEY = "campfire.name";
 const COLORS = ["#e05f38", "#4a90d9", "#58a858", "#9b59b6", "#d4a017", "#16a2a2"];
+/** A URL-provided color is only accepted as a plain CSS hex color
+ *  (`#rgb`/`#rrggbb`); anything else falls through to the swatch picker. */
+const COLOR_RE = /^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/;
 
 /** Show the boot overlay and resolve with the user's choices.
  *
@@ -35,7 +38,9 @@ export function boot(): Promise<BootOptions> {
  *    URL or form would have chosen (the server enforces it anyway).
  *
  *  When auth is on and the visitor has no session, the page is redirected to
- *  the IdP and this promise never settles (the document is navigating away).
+ *  the IdP; if the navigation is still pending a moment later (network
+ *  failure), boot degrades to a free name instead of hanging — the join
+ *  will surface the server's 401.
  */
 async function resolveForcedName(): Promise<string | null> {
   let data: { enabled: boolean; name?: string };
@@ -49,9 +54,12 @@ async function resolveForcedName(): Promise<string | null> {
   if (!data.enabled) return null;
   if (data.name) return data.name;
   // Auth on, no session: send the visitor to the IdP, returning to this page.
+  // Give the navigation a beat; a document that is really going away never
+  // runs the timeout, so this only fires when the redirect cannot proceed.
   const returnTo = window.location.pathname + window.location.search;
   window.location.replace(`/auth/login?return_to=${encodeURIComponent(returnTo)}`);
-  return new Promise<string>(() => {}); // page is navigating away
+  await new Promise((r) => setTimeout(r, 500));
+  return null;
 }
 
 function runBoot(root: HTMLElement, forcedName: string | null): Promise<BootOptions> {
@@ -70,11 +78,23 @@ function runBoot(root: HTMLElement, forcedName: string | null): Promise<BootOpti
     }
     return segments.join("/");
   })();
-  const urlRoom = pathRoom ? decodeURIComponent(pathRoom) : params.get("room");
+  // Path segments are URL-encoded; a malformed escape (`%zz`) makes
+  // decodeURIComponent throw, so decode defensively.
+  const urlRoom = (() => {
+    if (pathRoom !== undefined) {
+      try {
+        return decodeURIComponent(pathRoom);
+      } catch {
+        return pathRoom;
+      }
+    }
+    return params.get("room") ?? undefined;
+  })();
   // With auth on, the name comes from the signed-in identity (the server
   // enforces it), not from the URL.
   const urlName = forcedName ?? params.get("name")?.trim();
-  const urlColor = params.get("color");
+  const rawColor = params.get("color");
+  const urlColor = rawColor !== null && COLOR_RE.test(rawColor) ? rawColor : undefined;
   if (urlRoom && urlName && urlColor) {
     root.style.display = "none";
     return Promise.resolve({
@@ -153,28 +173,36 @@ function runBoot(root: HTMLElement, forcedName: string | null): Promise<BootOpti
   };
 
   return new Promise<BootOptions>((resolve) => {
-    fillMaps([{ id: "office", name: "Office" }, { id: "island", name: "Island" }]);
-    if (hasPathRoom) mapSelect.value = decodeURIComponent(pathRoom);
+    // Map picker: the server's list (`/api/v1/maps`) is the source of
+    // truth — a placeholder holds until it loads (no hardcoded ids to
+    // drift from the server's maps).
+    const placeholder = document.createElement("option");
+    placeholder.disabled = true;
+    placeholder.textContent = "loading maps…";
+    mapSelect.appendChild(placeholder);
+    if (hasPathRoom) mapSelect.value = urlRoom!;
     void (async () => {
+      let maps: MapInfo[] = [];
       try {
         const res = await fetch("/api/v1/maps");
-        if (!res.ok) return;
-        const maps = (await res.json()) as MapInfo[];
-        if (maps.length > 0) {
-          mapSelect.replaceChildren();
-          fillMaps(maps);
-          if (hasPathRoom) {
-            // The path picks the map; fall back to the picker only if the
-            // path's map is not on the server.
-            if (maps.some((m) => m.id === decodeURIComponent(pathRoom))) {
-              mapSelect.value = decodeURIComponent(pathRoom);
-            } else {
-              mapLabel.style.display = "";
-            }
-          }
-        }
+        if (res.ok) maps = (await res.json()) as MapInfo[];
       } catch {
-        // fetch failed: keep the fallback list
+        // fetch failed: keep the placeholder
+      }
+      if (maps.length === 0) {
+        error.textContent = "Could not load the map list. Reload to retry.";
+        return;
+      }
+      mapSelect.replaceChildren();
+      fillMaps(maps);
+      if (hasPathRoom) {
+        // The path picks the map; fall back to the picker only if the
+        // path's map is not on the server.
+        if (maps.some((m) => m.id === urlRoom)) {
+          mapSelect.value = urlRoom!;
+        } else {
+          mapLabel.style.display = "";
+        }
       }
     })();
 

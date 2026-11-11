@@ -1,14 +1,15 @@
-//! Per-room call state (README §6/§7): proximity bubbles.
+//! Per-room call state (README §6/§7): proximity bubbles and zone calls.
 //!
-//! One `Option<Call>` per room. There is no ring/accept flow any more: the
+//! One `Option<Call>` per room, plus one per occupied `jitsiRoom` zone. The
 //! server *computes* the call from avatar positions in the 50 ms tick
 //! ([`crate::world::World::tick`]) — walking within the join radius of a
-//! participant pulls you in, walking (or toggling) out drops you after a
-//! grace delay. The server still never touches media: it relays SDP/ICE
-//! between participants (README §6.1) and tracks who is in which bubble.
+//! participant pulls you in; walking (or toggling) out drops you immediately.
+//! The server never touches media (it rides the MoQ SFU, docs/moq-sfu.md); it
+//! only tracks who is in which call and each participant's
+//! mute/camera/screen presence.
 //!
-//! Call *state* is room-wide (it powers the avatars' headphone badge);
-//! call *signaling* (offer/answer/ice/mute) is participant-scoped.
+//! Call *state* is room-wide (it powers the avatars' headphone badge and the
+//! zone-rectangle highlight).
 
 use std::collections::HashMap;
 
@@ -43,9 +44,9 @@ pub struct Call {
 }
 
 impl Call {
-    /// A bubble with its first participants (id → name); they do *not*
-    /// offer each other — the server designates one offerer per recipient
-    /// in `CallStart.you_offer` (the smaller id offers on creation).
+    /// A call with its first participants (id → name). They are already in
+    /// the call — there is no offer/answer: media rides the MoQ SFU
+    /// (docs/moq-sfu.md), so no peer is ever an "offerer".
     pub fn new(id: u64, entries: impl Iterator<Item = (UserId, String)>) -> Self {
         let mut call = Call {
             id,
@@ -80,15 +81,13 @@ impl Call {
             .map(|(id, (name, _))| UserBrief {
                 id: id.clone(),
                 name: name.clone(),
+                // The call tracks only presence, not the avatar: map avatars
+                // are colored from the hello/Joined rosters, not here.
+                color: None,
             })
             .collect();
         out.sort_by(|a, b| a.id.cmp(&b.id));
         out
-    }
-
-    /// Remove a participant; `true` when the call is now empty.
-    pub fn remove(&mut self, id: &str) -> bool {
-        self.participants.remove(id).is_some() && self.participants.is_empty()
     }
 }
 
@@ -116,21 +115,14 @@ mod tests {
                 UserBrief {
                     id: "u_aaa".into(),
                     name: "alice".into(),
+                    color: None,
                 },
                 UserBrief {
                     id: "u_bbb".into(),
                     name: "bob".into(),
+                    color: None,
                 },
             ]
         );
-    }
-
-    #[test]
-    fn remove_reports_empty_call() {
-        let mut call = sample_call();
-        assert!(!call.remove("u_aaa"), "one left, call not empty");
-        assert!(call.contains("u_bbb"));
-        assert!(call.remove("u_bbb"), "last one left, call empty");
-        assert!(!call.remove("u_gone"));
     }
 }

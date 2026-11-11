@@ -77,11 +77,6 @@ impl MoqSfu {
         Arc::new(move |call_id| fanout.drop_call(call_id))
     }
 
-    /// The world's ticket store (one registry per process).
-    pub fn tickets(&self) -> &TicketRegistry {
-        &self.tickets
-    }
-
     /// Live call origins (the fan-out width gauge).
     pub fn live_origins(&self) -> u64 {
         self.fanout.live() as u64

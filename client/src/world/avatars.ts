@@ -1,5 +1,5 @@
 // Avatars: our own + everyone else's, with dead-reckoning interpolation of
-// remote positions between 10 Hz datagram snapshots (README §8).
+// remote positions between 15 Hz datagram snapshots (README §8).
 
 import { Container, Graphics, Text } from "pixi.js";
 
@@ -140,6 +140,22 @@ function colorFor(id: string): number {
   return REMOTE_PALETTE[Math.abs(h) % REMOTE_PALETTE.length];
 }
 
+/** Parse a `#rgb`/`#rrggbb` color string; `null` when malformed. */
+function parseColor(color: string): number | null {
+  const m = /^#([0-9a-f]{3}|[0-9a-f]{6})$/i.exec(color.trim());
+  if (!m) return null;
+  let hex = m[1]!;
+  if (hex.length === 3) hex = hex.split("").map((c) => c + c).join("");
+  return parseInt(hex, 16);
+}
+
+/** The avatar's color: the user's chosen one (sent in the rosters) when
+ *  present and valid, else a stable hash of their id. */
+function colorOf(user: { id: string; color?: string }): number {
+  const parsed = user.color !== undefined ? parseColor(user.color) : null;
+  return parsed ?? colorFor(user.id);
+}
+
 export class AvatarManager {
   private remotes = new Map<string, Remote>();
   private layer: Container;
@@ -161,17 +177,21 @@ export class AvatarManager {
         existing.view.setName(u.name);
         existing.dir = u.d;
         existing.view.setDir(u.d);
+        // The roster is the color authority: re-apply it on reconnect.
+        existing.color = colorOf(u);
+        existing.view.setColor(existing.color);
         existing.curX = u.x;
         existing.curY = u.y;
         existing.curT = now;
       } else {
-        const view = new AvatarView(u.name, colorFor(u.id));
+        const color = colorOf(u);
+        const view = new AvatarView(u.name, color);
         view.setDir(u.d);
         this.layer.addChild(view.container);
         this.remotes.set(u.id, {
           id: u.id,
           name: u.name,
-          color: colorFor(u.id),
+          color,
           view,
           dir: u.d,
           moving: false,
@@ -189,12 +209,13 @@ export class AvatarManager {
 
   joined(user: UserBrief): void {
     const now = performance.now();
-    const view = new AvatarView(user.name, colorFor(user.id));
+    const color = colorOf(user);
+    const view = new AvatarView(user.name, color);
     this.layer.addChild(view.container);
     this.remotes.set(user.id, {
       id: user.id,
       name: user.name,
-      color: colorFor(user.id),
+      color,
       view,
       dir: "s",
       moving: false,

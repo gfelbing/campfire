@@ -21,6 +21,7 @@
 //! Turn OFF cert validation like the test suite: load runs target a dev
 //! server with the local CA.
 
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -98,12 +99,9 @@ async fn main() -> Result<()> {
     // Real room ids: the server only accepts joins into map rooms
     // (README §5); `--rooms` caps how many of them the bots spread over.
     // Maps load from disk (README §6): same default dir as the server.
+    let maps = campfire_maps::Maps::load(Path::new("maps"));
     let rooms: Vec<String> = {
-        let mut ids: Vec<String> = campfire_maps::Maps::load(Path::new("maps"))
-            .all()
-            .iter()
-            .map(|m| m.id.clone())
-            .collect();
+        let mut ids: Vec<String> = maps.all().iter().map(|m| m.id.clone()).collect();
         ids.sort();
         ids.truncate(args.rooms.max(1) as usize);
         if ids.is_empty() {
@@ -112,10 +110,34 @@ async fn main() -> Result<()> {
             ids
         }
     };
-    // Group bots park on the spawn tile (known walkable), where the
-    // server's bubble engine auto-forms a call from co-location. Groups in
-    // the same room merge into one bubble, which is fine for load.
-    let group_points: Vec<(f32, f32)> = vec![(20.5, 15.5)];
+    // Group meeting points (one per group): distinct walkable tiles on the
+    // map each group parks in (round-robin rooms, same as the bots), where
+    // the server's bubble engine auto-forms a call from co-location.
+    let group_points: Vec<(f32, f32)> = {
+        let mut counts: HashMap<String, usize> = HashMap::new();
+        for g in 0..args.groups as usize {
+            *counts.entry(rooms[g % rooms.len()].clone()).or_insert(0) += 1;
+        }
+        let mut lists: HashMap<String, Vec<(f32, f32)>> = HashMap::new();
+        let mut next: HashMap<String, usize> = HashMap::new();
+        let mut pts = Vec::with_capacity(args.groups as usize);
+        for g in 0..args.groups as usize {
+            let room = &rooms[g % rooms.len()];
+            if !lists.contains_key(room) {
+                let list = maps
+                    .get(room)
+                    .map(|m| meeting_points(m, counts[room]))
+                    .unwrap_or_default();
+                lists.insert(room.clone(), list);
+            }
+            let i = next.get(room).copied().unwrap_or(0);
+            next.insert(room.clone(), i + 1);
+            if let Some(p) = lists[room].get(i) {
+                pts.push(*p);
+            }
+        }
+        pts
+    };
 
     println!(
         "loadtest: {} users -> {} (ramp {}s, {} rooms, {} groups of {}, {}s)",
@@ -139,20 +161,17 @@ async fn main() -> Result<()> {
             .and_then(|g| rooms.get((g as usize) % rooms.len()).cloned())
             .unwrap_or_else(|| rooms[i as usize % rooms.len()].clone());
         let name = format!("load-{i:04}");
-        // Group partners: the other members of this cluster (ids are names).
-        let partners = group.map(|g| {
-            let base = g * args.group_size;
-            (0..args.group_size)
-                .filter(|m| *m != i % args.group_size)
-                .map(|m| format!("load-{:04}", base + m))
-                .collect::<Vec<_>>()
-        });
+        let (map_size, spawn) = maps
+            .get(&room)
+            .map(|m| ((m.width, m.height), m.spawn))
+            .unwrap_or(((40, 30), (20.5, 15.5)));
         joins.spawn(bot(
             args.url.clone(),
             room,
             name,
             group.and_then(|g| group_points.get(g as usize).copied()),
-            partners,
+            map_size,
+            spawn,
             stats.clone(),
         ));
         tokio::time::sleep(stagger).await;
@@ -218,7 +237,8 @@ async fn bot(
     room: String,
     name: String,
     group_point: Option<(f32, f32)>,
-    partners: Option<Vec<String>>,
+    map_size: (u32, u32),
+    spawn: (f32, f32),
     stats: Arc<Stats>,
 ) {
     let started = Instant::now();
@@ -311,8 +331,9 @@ async fn bot(
 
     // Walk + chat + (for group bots) signaling relay.
 
-    let mut x = group_point.map_or(20.5, |(x, _)| x);
-    let mut y = group_point.map_or(15.5, |(_, y)| y);
+    // Free bots start at the map's spawn (known walkable).
+    let mut x = group_point.map_or(spawn.0, |(x, _)| x);
+    let mut y = group_point.map_or(spawn.1, |(_, y)| y);
     let mut dir = Dir::East;
     let mut seq: u64 = rand::random();
     let mut step: u32 = 0;
@@ -340,11 +361,11 @@ async fn bot(
                 Dir::North => (0.0, -0.4),
                 Dir::South => (0.0, 0.4),
             };
-            // Stay on the map (the office is 40x30 tiles).
-            if !(1.0..39.0).contains(&(x + dx)) {
+            // Stay on the map (bounds from the room's map).
+            if !(1.0..map_size.0 as f32 - 1.0).contains(&(x + dx)) {
                 dir = Dir::West;
             }
-            if !(1.0..29.0).contains(&(y + dy)) {
+            if !(1.0..map_size.1 as f32 - 1.0).contains(&(y + dy)) {
                 dir = Dir::South;
             }
             let (dx, dy) = match dir {
@@ -394,11 +415,7 @@ async fn bot(
         }
         // Group bots exercise the room-wide call fan-out by sending mute
         // toggles once a call exists.
-        if let Some(partners) = &partners
-            && step.is_multiple_of(50)
-            && in_call.load(Ordering::Relaxed)
-        {
-            let _ = partners[step as usize % partners.len()].clone();
+        if group_point.is_some() && step.is_multiple_of(50) && in_call.load(Ordering::Relaxed) {
             let msg = ClientMsg::CallMute {
                 audio: step % 100 < 50,
                 video: false,
@@ -414,6 +431,45 @@ async fn bot(
     reader.abort();
     dg_reader.abort();
     conn.close(0u32.into(), b"loadtest done");
+}
+
+/// `n` distinct, spread walkable points on `map` for group bubbles: a
+/// raster scan with a stride so the points spread out, then a fine scan to
+/// fill, and finally the spawn tile as a last resort (groups sharing a tile
+/// merge into one big bubble, which is fine for load).
+fn meeting_points(map: &campfire_maps::MapData, n: usize) -> Vec<(f32, f32)> {
+    if n == 0 {
+        return Vec::new();
+    }
+    let (w, h) = (map.width, map.height);
+    let stride = (w.min(h) as usize / n).clamp(1, 64);
+    let mut pts: Vec<(f32, f32)> = Vec::with_capacity(n);
+    for y in (0..h).step_by(stride) {
+        for x in (0..w).step_by(stride) {
+            if map.tile_walkable(x, y) {
+                pts.push((x as f32 + 0.5, y as f32 + 0.5));
+                if pts.len() >= n {
+                    return pts;
+                }
+            }
+        }
+    }
+    let mut seen: std::collections::HashSet<(u32, u32)> =
+        pts.iter().map(|&(px, py)| (px as u32, py as u32)).collect();
+    'fill: for y in 0..h {
+        for x in 0..w {
+            if map.tile_walkable(x, y) && seen.insert((x, y)) {
+                pts.push((x as f32 + 0.5, y as f32 + 0.5));
+                if pts.len() >= n {
+                    break 'fill;
+                }
+            }
+        }
+    }
+    while pts.len() < n {
+        pts.push(map.spawn);
+    }
+    pts
 }
 
 async fn next_msg(recv: &mut wtransport::RecvStream) -> Option<ServerMsg> {

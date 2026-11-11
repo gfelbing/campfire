@@ -327,8 +327,12 @@ export class Connection {
 /** Feed raw bytes, invoking `onLine` for every complete `\n`-terminated line. */
 export function lineReader(onLine: (line: string) => void) {
   let buf = "";
+  // One decoder for the whole stream: `{ stream: true }` carries a multibyte
+  // character split across chunks into the next decode (a fresh decoder per
+  // chunk would replace it with U+FFFD and corrupt the JSON line).
+  const decoder = new TextDecoder("utf-8", { stream: true });
   return (chunk: Uint8Array) => {
-    buf += new TextDecoder().decode(chunk);
+    buf += decoder.decode(chunk);
     let idx: number;
     while ((idx = buf.indexOf("\n")) >= 0) {
       const line = buf.slice(0, idx);
@@ -427,12 +431,15 @@ class WTConn {
   }
 
   private async readDatagrams(): Promise<void> {
+    // Datagrams are whole messages, so a non-streaming decoder is safe;
+    // one per reader mirrors the line reader's pattern.
+    const decoder = new TextDecoder("utf-8");
     try {
       for (;;) {
         const { done, value } = await this.dgReader!.read();
         if (done) break;
         try {
-          const batch = JSON.parse(new TextDecoder().decode(value)) as MovementBatch;
+          const batch = JSON.parse(decoder.decode(value)) as MovementBatch;
           this.conn.onMovement(batch);
         } catch (err) {
           console.warn("bad datagram:", err);
@@ -469,7 +476,11 @@ class WTConn {
 
   close(): void {
     try {
-      this.wt?.close();
+      // WebTransport has no close(): closeWithError is the only teardown.
+      // (The former no-op `close()` silently kept the dead QUIC connection
+      // open through bfcache/pagehide — the reconnect storm the server
+      // warns about.)
+      this.wt?.closeWithError(0, "campfire: page hidden");
     } catch {
       // already closing
     }
