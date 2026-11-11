@@ -14,8 +14,13 @@
 # Pinned to rust-toolchain.toml (the rust:* images honor it via rustup, but
 # a valid base tag is a hard requirement — `rust:1-slim` does not exist).
 FROM rust:1.99.1-slim AS build
+# Node 22 LTS from NodeSource (matches CI's node-version): the Debian apt
+# node (20.x) is below vitest's engine requirement and npm warns EBADENGINE
+# for the whole install.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends nodejs npm \
+    && apt-get install -y --no-install-recommends curl ca-certificates \
+    && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
+    && apt-get install -y --no-install-recommends nodejs \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /build
 # Client deps first (their lockfile changes rarely): the vite build runs
@@ -36,7 +41,7 @@ COPY maps ./maps
 # Cached paths are NOT part of the image — hence the cp of the binary out
 # of the target cache in the same RUN.
 RUN --mount=type=cache,target=/root/.npm,sharing=locked \
-    npm --prefix client ci && npm --prefix client run build
+    npm --prefix client ci --no-audit --no-fund && npm --prefix client run build
 # Only the server package is shipped; -p skips compiling the tools'
 # binaries (their sources must still exist — cargo loads every workspace
 # member's manifest before building anything).

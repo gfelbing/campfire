@@ -17,6 +17,11 @@ export default defineConfig({
     outDir: "dist",
     emptyOutDir: true,
     target: "es2022",
+    // The entry chunk carries the app + the @moq stack (Pixi is already
+    // dynamic-imported); it is embedded whole into the server binary, so
+    // the 500 kB hint does not apply. 1000 kB keeps the canary for real
+    // bloat.
+    chunkSizeWarningLimit: 1000,
     rollupOptions: {
       onwarn(warning, defaultHandler) {
         // zod (via @moq/*) writes `@__PURE__` annotations where Rollup
