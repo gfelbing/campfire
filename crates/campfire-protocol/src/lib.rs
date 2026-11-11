@@ -136,6 +136,11 @@ pub enum ClientMsg {
     },
     /// Leave the current call (1:1 or huddle).
     CallLeave,
+    /// Keepalive (README §5): the server ignores it. The stream activity
+    /// alone resets the server's idle timeout, so a stationary user (no
+    /// movement, no chat) keeps their session — and with it their identity
+    /// and position — alive.
+    Ping,
 }
 
 /// Server → client, reliable stream.
@@ -321,6 +326,13 @@ mod tests {
     #[test]
     fn unknown_message_type_is_rejected() {
         assert!(from_line::<ClientMsg>(r#"{"t":"bogus"}"#).is_err());
+    }
+
+    #[test]
+    fn client_ping_roundtrip() {
+        let line = to_line(&ClientMsg::Ping);
+        assert_eq!(line, "{\"t\":\"ping\"}\n");
+        assert_eq!(from_line::<ClientMsg>(&line).unwrap(), ClientMsg::Ping);
     }
 
     #[test]

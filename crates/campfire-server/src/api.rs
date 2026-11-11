@@ -420,6 +420,9 @@ async fn fallback_event(
                     state.world.leave(&room, &token);
                     fallback_map().lock().unwrap().remove(&token);
                 }
+                // Keepalive (README §5): the session lives with the open SSE
+                // stream, not a command-stream idle timer — nothing to do.
+                ClientMsg::Ping => {}
                 ClientMsg::Join { .. } => return Err(err(ErrorCode::BadMessage)),
             }
             Ok(Json(serde_json::json!({})))

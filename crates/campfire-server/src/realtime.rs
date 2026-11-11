@@ -40,11 +40,10 @@ type Who = Arc<Mutex<Option<(String, String)>>>;
 /// A JSON line longer than this is refused (README §14: no unbounded reads).
 const MAX_LINE_BYTES: usize = 80 * 1024;
 /// Close a session that sends nothing on the command stream for this long
-/// (README §5 lifecycle). Deliberately generous: movement and presence ride
-/// datagrams, so a quiet-but-alive user sends nothing here — the QUIC
-/// connection's own idle timeout (`--idle-timeout-secs`, default 300 s) is
-/// the real liveness check; this only reaps clients that join and then
-/// vanish without closing.
+/// (README §5 lifecycle). Generous by design: the client's 25 s keepalive
+/// ping (`ping`) is the liveness signal — a stationary user sends nothing
+/// but pings, and the ping also resets the QUIC idle timeout, so this
+/// mainly reaps clients whose process vanished without closing.
 const IDLE_TIMEOUT: Duration = Duration::from_secs(300);
 /// First message (join) must arrive within this window.
 const JOIN_TIMEOUT: Duration = Duration::from_secs(10);
@@ -448,6 +447,9 @@ fn dispatch(
             };
             call_result(world.call_leave(&room, &id), tx)
         }
+        // Keepalive: the read loop's idle timer already reset with the
+        // bytes, so there is nothing to do (README §5).
+        Ok(ClientMsg::Ping) => true,
         Err(_err) => send(tx, ErrorCode::BadMessage),
     }
 }

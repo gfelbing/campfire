@@ -64,7 +64,7 @@ Consequences of the HTTP/3-only data path: no WebSockets (WebTransport instead),
 3. `GET /api/v1/maps` lists the maps; the map JSON comes from `GET /api/v1/maps/<map path>`.
 4. `new WebTransport("…/wt")` → `{"t":"join","room":…,"name":…}` on a stream → `{"t":"hello", …}` with the room state, chat history, call roster and a reconnect token.
 5. Movement goes out as datagrams at up to 15 Hz; each tick the server broadcasts one batched datagram (≤ 1200 B) per room.
-6. On disconnect the member is marked *gone* (not removed) for the **10 s reconnect window**: no `left` broadcast, seat in the room and bubble kept. A re-join with the token restores identity, position and call membership instantly (and resets the movement sequence — a fresh page starts counting at 0). After the window the member is removed with a normal leave.
+6. On disconnect the member is marked *gone* (not removed) for the **30 s reconnect window**: no `left` broadcast, seat in the room and bubble kept. A re-join with the token restores identity, position and call membership instantly (and resets the movement sequence — a fresh page starts counting at 0). After the window the member is removed with a normal leave.
 
 ## 4. Network surface
 
@@ -89,7 +89,7 @@ Consequences of the HTTP/3-only data path: no WebSockets (WebTransport instead),
 
 ## 5. Realtime protocol
 
-Reliable stream (JSON lines): join/leave, chat, typing, call state, errors. Datagrams: movement only (each entry carries a sequence number; stale ones are dropped).
+Reliable stream (JSON lines): join/leave, chat, typing, call state, keepalive ping, errors. Datagrams: movement only (each entry carries a sequence number; stale ones are dropped).
 
 ```jsonc
 // client → server (stream)
@@ -98,6 +98,7 @@ Reliable stream (JSON lines): join/leave, chat, typing, call state, errors. Data
 {"t":"leave"} {"t":"chat","text":"hi"} {"t":"typing","on":true}
 {"t":"bubble","off":true}                    // opt out of calls
 {"t":"call_mute"/"call_screen"/"call_leave", …}   // call presence
+{"t":"ping"}                                 // keepalive: resets the idle timeout
 
 // server → client (stream)
 {"t":"hello", "you":"u_…", "room":"office", "token":"…", "users":[…], "chat":[…], "call":[…]}

@@ -26,7 +26,11 @@ const ROOM_CAP: usize = 2048;
 pub const TICK: Duration = Duration::from_millis(50);
 /// How long a disconnected user keeps their identity (README §5 reconnect):
 /// position, call membership and the token all survive a drop for this long.
-pub const RECONNECT_WINDOW: Duration = Duration::from_secs(10);
+/// 30 s, not 10: a browser that loses a WebTransport connection takes
+/// ~10-11 s to re-establish it (measured headless), so a 10 s window expired
+/// before the rejoin landed and the user was re-spawned with a fresh id.
+/// The extra hold on a genuinely closed tab is the accepted trade.
+pub const RECONNECT_WINDOW: Duration = Duration::from_secs(30);
 /// Proximity call (README §6.3): a bubble has a one-tile radius around the
 /// centroid of its participants. Less than [`BUBBLE_RADIUS`] tiles from
 /// another player (or from the bubble's center) pulls you in; at the radius

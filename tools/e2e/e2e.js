@@ -216,12 +216,12 @@ const userCount = (page) =>
     // re-form, so the badge stays gone (a B that rejoined within bubble
     // radius would legitimately re-enter the call). It also covers a lost
     // walk-away (datagrams are unreliable): B's seat then drains with its
-    // 10 s reconnect window and the call ends at the purge.
+    // 30 s reconnect window and the call ends at the purge.
     await pageB.close();
     await waitUntil(
       async () => !(await badgeFor(pageA, NAME_B)),
       "B's 🎧 badge gone from A after walk-away",
-      40_000,
+      60_000,
     );
     console.log("   bubble torn down after walk-away");
 
