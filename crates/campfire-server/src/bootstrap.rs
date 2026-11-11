@@ -5,11 +5,13 @@
 //! itself cannot advertise. The public TCP port is therefore a TLS front
 //! that answers HTTP/1.1 by hand:
 //!
-//! * **HTTP** — a minimal HTTP/1.1 answer carrying `Alt-Svc: h3=":port"`.
-//!   The document asks the browser to reload once (`?alt=1`), by which time
-//!   the alternative is cached and the reload (plus every later request,
-//!   including the WebTransport connect) rides HTTP/3. If the reload still
-//!   arrives over TCP, the page says so — that means UDP is unreachable.
+//! * **HTTP** — a `302` back to the original target, carrying
+//!   `Alt-Svc: h3=":port"`. The browser caches the alternative from the
+//!   redirect response and follows it over HTTP/3; by then (plus every
+//!   later request, including the WebTransport connect) the alternative is
+//!   in play. If the redirected request still lands over TCP (the target
+//!   then carries the `?alt=1` marker), the page says so — that means UDP
+//!   is unreachable.
 //!
 //! Failures here are logged and non-fatal: the QUIC service itself keeps
 //! working for HTTP/3-aware clients; only browser discovery degrades.
@@ -100,39 +102,44 @@ pub fn start(cfg: &Config) -> Result<()> {
     Ok(())
 }
 
-/// The HTTP/1.1 bootstrap answer: `Alt-Svc` plus a document that reloads once
-/// (`?alt=1`) so the browser re-requests over HTTP/3 with the alternative
-/// cached. If the reload still lands here (no `alt=1` → refresh; `alt=1` →
-/// explanation), UDP to this port is not reachable from that browser.
+/// The HTTP/1.1 bootstrap answer. First hop (no `alt=1` marker in the
+/// target): `302 Found` back to the same target with the marker appended,
+/// carrying `Alt-Svc` — the browser caches the alternative from the
+/// redirect and re-requests over HTTP/3. If the redirected request still
+/// arrives over TCP, UDP is unreachable from that browser: serve the
+/// explanation instead of looping the redirect.
 async fn bootstrap_answer<S>(
     mut tls: S,
     alt: &str,
     wants_alt_marker: bool,
-    refresh: Option<String>,
+    redirect: Option<String>,
 ) -> std::io::Result<()>
 where
     S: tokio::io::AsyncWrite + Unpin,
 {
-    let body = if wants_alt_marker {
-        "<!doctype html><meta charset=utf-8><title>Campfire</title>\
+    let (head, body) = if wants_alt_marker {
+        let body = "<!doctype html><meta charset=utf-8><title>Campfire</title>\
 <p>Campfire runs over HTTP/3 (QUIC on UDP). This page was served over TCP \
 because the browser has not switched to HTTP/3 yet.</p>\
 <p>If reloading the page does not fix this, UDP to this port is not \
 reachable from your browser/network.</p>"
-            .to_owned()
+            .to_owned();
+        (
+            format!(
+                "HTTP/1.1 200 OK\r\nAlt-Svc: {alt}\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n",
+                body.len()
+            ),
+            body,
+        )
     } else {
-        // Reload to the original target (query kept) with the alt marker.
-        let refresh_url = refresh.as_deref().unwrap_or("?alt=1");
-        format!(
-            "<!doctype html><meta charset=utf-8>\
-<meta http-equiv=refresh content=\"0; url={refresh_url}\">\
-<title>Campfire</title><p>Switching to HTTP/3&hellip;</p>"
+        let redirect = redirect.unwrap_or_else(|| "/?alt=1".to_owned());
+        (
+            format!(
+                "HTTP/1.1 302 Found\r\nAlt-Svc: {alt}\r\nLocation: {redirect}\r\nContent-Length: 0\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n"
+            ),
+            String::new(),
         )
     };
-    let head = format!(
-        "HTTP/1.1 200 OK\r\nAlt-Svc: {alt}\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n",
-        body.len()
-    );
     tls.write_all(head.as_bytes()).await?;
     tls.write_all(body.as_bytes()).await?;
     tls.flush().await?;

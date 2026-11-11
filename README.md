@@ -28,7 +28,7 @@ Other tasks: `just check` (fmt + clippy + tests), `just build` (release binary w
 |---|---|
 | Written in Rust | Server is 100% Rust |
 | Single service | One binary, in-memory state, no sidecars, no database. The web client is embedded into the binary at compile time; `--static-dir` overrides it at runtime for the dev loop |
-| One port number | Exactly two sockets: UDP (QUIC/HTTP/3 + WebTransport) and TCP (a TLS front that serves the `Alt-Svc` bootstrap page). Everything else — page, assets, API, realtime, media — is HTTP/3 on UDP |
+| One port number | Exactly two sockets: UDP (QUIC/HTTP/3 + WebTransport) and TCP (a TLS front that answers the `Alt-Svc` bootstrap with a 302). Everything else — page, assets, API, realtime, media — is HTTP/3 on UDP |
 | Media is relayed | All call media transits the server-side MoQ SFU (never P2P); every client publishes its stream once and subscribes to the other participants |
 
 Consequences of the HTTP/3-only data path: no WebSockets (WebTransport instead), TLS everywhere, and `curl --http3` for debugging. Media rides the same UDP port, so a network blocking all UDP cannot reach the app at all.
@@ -60,7 +60,7 @@ Consequences of the HTTP/3-only data path: no WebSockets (WebTransport instead),
 ### A session's life
 
 1. `GET /` → `index.html` + assets (embedded, or `--static-dir`).
-2. The browser may first hit the TCP front: a bootstrap page answers with `Alt-Svc` and reloads once (keeping the full request target) so HTTP/3 takes over.
+2. The browser may first hit the TCP front: it answers `302` back to the same target (with an `alt=1` marker) carrying `Alt-Svc`, so the browser caches the HTTP/3 alternative and follows the redirect over UDP. A request that still lands over TCP (marker present) gets an explanation page — UDP is unreachable there.
 3. `GET /api/v1/maps` lists the maps; the map JSON comes from `GET /api/v1/maps/<map path>`.
 4. `new WebTransport("…/wt")` → `{"t":"join","room":…,"name":…}` on a stream → `{"t":"hello", …}` with the room state, chat history, call roster and a reconnect token.
 5. Movement goes out as datagrams at up to 15 Hz; each tick the server broadcasts one batched datagram (≤ 1200 B) per room.
