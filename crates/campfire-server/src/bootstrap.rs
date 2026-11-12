@@ -118,12 +118,43 @@ where
     S: tokio::io::AsyncWrite + Unpin,
 {
     let (head, body) = if wants_alt_marker {
+        // Self-healing page (issues.md "tcp fallback page is shown
+        // initially"): a fresh browser load has no cached Alt-Svc, so the
+        // first navigation lands here over TCP. The Alt-Svc header on this
+        // response is cached before the script below runs, so a plain
+        // reload a moment later lands on QUIC. The attempt counter in
+        // sessionStorage (key `campfire-quic-retry`) stops the reload
+        // after ~5 tries and shows the final message instead of looping
+        // when UDP is genuinely unreachable; the counter expires after a
+        // minute so a later manual reload retries, and the app clears it
+        // on a successful load (client/src/main.ts).
         let body = "<!doctype html><meta charset=utf-8><title>Campfire</title>\
-<p>Campfire runs over HTTP/3 (QUIC on UDP). This page was served over TCP \
-because the browser has not switched to HTTP/3 yet.</p>\
-<p>If reloading the page does not fix this, UDP to this port is not \
-reachable from your browser/network.</p>"
-            .to_owned();
+<p id=retry>Campfire runs over HTTP/3 (QUIC on UDP). This page was served \
+over TCP because the browser has not switched to HTTP/3 yet. Trying again \
+automatically&#8230;</p>\
+<p id=final hidden>Campfire runs over HTTP/3 (QUIC on UDP). This page was \
+served over TCP because the browser has not switched to HTTP/3 yet.</p>\
+<p id=final2 hidden>If reloading the page does not fix this, UDP to this \
+port is not reachable from your browser/network.</p>\
+<script>\
+(function () {\
+  var KEY = \"campfire-quic-retry\";\
+  var MAX = 5, WAIT = 1500, WINDOW = 60000;\
+  var n = 0;\
+  try {\
+    var prev = JSON.parse(sessionStorage.getItem(KEY) || \"null\");\
+    if (prev && typeof prev.n === \"number\" && Date.now() - prev.t < WINDOW) n = prev.n;\
+  } catch (e) {}\
+  if (n >= MAX) {\
+    document.getElementById(\"retry\").hidden = true;\
+    document.getElementById(\"final\").hidden = false;\
+    document.getElementById(\"final2\").hidden = false;\
+    return;\
+  }\
+  try { sessionStorage.setItem(KEY, JSON.stringify({ n: n + 1, t: Date.now() })); } catch (e) {}\
+  setTimeout(function () { location.replace(location.href); }, WAIT);\
+})();\
+</script>".to_owned();
         (
             format!(
                 "HTTP/1.1 200 OK\r\nAlt-Svc: {alt}\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n",

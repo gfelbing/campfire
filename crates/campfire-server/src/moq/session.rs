@@ -22,8 +22,9 @@
 //! the server handshake). The blast radius is one call; the client
 //! subscribes by roster id.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use axum::Extension;
 use axum::extract::{Path, State};
@@ -57,16 +58,35 @@ impl MoqSfu {
     /// Build the SFU next to the world (docs/moq-sfu.md §5: no new socket —
     /// MoQ sessions arrive on the existing quinn endpoint via h3).
     pub fn new(world: World, metrics: Metrics) -> Arc<Self> {
-        Arc::new(Self {
+        let sfu = Arc::new(Self {
             server: moq_net::Server::new(),
             fanout: Fanout::new(),
             // The world mints into its own store; the SFU validates against
             // the same one (a clone shares the registry's inner `Arc`).
             tickets: world.tickets().clone(),
-            world,
+            world: world.clone(),
             metrics,
             stats: StatsRegistry::new(moq_net::stats::Config::new()),
-        })
+        });
+        // Backstop for the call-end hook: reclaim any call origin whose call
+        // is no longer live in the world. The fast path is the hook (the
+        // world fires it on call end → `drop_call`); this sweeps the orphans
+        // the hook cannot see — a call that died between the admission check
+        // and origin creation, or a hook that never fired. Live calls are
+        // never swept, so long calls are safe. Every 60 s is plenty: an
+        // orphaned origin holds a 16 MiB pool and one driver task, and call
+        // churn is the only way they accumulate.
+        let fanout = sfu.fanout.clone();
+        let sweep_world = sfu.world.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(60));
+            loop {
+                interval.tick().await;
+                let live = sweep_world.live_call_ids();
+                fanout.sweep(&live);
+            }
+        });
+        sfu
     }
 
     /// The hook the world calls when a call ends: drop the call's origin so
@@ -134,7 +154,6 @@ pub async fn handle_moq(
         sfu.metrics.moq_session_reject();
         return StatusCode::FORBIDDEN.into_response();
     }
-    let origin = sfu.fanout.origin(info.call_id);
 
     let session = match upgrade.accept().await {
         Ok(session) => session,
@@ -143,10 +162,19 @@ pub async fn handle_moq(
             return StatusCode::SERVICE_UNAVAILABLE.into_response();
         }
     };
+    // Create the origin only once the upgrade has succeeded, so a failed
+    // upgrade can't strand an origin (each holds a driver task + a 16 MiB
+    // pool). The call can still end in the sliver between the check above
+    // and here; the SFU's sweeper reclaims any such orphaned origin.
+    let origin = sfu.fanout.origin(info.call_id);
     // Kept to close the QUIC connection when the MoQ session ends (one
     // session owns the connection; the client's endpoint must see the
     // close to reconnect cleanly — same shape as the `/wt` handler).
     let quic = conn.clone();
+    // A second handle for the watchdog below: if the session task panics,
+    // its own `quic` dies with it, so the watchdog closes the connection
+    // from this clone instead.
+    let watchdog_quic = conn.clone();
     let bridge = moq_tokio::transport::Session::new(h3wt::Session::new(session, conn));
     // Per-session stats context, scoped to the call.
     let ctx = sfu
@@ -155,7 +183,14 @@ pub async fn handle_moq(
         .session(format!("call/{}", info.call_id));
     let server = sfu.server.clone().with_stats(ctx);
     let metrics = sfu.metrics.clone();
-    tokio::spawn(async move {
+    let watchdog_metrics = metrics.clone();
+    let watchdog_call = info.call_id;
+    // Set once the session task has counted the session open, so the
+    // watchdog only balances a close for a session it actually opened (a
+    // panic before admission would otherwise drive the gauge negative).
+    let opened = Arc::new(AtomicBool::new(false));
+    let opened_task = opened.clone();
+    let session_handle = tokio::spawn(async move {
         let handshake = match server.accept_request(Instant::now(), bridge).await {
             Ok(handshake) => handshake,
             Err(err) => {
@@ -174,6 +209,7 @@ pub async fn handle_moq(
                 let version = session.version();
                 info!(?version, call = info.call_id, "moq session admitted");
                 metrics.moq_session_open();
+                opened_task.store(true, Ordering::SeqCst);
                 // The handle stays alive until the driver finishes: dropping
                 // it aborts the session with a "dropped" close.
                 let err = moq_net::time::run(driver).await;
@@ -188,6 +224,23 @@ pub async fn handle_moq(
         // One session per connection: tear the QUIC connection down so the
         // client's endpoint sees the close.
         quic.close(quinn::VarInt::from_u32(0), b"moq session ended");
+    });
+    // Watchdog: the handler returns immediately, so nothing else owns the
+    // session task's `JoinHandle`. If the task panics (a downstream unwrap,
+    // a driver bug), its cleanup — and its `quic` handle — dies with it,
+    // leaving a zombie connection and a leaked session count. Recover both.
+    tokio::spawn(async move {
+        if let Err(err) = session_handle.await {
+            warn!(
+                error = %err,
+                call = watchdog_call,
+                "moq session task panicked; forcing cleanup"
+            );
+            if opened.load(Ordering::SeqCst) {
+                watchdog_metrics.moq_session_close();
+            }
+            watchdog_quic.close(quinn::VarInt::from_u32(0), b"moq session task died");
+        }
     });
     StatusCode::OK.into_response()
 }

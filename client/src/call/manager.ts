@@ -51,6 +51,11 @@ export interface PeerView {
   videoOn: boolean;
   /** Presence from `call_screen`: the peer is sharing their screen. */
   screenOn: boolean;
+  /** Transport RTT (ms) of our signaling connection, or `null` when
+   *  unsupported (SSE fallback, or no `WebTransport.getStats()`). Same
+   *  value on every tile — it is our connection's RTT, a proxy for the
+   *  path to the SFU, shown next to each downlink's e2e delay. */
+  rtt: number | null;
 }
 
 /** What the manager tells the UI. */
@@ -77,6 +82,9 @@ export interface CallSignaling {
   sendCallMute(audio: boolean, video: boolean): void;
   sendCallScreen(on: boolean): void;
   sendCallLeave(): void;
+  /** Transport RTT in ms (the `/wt` QUIC connection), `null` when the
+   *  transport can't measure it (SSE fallback, or no `getStats()`). */
+  getRtt(): Promise<number | null>;
 }
 
 export class CallManager {
@@ -103,8 +111,11 @@ export class CallManager {
    *  late start attach). */
   private sessionSeq = 0;
   /** 1 s refresh of the tiles' latency labels while in the call (the
-   *  downlink delay/jitter move on their own, not with roster events). */
+   *  downlink delay and the transport RTT move on their own, not with
+   *  roster events). */
   private statsTimer: number | null = null;
+  /** Last measured transport RTT (ms), or `null` when unsupported. */
+  private rtt: number | null = null;
   /** Room name (broadcast path `call/<room>/<user-id>.hang`). */
   private room: string;
 
@@ -114,6 +125,16 @@ export class CallManager {
     room: string,
   ) {
     this.room = room;
+    // Graceful close (README): on a hard page close (tab closed / navigated
+    // away, not a bfcache hide) stop the MoQ media session so its QUIC
+    // connection ends with a clean close. The `/moq` connection is a second
+    // socket the OS drops without a QUIC close on tab close, so without this
+    // the server only notices the session ended via its idle timeout. The
+    // room-level `leave` is sent by `Connection`'s own pagehide hook; this
+    // covers the media connection.
+    window.addEventListener("pagehide", (e) => {
+      if (!(e as PageTransitionEvent).persisted) this.stopMediaSession();
+    });
   }
 
   /** Our own user id (from `hello`). */
@@ -124,6 +145,13 @@ export class CallManager {
   /** Whether we are currently in a call. */
   inCall(): boolean {
     return this.phase.p === "in-call";
+  }
+
+  /** Stop the MoQ media session (idempotent). Exposed for the pagehide
+   *  graceful-close hook: a clean session close beats waiting out the
+   *  server's idle timeout on a dropped second QUIC socket. */
+  stopMediaSession(): void {
+    this.stopSession();
   }
 
   // --- user actions ---------------------------------------------------------
@@ -466,6 +494,7 @@ export class CallManager {
           audioOn: pres.audio,
           videoOn: pres.video,
           screenOn: pres.screen,
+          rtt: this.rtt,
         };
       });
     this.hooks.onPeers(views);
@@ -477,7 +506,15 @@ export class CallManager {
     // the downlink delay/jitter move on their own, not with roster or
     // presence events, so a periodic re-push keeps them current.
     if (phase.p === "in-call" && this.statsTimer === null) {
-      this.statsTimer = window.setInterval(() => this.pushPeers(), 1000);
+      this.statsTimer = window.setInterval(() => {
+        // Refresh the transport RTT, then push the roster with the fresh
+        // value. `getRtt()` resolves immediately on the SSE fallback
+        // (null) and rejects-to-null when `getStats()` is unavailable.
+        void this.send.getRtt().then((v) => {
+          this.rtt = v;
+          this.pushPeers();
+        });
+      }, 1000);
     } else if (phase.p !== "in-call" && this.statsTimer !== null) {
       window.clearInterval(this.statsTimer);
       this.statsTimer = null;

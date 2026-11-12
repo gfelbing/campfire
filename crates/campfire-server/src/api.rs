@@ -561,7 +561,9 @@ async fn fallback_event(
                     && s.rx.lock().unwrap().is_some()
                 {
                     guard.remove(&secret_bg);
-                    world.leave(&room, &user_id_bg);
+                    // Session-guarded: a token re-join in the meantime has a
+                    // newer session id, and must not be reaped.
+                    world.leave(&room, &user_id_bg, session_id_bg);
                 }
             });
 
@@ -573,7 +575,7 @@ async fn fallback_event(
             // under the map lock and drop the lock before any world call:
             // `Leave` re-locks the map to remove this entry, and the mutex
             // is not reentrant.
-            let (room, name, user_id, chat_allowed) = {
+            let (room, name, user_id, session_id, chat_allowed) = {
                 let guard = state.fallback.lock().unwrap();
                 let session = guard
                     .get(&token)
@@ -594,6 +596,7 @@ async fn fallback_event(
                     session.room.clone(),
                     session.name.clone(),
                     session.user_id.clone(),
+                    session.session_id,
                     chat_allowed,
                 )
             };
@@ -635,7 +638,7 @@ async fn fallback_event(
                 // the session is gone (the SSE stream ends with the member's
                 // channel).
                 ClientMsg::Leave => {
-                    state.world.leave(&room, &user_id);
+                    state.world.leave(&room, &user_id, session_id);
                     state.fallback.lock().unwrap().remove(&token);
                 }
                 // Keepalive (README §5): the session lives with the open SSE

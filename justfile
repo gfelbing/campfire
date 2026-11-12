@@ -134,3 +134,14 @@ e2e *args:
 # tools/e2e.
 moq-e2e *args:
 	node tools/e2e/moq.js --browser "$(command -v brave || command -v chromium || echo chromium)" "$@"
+
+# MoQ soak (issues.md issue 8.6): the full MoQ e2e plus a hold of N minutes
+# (default 30, pass one to override) in which both clients keep their call
+# live; asserts continuous delivery, a stable origin gauge, no panics and a
+# bounded server RSS. Needs the server built with `just e2e-build`; for the
+# server-side assertions, start it with its log at /tmp/campfire-server.log.
+soak minutes="30":
+	E2E_SOAK_MIN={{minutes}} \
+	  E2E_SERVER_LOG=/tmp/campfire-server.log \
+	  E2E_SERVER_PID="$(pgrep -o -f 'target/release/campfir[e]' || true)" \
+	  node tools/e2e/moq.js --browser "$(command -v brave || command -v chromium || echo chromium)"

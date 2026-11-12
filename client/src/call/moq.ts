@@ -26,6 +26,26 @@ import * as Publish from "@moq/publish";
 import * as Watch from "@moq/watch";
 import { Signal } from "@moq/signals";
 
+/** Catch-up (issues.md "skipping when falling behind"): playback enters a
+ *  call 1 s behind the live edge, so the initial burst of frames lands in
+ *  the jitter buffer instead of re-anchoring the clock mid-burst. After
+ *  the stability window the delay shrinks to the steady value;
+ *  `Sync.wait` wakes on the change (the bundle watches
+ *  `in.delay.changed`), so the shrink takes effect live and the ring
+ *  resize on shrink keeps the newest samples. */
+const ENTRY_DELAY_MS = 1000;
+const STEADY_DELAY_MS = 300;
+/** How long the entry delay is held: long enough for a slow start to
+ *  settle, short enough to be unnoticeable. */
+const ENTRY_WINDOW_MS = 5000;
+/** Backlog budget as a multiple of the delay: `Sync.in.buffer` = 2 ×
+ *  delay, which switches the audio ring into buffered mode (no read skip,
+ *  capacity 2 × delay) and grows the transport `maxAge` so a backlog
+ *  reaches the ring instead of being dropped. The invariant
+ *  `buffer ≤ 2 × delay` keeps the backlog inside the ring capacity, so
+ *  the writer never has to drop either. */
+const BACKLOG_FACTOR = 2;
+
 /** Options for one call session. */
 export interface MoqCallOpts {
   /** Full `/moq/{ticket}` URL. */
@@ -76,6 +96,22 @@ export interface MoqDebugInfo {
   version: string | null;
   state: "starting" | "live" | "stopped" | "failed";
   error: string | null;
+  /** Last `session.stats()` snapshot plus the derived estimate (bps); the
+   *  uplink-scaling check (issues.md "videostreams should scale to
+   *  throughput") reads this. `estimate` is what the allocator divides. */
+  stats?: {
+    estimatedSendRate: number | null;
+    bytesSent: number | null;
+    estimate: number | null;
+  } | null;
+  /** Encoder output totals (demand-gated): frozen `aud.bytes` means no
+   *  subscriber is attached to the rendition's track, i.e. the uplink
+   *  side of the delivery path is dead. */
+  enc?: {
+    cam: { frames: number; bytes: number } | null;
+    aud: { frames: number; bytes: number } | null;
+    audActive: boolean | null;
+  } | null;
 }
 
 /** Per-participant downlink state for the e2e harness (debug hook; the
@@ -87,6 +123,31 @@ export interface MoqDownHook {
   audioBytes: number;
   delay: number;
   jitter: number;
+  /** Audio ring backlog, ms (the span of buffered media): the catch-up
+   *  test watches this drain back to the delay floor after a spike. */
+  bufferedMs: number;
+  // Diagnostics (step 7 audio-flatline root cause): which rendition each
+  // source resolved, and the decoder gate/active states.
+  camTrack: string | undefined;
+  audTrack: string | undefined;
+  audEnabled: boolean;
+  audStalled: boolean;
+  audRoot: boolean;
+  /** AudioContext state ("running"/"suspended"/"closed") of the audio
+   *  decoder's context: a suspended context stops the render worklet,
+   *  which freezes the ring playhead and the paced decode loop. */
+  audCtx: string | null;
+  /** Ring playhead, ms (the audio presentation position the decode loop
+   *  paces inserts against): frozen while audio is flat. */
+  audClock: number | null;
+  /** Buffered media ranges on the media timeline (ms), consumer + decoded:
+   *  where the undelivered audio sits relative to `audClock`. */
+  audBuf: { start: number; end: number }[] | null;
+  /** The shared playback clock (ms) and its max-age floor. */
+  syncTs: number | null;
+  syncMaxAge: number | null;
+  mainStatus: string;
+  scrStatus: string;
 }
 
 declare global {
@@ -115,6 +176,9 @@ function setHook(patch: Partial<MoqDebugInfo>): void {
 interface Downlink {
   id: string;
   broadcast: Watch.Broadcast;
+  /** The peer's screen share (its own hang, `*.screen.hang`); null-side
+   *  counterpart of the uplink's `screenBroadcast`. */
+  scrBroadcast: Watch.Broadcast;
   sync: Watch.Sync;
   camSource: Watch.Video.Source;
   camDecoder: Watch.Video.Decoder;
@@ -134,6 +198,22 @@ interface Downlink {
   muted: boolean;
   /** Last status reported to `onDownlinkChange` (transition guard). */
   lastStatus: DownlinkStatus;
+  /** Entry-delay ramp (see ENTRY_DELAY_MS): the signals driving
+   *  `sync.in.delay` / `sync.in.buffer`, and whether the shrink to the
+   *  steady value already happened. */
+  delaySig: Signal<Net.Time.Milli>;
+  bufferSig: Signal<Net.Time.Milli>;
+  /** When the downlink was created (the entry window's start). */
+  bornMs: number;
+  /** True once the entry delay shrank to STEADY_DELAY_MS (one-shot). */
+  steady: boolean;
+  /** Decoder `enabled` gates, owned here so the re-announce guard can
+   *  pulse them off→on to force a re-subscribe (plan 3). */
+  camEnabled: Signal<boolean>;
+  scrEnabled: Signal<boolean>;
+  audEnabled: Signal<boolean>;
+  /** Debounce timer for the re-announce pulse; null when none pending. */
+  pulseTimer: number | null;
   unsubs: Array<() => void>;
 }
 
@@ -146,6 +226,16 @@ export class MoqCall {
     null;
   private origin: Net.Origin.Producer | null = null;
   private broadcast: Publish.Broadcast | null = null;
+  /** The uplink hang path without its `.hang` suffix (`call/<room>/<id>`).
+   *  The screen share publishes under `<base>.screen.hang` (separate
+   *  broadcast: starting/stopping a share must not mutate the camera/mic
+   *  hang's catalog — a catalog change re-announces the hang and the SFU
+   *  re-routes it, which kills the receivers' existing v/a subscriptions;
+   *  issues.md "screenshare broken"). */
+  private baseName = "";
+  /** Uplink screen broadcast (its own hang, one `s` rendition); null when
+   *  not sharing. */
+  private screenBroadcast: Publish.Broadcast | null = null;
   private videoCapture: Publish.Video.Capture | null = null;
   private videoEncoder: Publish.Video.Encoder | null = null;
   /** Uplink camera rendition gate (camera off → omitted from the catalog). */
@@ -154,6 +244,21 @@ export class MoqCall {
   private audioEncoder: Publish.Audio.Encoder | null = null;
   private screenCapture: Publish.Video.Capture | null = null;
   private screenEncoder: Publish.Video.Encoder | null = null;
+  /** Uplink bandwidth estimate (bps, issues.md "videostreams should scale
+   *  to throughput"): the congestion controller's `estimatedSendRate`, or
+   *  measured `bytesSent` throughput when the browser omits the field
+   *  (Chrome gates `getStats()` behind `WebTransportStats`, 573538454).
+   *  Feeds the allocator the video encoders reserve against; `undefined`
+   *  tells them "no opinion, hold your rate". */
+  private estimate = new Signal<number | undefined>(undefined);
+  /** Divides the estimate between the camera and screen renditions (both
+   *  video kind, one priority tier, max-min fair split). */
+  private allocator: Net.Bandwidth.Allocator | null = null;
+  /** ~1 Hz poll timer for `session.stats()`; null when the session is down. */
+  private statTimer: number | null = null;
+  /** Last `bytesSent` sample and its wall-clock time (throughput fallback). */
+  private lastBytesSent: number | null = null;
+  private lastStatMs: number | null = null;
   private downlinks = new Map<string, Downlink>();
   private room: string;
   private onDownlinkChange?: (id: string, status: DownlinkStatus) => void;
@@ -195,6 +300,15 @@ export class MoqCall {
       call.session = session;
       call.origin = origin;
       call.version = session.version;
+      call.baseName = opts.name.replace(/\.hang$/, "");
+      // Uplink scaling (issues.md "videostreams should scale to
+      // throughput"): one allocator per session. The camera and screen
+      // encoders reserve their bitrate ceilings on it; the ~1 Hz stats
+      // poll below feeds it the transport's send-rate estimate, so the
+      // two video renditions share the uplink instead of each targeting
+      // all of it. Audio is fixed-bitrate and does not reserve.
+      const allocator = new Net.Bandwidth.Allocator(call.estimate);
+      call.allocator = allocator;
 
       const broadcast = new Publish.Broadcast({
         origin,
@@ -217,9 +331,21 @@ export class MoqCall {
           broadcast,
           capture,
           enabled,
+          // The allocator divides the uplink estimate between the video
+          // renditions; the encoder caps its resolved bitrate at the
+          // granted slice (advisory: the transport sheds whatever excess
+          // slips through).
+          bandwidth: allocator,
           // A keyframe about every second: a late-joining downlink starts
           // decoding at the next keyframe (fast-start, docs §10 T7).
-          config: { keyframeInterval: Net.Time.Milli(1000) },
+          config: {
+            keyframeInterval: Net.Time.Milli(1000),
+            // Auto-sizing bound (the capture already ideals 720p30):
+            // nothing above it, so the bandwidth grant has a ceiling to
+            // scale down from.
+            maxPixels: 1280 * 720,
+            frameRate: 30,
+          },
         });
       }
       if (audio) {
@@ -248,6 +374,9 @@ export class MoqCall {
           opts.onLog(`moq session closed: ${err.message}`);
         }
       });
+      // Uplink scaling: sample the transport's send-rate estimate at
+      // ~1 Hz into the allocator the video encoders reserve against.
+      call.startStatsPoll(session);
       // 1 Hz timer: refreshes the e2e downlink hook (gated by the debug
       // flag) and polls downlink status for the UI tile's state label.
       call.refreshDownlinks();
@@ -259,6 +388,80 @@ export class MoqCall {
       setHook({ state: "failed", error: msg });
       throw new Error(`moq call failed: ${msg}`, { cause: err });
     }
+  }
+
+  /** Poll the transport's send-rate estimate into `estimate` at ~1 Hz
+   *  (issues.md "videostreams should scale to throughput"). The transport
+   *  has no event for the estimate, so it is sampled on a timer, skipping a
+   *  tick while the previous snapshot is outstanding (the library's Reload
+   *  does the same at 100 ms; 1 Hz is ample for a bitrate grant). Prefers
+   *  the congestion controller's `estimatedSendRate`; when the browser
+   *  omits it (Chrome gates `WebTransport.getStats()` behind the
+   *  `WebTransportStats` runtime flag, Chromium 573538454) it falls back to
+   *  measured `bytesSent` throughput — conservative: it reads below
+   *  capacity while unsaturated, which keeps the grant tight, never loose.
+   *  `getStats()` failures are swallowed by the library (empty snapshot);
+   *  the estimate simply holds its last value. */
+  private startStatsPoll(session: NonNullable<typeof this.session>): void {
+    if (this.statTimer !== null) return;
+    let pending = false;
+    let samples = 0;
+    let withRate = 0;
+    let warned = false;
+    const sample = async (): Promise<void> => {
+      if (pending || this.session !== session) return;
+      pending = true;
+      try {
+        const s = await session.stats();
+        if (this.session !== session) return;
+        const now = performance.now();
+        let est: number | undefined = s.estimatedSendRate;
+        if (est === undefined && s.bytesSent !== undefined) {
+          if (this.lastBytesSent !== null && this.lastStatMs !== null) {
+            const dtMs = now - this.lastStatMs;
+            if (dtMs > 0 && s.bytesSent > this.lastBytesSent) {
+              est = ((s.bytesSent - this.lastBytesSent) * 8 * 1000) / dtMs;
+            }
+          }
+        }
+        if (s.bytesSent !== undefined) this.lastBytesSent = s.bytesSent;
+        this.lastStatMs = now;
+        if (est !== undefined) this.estimate.set(est);
+        samples++;
+        if (s.estimatedSendRate !== undefined) withRate++;
+        // Decide whether the fallback is in play: after ten samples without
+        // the field, say so once (dev loop / e2e read this to confirm which
+        // estimate source the test browser provides).
+        if (!warned && samples >= 10 && withRate === 0) {
+          warned = true;
+          if (this.estimate.peek() !== undefined) {
+            console.info(
+              "campfire: WebTransport stats have no estimatedSendRate; uplink scaling uses measured bytesSent throughput",
+            );
+          }
+        }
+        if (__CAMPFIRE_DEBUG__) {
+          setHook({
+            stats: {
+              estimatedSendRate: s.estimatedSendRate ?? null,
+              bytesSent: s.bytesSent ?? null,
+              estimate: est ?? null,
+            },
+            enc: {
+              cam: this.videoEncoder?.out.stats.peek() ?? null,
+              aud: this.audioEncoder?.out.stats.peek() ?? null,
+              audActive: this.audioEncoder?.out.active.peek() ?? null,
+            },
+          });
+        }
+      } catch {
+        // getStats() absent or failing: hold the last estimate.
+      } finally {
+        pending = false;
+      }
+    };
+    void sample();
+    this.statTimer = window.setInterval(() => void sample(), 1000);
   }
 
   /** Create (or reuse) the downlink pipeline for a participant. The
@@ -276,8 +479,29 @@ export class MoqCall {
       // subscribing (blind when the relay does not announce).
       announced: true,
     });
+    // The peer's screen share rides its own hang (the sender's
+    // startScreen publishes `<base>.screen.hang`): watching it here keeps
+    // the camera/mic hang's catalog static for the peer's whole share,
+    // so no re-announce/re-route touches the v/a subscriptions. Before the
+    // peer shares (and after they stop) the hang is unannounced and the
+    // source simply never resolves — the screen gate stays off.
+    const scrBroadcast = new Watch.Broadcast({
+      origin,
+      name: Net.Path.from(`call/${this.room}/${id}.screen.hang`),
+      enabled: true,
+      announced: true,
+    });
+    // The playback delay is driven, not fixed: a 1 s entry delay (see
+    // ENTRY_DELAY_MS) shrinks to the steady value after the stability
+    // window in `refreshDownlinks`. `buffer` = 2 × delay keeps the
+    // backlog budget inside the ring capacity (see BACKLOG_FACTOR).
+    const delaySig = new Signal<Net.Time.Milli>(Net.Time.Milli(ENTRY_DELAY_MS));
+    const bufferSig = new Signal<Net.Time.Milli>(
+      Net.Time.Milli(ENTRY_DELAY_MS * BACKLOG_FACTOR),
+    );
     const sync = new Watch.Sync({
-      delay: "auto",
+      delay: delaySig,
+      buffer: bufferSig,
       probe: session.probe,
     });
     const camSource = new Watch.Video.Source({
@@ -285,8 +509,11 @@ export class MoqCall {
       target: { name: "v" },
       supported: Watch.Video.Decoder.supported,
     });
+    // The screen source watches the peer's separate screen hang, not the
+    // main broadcast: it can never fall back onto the camera rendition,
+    // and an unannounced hang simply never resolves (gate stays off).
     const scrSource = new Watch.Video.Source({
-      broadcast,
+      broadcast: scrBroadcast,
       target: { name: "s" },
       supported: Watch.Video.Decoder.supported,
     });
@@ -295,13 +522,19 @@ export class MoqCall {
       target: { name: "a" },
       supported: Watch.Audio.Decoder.supported,
     });
-    // The sources fall back to the next rendition when the target name is
-    // not in the catalog (the screen source would decode the camera while
-    // the peer does not share; the camera source a peer's screen while
-    // their camera is off). Gate each decoder on the track it actually
-    // resolved, so only its own rendition is downloaded and rendered.
+    // The camera source falls back to the next rendition when the target
+    // name is not in the catalog (a peer with the camera off offers no
+    // video rendition at all, so this mostly guards a mid-toggle race).
+    // Gate each decoder on the track it actually resolved, so only its own
+    // rendition is downloaded and rendered.
     const camEnabled = new Signal(false);
     const scrEnabled = new Signal(false);
+    // The audio decoder runs on its own enable signal (not a literal
+    // true) so the re-announce guard can pulse it: toggling `enabled`
+    // off→on re-runs the decoder's subscribe effect, re-subscribing the
+    // track on the broadcast's current consumer (issues.md "screenshare
+    // broken", plan 3 — the re-announce-proofing).
+    const audEnabled = new Signal(true);
     const camDecoder = new Watch.Video.Decoder({
       enabled: camEnabled,
       source: camSource,
@@ -313,7 +546,7 @@ export class MoqCall {
       sync,
     });
     const audDecoder = new Watch.Audio.Decoder({
-      enabled: true,
+      enabled: audEnabled,
       source: audSource,
       sync,
     });
@@ -332,6 +565,7 @@ export class MoqCall {
     const d: Downlink = {
       id,
       broadcast,
+      scrBroadcast,
       sync,
       camSource,
       camDecoder,
@@ -348,6 +582,14 @@ export class MoqCall {
       meterStream: null,
       muted: false,
       lastStatus: "subscribing",
+      delaySig,
+      bufferSig,
+      bornMs: performance.now(),
+      steady: false,
+      camEnabled,
+      scrEnabled,
+      audEnabled,
+      pulseTimer: null,
       unsubs: [],
     };
     // The decoder's context/root are created when the audio rendition
@@ -365,6 +607,37 @@ export class MoqCall {
     );
     camEnabled.set(camSource.out.track.peek() === "v");
     scrEnabled.set(scrSource.out.track.peek() === "s");
+    // Re-announce guard (plan 3): the main hang can be re-announced while
+    // the peer stays in the call (their session reloads, or the SFU
+    // re-routes it), which re-routes the hang server-side and kills the
+    // existing v/a subscriptions. The library only re-subscribes when the
+    // active consumer's identity or a deep-unequal config changes; a
+    // same-content re-announce changes neither, so the track keeps its
+    // name but the subscription is dead. Watching the catalog and the
+    // active consumer and pulsing the three `enabled` gates off→on forces
+    // each decoder's subscribe effect to re-run, re-subscribing the same
+    // track on the current consumer (the canvas keeps its last frame; the
+    // off window is covered by the playback buffer). The first change of
+    // each signal is the initial load, not a re-announce, so it is
+    // skipped.
+    let catalogFirst = true;
+    let activeFirst = true;
+    d.unsubs.push(
+      d.broadcast.out.catalog.subscribe(() => {
+        if (catalogFirst) {
+          catalogFirst = false;
+          return;
+        }
+        this.schedulePulse(d);
+      }),
+      d.broadcast.out.active.subscribe(() => {
+        if (activeFirst) {
+          activeFirst = false;
+          return;
+        }
+        this.schedulePulse(d);
+      }),
+    );
     this.downlinks.set(id, d);
     this.refreshDownlinks();
     return this.viewOf(d);
@@ -386,30 +659,54 @@ export class MoqCall {
     this.videoEnabled?.set(on);
   }
 
-  /** Register the screen-share rendition `s` (the catalog picks it up at
-   *  the next encoder tick; subscribers see it immediately). */
+  /** Register the screen-share rendition `s` on its **own** hang
+   *  (`<base>.screen.hang`, a separate broadcast). Keeping it off the
+   *  camera/mic hang is the fix: adding `s` to that hang's catalog would
+   *  re-announce it, the SFU would re-route it, and the receivers' existing
+   *  `v`/`a` subscriptions would die (issues.md "screenshare broken"). A
+   *  distinct hang never mutates the main catalog. The receiver's screen
+   *  gate (`scrEnabled`) follows the separate downlink broadcast. */
   startScreen(stream: MediaStream): void {
-    if (this.screenEncoder || !this.broadcast) return;
+    if (this.screenEncoder || !this.origin || !this.baseName) return;
     const track = stream.getVideoTracks()[0];
     if (!track) return;
     const capture = new Publish.Video.Capture({
       source: track as Publish.Video.StreamTrack,
     });
     this.screenCapture = capture;
+    const screen = new Publish.Broadcast({
+      origin: this.origin,
+      name: Net.Path.from(`${this.baseName}.screen.hang`),
+      enabled: true,
+      announce: true,
+    });
+    this.screenBroadcast = screen;
     this.screenEncoder = new Publish.Video.Encoder("s", {
-      broadcast: this.broadcast,
+      broadcast: screen,
       capture,
       enabled: true,
-      config: { keyframeInterval: Net.Time.Milli(1000) },
+      // Shares the uplink estimate with the camera rendition (one
+      // allocator, max-min fair split between the two video tracks).
+      bandwidth: this.allocator ?? undefined,
+      config: {
+        keyframeInterval: Net.Time.Milli(1000),
+        // Screen capture targets 15 fps (media.ts); bound it so the
+        // auto-sizing and the bandwidth grant have a ceiling.
+        frameRate: 15,
+      },
     });
   }
 
-  /** Unregister the screen rendition (closes its active tracks). */
+  /** Unregister the screen rendition: close its hang so the SFU stops
+   *  routing it and the receivers' screen gates go idle (no re-announce on
+   *  the main hang). */
   stopScreen(): void {
     this.screenEncoder?.close();
     this.screenEncoder = null;
     this.screenCapture?.close();
     this.screenCapture = null;
+    this.screenBroadcast?.close();
+    this.screenBroadcast = null;
   }
 
   /** Silent zone (README roadmap "Map enhancements"): mute this
@@ -447,6 +744,8 @@ export class MoqCall {
     this.screenEncoder = null;
     this.screenCapture?.close();
     this.screenCapture = null;
+    this.screenBroadcast?.close();
+    this.screenBroadcast = null;
     this.videoEncoder?.close();
     this.videoEncoder = null;
     this.videoCapture?.close();
@@ -466,6 +765,15 @@ export class MoqCall {
       window.clearInterval(this.hookTimer);
       this.hookTimer = null;
     }
+    if (this.statTimer !== null) {
+      window.clearInterval(this.statTimer);
+      this.statTimer = null;
+    }
+    this.allocator?.close();
+    this.allocator = null;
+    this.estimate.set(undefined);
+    this.lastBytesSent = null;
+    this.lastStatMs = null;
     if (__CAMPFIRE_DEBUG__) window.__campfire_moq_down = {};
     setHook({ state: "stopped" });
   }
@@ -503,7 +811,49 @@ export class MoqCall {
     d.meterStream = meter.stream;
   }
 
+  /** Debounce the re-announce pulse: a re-route surfaces as several
+   *  catalog/consumer changes in a short window; one pulse is enough. */
+  private schedulePulse(d: Downlink): void {
+    // BISECT (audio-flatline root cause): the harness can disable the
+    // pulse entirely to test whether the re-route alone kills the audio.
+    if (
+      (globalThis as { __CAMPFIRE_NOPULSE__?: boolean }).__CAMPFIRE_NOPULSE__
+    )
+      return;
+    if (d.pulseTimer !== null) window.clearTimeout(d.pulseTimer);
+    d.pulseTimer = window.setTimeout(() => {
+      d.pulseTimer = null;
+      this.pulseDownlink(d);
+    }, 250);
+  }
+
+  /** Force the downlink's subscriptions to re-open on the broadcast's
+   *  current consumer (the re-announce guard, plan 3). Toggle the decoder
+   *  `enabled` gates off, then restore them on the next macrotask — the
+   *  off→on edge re-runs each decoder's subscribe effect, which closes the
+   *  (dead) subscription and re-subscribes the same track. The off window
+   *  is covered by the playback buffer (audio keeps playing) and the
+   *  canvas keeps its last frame. Audio is pulsed only when its track is
+   *  actually resolved, so a pulse racing the first settle can't strand
+   *  the audio gate off. */
+  private pulseDownlink(d: Downlink): void {
+    if (this.downlinks.get(d.id) !== d) return; // torn down meanwhile
+    d.camEnabled.set(false);
+    d.scrEnabled.set(false);
+    if (d.audSource.out.track.peek() === "a") d.audEnabled.set(false);
+    window.setTimeout(() => {
+      if (this.downlinks.get(d.id) !== d) return;
+      d.camEnabled.set(d.camSource.out.track.peek() === "v");
+      d.scrEnabled.set(d.scrSource.out.track.peek() === "s");
+      d.audEnabled.set(true);
+    }, 100);
+  }
+
   private teardown(d: Downlink): void {
+    if (d.pulseTimer !== null) {
+      window.clearTimeout(d.pulseTimer);
+      d.pulseTimer = null;
+    }
     for (const u of d.unsubs) u();
     d.unsubs = [];
     d.camRenderer.close();
@@ -524,6 +874,7 @@ export class MoqCall {
     d.nodes = [];
     d.sync.close();
     d.broadcast.close();
+    d.scrBroadcast.close();
   }
 
   private viewOf(d: Downlink): DownlinkView {
@@ -557,7 +908,22 @@ export class MoqCall {
    *  (C14). */
   private refreshDownlinks(): void {
     const down: Record<string, MoqDownHook> = {};
+    const now = performance.now();
     for (const [id, d] of this.downlinks) {
+      // Entry-delay ramp (one-shot): once the stability window has passed
+      // and the downlink is actually live, shrink the delay — and its 2×
+      // backlog budget — to the steady value. `Sync.wait` wakes on the
+      // delay change, so the shrink applies to the running playback clock
+      // immediately (no re-subscribe).
+      if (
+        !d.steady &&
+        now - d.bornMs >= ENTRY_WINDOW_MS &&
+        d.broadcast.out.status.peek() === "live"
+      ) {
+        d.steady = true;
+        d.delaySig.update(() => Net.Time.Milli(STEADY_DELAY_MS));
+        d.bufferSig.update(() => Net.Time.Milli(STEADY_DELAY_MS * BACKLOG_FACTOR));
+      }
       const v = this.viewOf(d);
       if (__CAMPFIRE_DEBUG__) {
         down[id] = {
@@ -567,6 +933,19 @@ export class MoqCall {
           audioBytes: v.audioBytes,
           delay: v.delay,
           jitter: v.jitter,
+          bufferedMs: this.bufferedMsOf(d),
+          camTrack: d.camSource.out.track.peek(),
+          audTrack: d.audSource.out.track.peek(),
+          audEnabled: d.audEnabled.peek(),
+          audStalled: d.audDecoder.out.stalled.peek(),
+          audRoot: d.audDecoder.out.root.peek() !== undefined,
+          audCtx: d.audDecoder.out.context.peek()?.state ?? null,
+          audClock: d.audDecoder.out.timestamp.peek() ?? null,
+          audBuf: d.audDecoder.out.buffered.peek() ?? null,
+          syncTs: d.audDecoder.sync.out.timestamp.peek() ?? null,
+          syncMaxAge: d.audDecoder.sync.out.maxAge.peek() ?? null,
+          mainStatus: d.broadcast.out.status.peek(),
+          scrStatus: d.scrBroadcast.out.status.peek(),
         };
       }
       // Notify the manager on a status transition (it re-pushes the
@@ -577,5 +956,14 @@ export class MoqCall {
       }
     }
     if (__CAMPFIRE_DEBUG__) window.__campfire_moq_down = down;
+  }
+
+  /** The audio ring's backlog in ms: the total span of buffered media.
+   *  E2e/diagnostic only (the catch-up test asserts it drains back to the
+   *  delay floor after a spike). */
+  private bufferedMsOf(d: Downlink): number {
+    let ms = 0;
+    for (const r of d.audDecoder.out.buffered.peek() ?? []) ms += r.end - r.start;
+    return ms;
   }
 }

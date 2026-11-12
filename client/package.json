@@ -8,7 +8,8 @@
     "build": "tsc --noEmit && vite build",
     "build:e2e": "CAMPFIRE_DEBUG=1 npm run build",
     "lint": "eslint .",
-    "test": "vitest run"
+    "test": "vitest run",
+    "postinstall": "node ../third_party/moq-watch/patch.mjs && node ../third_party/moq-publish/patch.mjs"
   },
   "dependencies": {
     "@moq/net": "^0.4.7",

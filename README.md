@@ -247,6 +247,13 @@ WebTransport/443 path; WebRTC, TURN and STUN are removed. Full plan:
 [`docs/moq-sfu.md`](docs/moq-sfu.md) (its §10 known issue: the peer's downlink
 after a tab refresh needs a follow-up fix).
 
+Uplink bandwidth adaptation is per client: each publisher samples its own
+transport's send-rate estimate once a second (`WebTransport.getStats()`,
+falling back to measured throughput where the browser omits the field) and
+divides it between its video renditions, so the encode scales to the uplink.
+The SFU itself never transcodes (docs/moq-sfu.md §2); the downlink each
+viewer receives is the publisher's rendition as-is.
+
 ### Map rendering polish
 
 Small gaps between adjacent tiles are visible; tiles should align seamlessly.

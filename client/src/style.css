@@ -681,12 +681,19 @@ body {
   white-space: nowrap;
 }
 
-/* the tile's downlink latency (delay + jitter buffer), live tiles only */
+/* the tile's downlink latency (e2e delay + transport RTT), live tiles only */
 .theater-tile-info .tile-latency {
   font-size: 0.6rem;
   color: #6f7580;
   white-space: nowrap;
   font-variant-numeric: tabular-nums;
+}
+
+/* the tile's e2e-delay sparkline (last ~90 s), right of the name/state */
+.theater-tile-info .tile-spark {
+  width: 45px;
+  height: 15px;
+  flex-shrink: 0;
 }
 
 /* the local (own camera) tile: same size as every remote tile */

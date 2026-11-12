@@ -420,9 +420,10 @@ fn dispatch(
             let Some((room, id, _)) = session.clone() else {
                 return send(tx, ErrorCode::BadMessage);
             };
-            // Intentional leave: immediate `Left` broadcast (room switcher),
-            // no reconnect grace period. The session is torn down.
-            world.leave(&room, &id);
+            // Intentional leave: immediate `Left` broadcast (room switcher).
+            // The identity is still held for the reconnect window (a reload
+            // re-joins with the same token); the session is torn down.
+            world.leave(&room, &id, session_id);
             *who.lock().unwrap() = None;
             *session = None;
             info!(user = %id, room = %room, "user left");

@@ -64,6 +64,9 @@ lto = "thin"
 codegen-units = 1
 strip = "symbols"
 
-# Serve moq-net from the vendored, patched copy (third_party/moq-net/PATCH.md).
+# Serve moq-net from the vendored, patched copy (third_party/moq-net/PATCH.md)
+# and h3-quinn from the vendored, panic-fixed copy
+# (third_party/h3-quinn/PATCH.md).
 [patch.crates-io]
 moq-net = { path = "third_party/moq-net" }
+h3-quinn = { path = "third_party/h3-quinn" }

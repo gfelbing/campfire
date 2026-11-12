@@ -51,6 +51,17 @@ pub fn server_config(
         quinn::IdleTimeout::try_from(idle_timeout)
             .with_context(|| format!("idle timeout {idle_timeout:?} exceeds QUIC varint limit"))?,
     ));
+    // Keep-alive: a call connection goes quiet whenever its media path is
+    // idle (no camera/mic traffic), and quinn would then reap it on the idle
+    // timeout even though both ends are alive. PINGs reset the idle timer on
+    // both sides, so a live-but-quiet session survives. Derive the interval
+    // from the idle timeout (a third, floored at 1 s) so at least two PINGs
+    // fit inside one idle window in every deployment — a hard-coded 15 s is
+    // only safe when the idle timeout is well above 30 s, and the running
+    // environment runs closer to 30 s.
+    let keep_alive = idle_timeout / 3;
+    let keep_alive = Duration::max(keep_alive, Duration::from_secs(1));
+    transport.keep_alive_interval(Some(keep_alive));
     config.transport = Arc::new(transport);
     Ok(config)
 }

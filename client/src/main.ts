@@ -87,6 +87,15 @@ function findPath(
 }
 
 async function main(): Promise<void> {
+  // The app only runs when the page was served over QUIC; a TCP fallback
+  // page carries no JS. Clear the bootstrap retry counter (served by the
+  // TLS front in crates/campfire-server/src/bootstrap.rs) so a later
+  // QUIC outage starts its ~5-attempt reload cycle from scratch.
+  try {
+    sessionStorage.removeItem("campfire-quic-retry");
+  } catch {
+    // storage unavailable (private mode); the counter self-expires server-side
+  }
   const opts = await boot();
   attachKeys();
 

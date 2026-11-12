@@ -51,6 +51,7 @@ const MAX_SPEED: f32 = 8.0;
 pub type UserId = String;
 
 /// A user present in one room.
+#[derive(Clone)]
 struct Member {
     name: String,
     #[allow(dead_code)] // consumed by the client renderer in Phase 4
@@ -88,6 +89,16 @@ struct Member {
     /// restored position is often outside the radius, and the reconnect
     /// promise is that call membership survives).
     reentered_at: Option<Instant>,
+}
+
+/// A member who left explicitly (tab close / room switch, README §5): the
+/// avatar is removed at once (no ghost), but the identity is held under the
+/// token for the reconnect window, so a quick page reload re-joins as the
+/// same user instead of getting a fresh id.
+struct LeftEntry {
+    user_id: UserId,
+    member: Member,
+    left_at: Instant,
 }
 
 /// One room (one map): presence + chat history + the in-flight calls.
@@ -128,6 +139,10 @@ pub struct World {
     session_counter: Arc<AtomicU64>,
     /// How long a disconnected user keeps their identity (README §5).
     reconnect_window: Duration,
+    /// Explicit leaves per (room, token), for the reload re-join (README
+    /// §5): [`World::leave`] removes the avatar at once but parks the
+    /// identity here until the reconnect window elapses.
+    left: Arc<Mutex<HashMap<(String, String), LeftEntry>>>,
     /// Monotonic call ids (docs/moq-sfu.md §5): name the call's media
     /// origin and ride in media tickets.
     call_counter: Arc<AtomicU64>,
@@ -189,6 +204,7 @@ impl World {
             rooms: Arc::default(),
             session_counter: Arc::new(AtomicU64::new(0)),
             reconnect_window: RECONNECT_WINDOW,
+            left: Arc::default(),
             call_counter: Arc::new(AtomicU64::new(0)),
             tickets: Arc::new(crate::moq::tickets::TicketRegistry::new()),
             call_end_hook: None,
@@ -275,13 +291,18 @@ impl World {
         bytes.iter().map(|b| format!("{b:02x}")).collect()
     }
 
-    /// Join a room (README §5). Two paths:
+    /// Join a room (README §5). Three paths:
     ///
     /// * **Reconnect**: `token` matches an existing member (gone, or still
     ///   alive — the old session may not have been detected as dead yet) →
     ///   that member is restored: the new session takes over the member's
     ///   channels, the user id, position and call membership survive, and
     ///   the room hears no `left`/`joined` (no flicker).
+    /// * **Reload re-join**: `token` matches a member removed by
+    ///   [`World::leave`] inside the reconnect window (a tab close, then a
+    ///   reload) → the same id, name and position are restored, and the room
+    ///   hears a fresh `joined` for the unchanged id (it heard `left` on
+    ///   the close).
     /// * **Fresh**: a new id + token is generated and everyone in the room
     ///   hears `joined`.
     ///
@@ -347,6 +368,76 @@ impl World {
                 chat: room_entry.chat.iter().cloned().collect(),
                 ticket,
             };
+            return Ok(joined);
+        }
+
+        // Reload re-join (README §5): the tab was hidden/closed, so the
+        // member was removed by [`World::leave`] (the room heard `left`),
+        // but the token still names them inside the reconnect window.
+        // Restore the same id, name and position; the room hears a fresh
+        // `joined` for the (unchanged) id.
+        if let Some(tok) = token.filter(|t| !t.is_empty())
+            && let Some(left_entry) = {
+                let mut left = self.left.lock().unwrap();
+                left.retain(|_, e| e.left_at.elapsed() < self.reconnect_window);
+                left.remove(&(room.to_owned(), tok.to_owned()))
+            }
+        {
+            let now = Instant::now();
+            let id = left_entry.user_id;
+            let mut member = left_entry.member;
+            // The parked member's session channels are dead; the movement
+            // counters restart with the rejoining session.
+            member.session = session_id;
+            member.tx = tx;
+            member.dtx = dtx;
+            member.gone_at = None;
+            member.reentered_at = Some(now);
+            member.seq = 0;
+            member.dirty = true;
+            member.last_move_at = now;
+            member.move_window_start = now;
+            member.move_window_count = 0;
+            let token_out = member.token.clone();
+            let brief = UserBrief {
+                id: id.clone(),
+                name: member.name.clone(),
+                color: member.avatar.as_ref().map(|a| a.color.clone()),
+            };
+            room_entry.users.insert(id.clone(), member);
+            let joined = Joined {
+                // The leaver's call ended with the leave (README §6.3); a
+                // restored user re-enters calls through the bubble engine.
+                call: Vec::new(),
+                you: id.clone(),
+                token: token_out,
+                users: user_snapshot(room_entry, Some(map)),
+                chat: room_entry.chat.iter().cloned().collect(),
+                ticket: None,
+            };
+            for (uid, m) in &room_entry.users {
+                if uid != &id {
+                    let _ = m.tx.send(ServerMsg::Joined {
+                        user: brief.clone(),
+                    });
+                }
+            }
+            // Call catch-up (same as the fresh path): bystander roster for
+            // the badges, no media ticket.
+            for call in &room_entry.calls {
+                if call.participants.is_empty() {
+                    continue;
+                }
+                let Some(m) = room_entry.users.get(&id) else {
+                    break;
+                };
+                let _ = m.tx.send(ServerMsg::CallStart {
+                    room: room.to_owned(),
+                    participants: call.participant_list(),
+                    zone: call.zone.clone(),
+                    ticket: None,
+                });
+            }
             return Ok(joined);
         }
 
@@ -462,10 +553,37 @@ impl World {
     /// Remove a user from their room and tell everyone left inside. A call
     /// involving the leaver drops (README §6.3): the leaver is not notified,
     /// they are gone.
-    pub fn leave(&self, room: &str, id: &str) {
+    ///
+    /// Guarded by the leaving session: an in-flight `leave` from an old
+    /// session (e.g. a pagehide write flushed just as the page reloaded)
+    /// must not clobber a member a newer session already restored.
+    ///
+    /// The member's identity is parked in [`World::left`] under their token
+    /// for the reconnect window (README §5): a page reload is an explicit
+    /// leave followed by a re-join within seconds, and must come back as the
+    /// same user rather than a fresh id.
+    pub fn leave(&self, room: &str, id: &str, session_id: u64) {
         let mut rooms = self.rooms.lock().unwrap();
+        let Some(member) = rooms
+            .get(room)
+            .and_then(|entry| entry.users.get(id))
+            .filter(|m| m.session == session_id)
+            .cloned()
+        else {
+            // Absent, or the id now belongs to a newer session (a stale
+            // in-flight `leave`): leave it alone.
+            return;
+        };
         let ended = remove_from_room(&mut rooms, room, id);
         drop(rooms);
+        self.left.lock().unwrap().insert(
+            (room.to_owned(), member.token.clone()),
+            LeftEntry {
+                user_id: id.to_owned(),
+                member,
+                left_at: Instant::now(),
+            },
+        );
         for call_id in ended {
             self.call_ended(call_id);
         }
@@ -663,8 +781,9 @@ impl World {
     }
 
     /// The sender started/stopped screen sharing; broadcast to the other
-    /// call participants (presence only — the camera video track is
-    /// replaced by the screen, no renegotiation).
+    /// call participants (presence only — the media rides its own MoQ
+    /// hang, `call/<room>/<user-id>.screen.hang`, so the camera/mic hang
+    /// and its catalog are untouched; client/src/call/moq.ts `startScreen`).
     pub fn call_screen(&self, room: &str, from: &str, on: bool) -> Result<(), ErrorCode> {
         let mut rooms = self.rooms.lock().unwrap();
         let Some(entry) = rooms.get_mut(room) else {
@@ -782,6 +901,18 @@ impl World {
     pub fn stats(&self) -> (usize, usize) {
         let rooms = self.rooms.lock().unwrap();
         (rooms.values().map(|r| r.users.len()).sum(), rooms.len())
+    }
+
+    /// The ids of every call still present in a room (docs/moq-sfu.md §5):
+    /// the source of truth for the SFU's origin sweeper, which drops any
+    /// media origin whose call is no longer here.
+    pub fn live_call_ids(&self) -> Vec<u64> {
+        self.rooms
+            .lock()
+            .unwrap()
+            .values()
+            .flat_map(|r| r.calls.iter().map(|c| c.id))
+            .collect()
     }
 
     /// The room with an active bubble in it (README §6.3): one per room at
@@ -1367,24 +1498,26 @@ mod tests {
         let (tx_b, mut rx_b) = channel();
         let (dtx_b, _) = datagram_channel();
 
+        let a_session = world.next_session_id();
         let a = world
             .join(
                 "office",
                 "alice",
                 None,
                 None,
-                world.next_session_id(),
+                a_session,
                 tx_a,
                 dtx_a,
             )
             .unwrap();
+        let b_session = world.next_session_id();
         let b = world
             .join(
                 "office",
                 "bob",
                 None,
                 None,
-                world.next_session_id(),
+                b_session,
                 tx_b,
                 dtx_b,
             )
@@ -1395,13 +1528,13 @@ mod tests {
         // alice heard bob join
         assert!(matches!(rx_a.try_recv().unwrap(), ServerMsg::Joined { .. }));
 
-        world.leave("office", &a.you);
+        world.leave("office", &a.you, a_session);
         // bob hears alice leave; bob is last man standing
         assert!(matches!(rx_b.try_recv().unwrap(), ServerMsg::Left { .. }));
         let (users, rooms) = world.stats();
         assert_eq!((users, rooms), (1, 1));
 
-        world.leave("office", &b.you);
+        world.leave("office", &b.you, b_session);
         assert_eq!(world.stats(), (0, 0));
     }
 
@@ -1779,6 +1912,8 @@ mod tests {
     /// A joined test user, keeping its outbound stream receiver.
     struct TestUser {
         id: String,
+        /// The session that joined this user (session-guarded world calls).
+        session: u64,
         rx: tokio::sync::mpsc::UnboundedReceiver<ServerMsg>,
         /// The member's datagram receiver (movement batches, `sz` flag).
         drx: tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>,
@@ -1787,11 +1922,13 @@ mod tests {
     fn join_user(world: &World, room: &str, name: &str) -> TestUser {
         let (tx, rx) = channel();
         let (dtx, drx) = datagram_channel();
+        let session = world.next_session_id();
         let joined = world
-            .join(room, name, None, None, world.next_session_id(), tx, dtx)
+            .join(room, name, None, None, session, tx, dtx)
             .unwrap();
         TestUser {
             id: joined.you,
+            session,
             rx,
             drx,
         }
@@ -2028,7 +2165,7 @@ mod tests {
         world.tick(); // a + b are together again
         expect_start(&mut a);
         expect_start(&mut b);
-        world.leave("office", &b.id);
+        world.leave("office", &b.id, b.session);
         assert!(matches!(
             a.rx.try_recv().unwrap(),
             ServerMsg::CallEnd { ref reason, .. } if reason == "last_left"
@@ -2055,6 +2192,7 @@ mod tests {
         (
             TestUser {
                 id: joined.you,
+                session,
                 rx,
                 drx,
             },
@@ -2082,6 +2220,54 @@ mod tests {
             b.rx.try_recv().is_err(),
             "no joined broadcast for a restore"
         );
+    }
+
+    #[test]
+    fn leave_then_token_rejoin_restores_identity() {
+        let world = World::new(test_maps());
+        let (mut a, a_token, a_session) = join_token(&world, "office", "alice", None);
+        let (mut b, _, _) = join_token(&world, "office", "bob", None);
+        a.rx.try_recv().unwrap(); // alice hears bob join
+
+        // Alice's tab closes: an explicit leave. Bob hears `left` at once
+        // (no ghost waiting out the reconnect window).
+        world.leave("office", &a.id, a_session);
+        match b.rx.try_recv().unwrap() {
+            ServerMsg::Left { id } => assert_eq!(id, a.id),
+            other => panic!("expected left, got {other:?}"),
+        }
+
+        // The page reloads within the reconnect window: the sessionStorage
+        // token re-joins, and the identity (id, token) survives.
+        let (a2, a_token2, _) = join_token(&world, "office", "alice", Some(&a_token));
+        assert_eq!(a2.id, a.id, "the identity must survive the reload");
+        assert_eq!(a_token2, a_token, "the token must survive the reload");
+        // The room heard `left` on the close, so the reload is a fresh
+        // `joined` for the (unchanged) id.
+        match b.rx.try_recv().unwrap() {
+            ServerMsg::Joined { user } => assert_eq!(user.id, a.id),
+            other => panic!("expected joined, got {other:?}"),
+        }
+
+        // A stale `leave` from the closed tab's session (flushed after the
+        // rejoin landed) must not clobber the restored member.
+        world.leave("office", &a2.id, a_session);
+        assert_eq!(world.stats().0, 2, "the stale leave is a no-op");
+        assert!(b.rx.try_recv().is_err(), "no second left broadcast");
+    }
+
+    #[test]
+    fn leave_grace_expires_after_the_reconnect_window() {
+        let world = World::new(test_maps()).with_reconnect_window(Duration::from_millis(100));
+        let (a, a_token, a_session) = join_token(&world, "office", "alice", None);
+        let (_, _, _) = join_token(&world, "office", "bob", None);
+
+        world.leave("office", &a.id, a_session);
+        std::thread::sleep(Duration::from_millis(150));
+
+        // Past the window the token is dead: a late rejoin is a fresh user.
+        let (a2, _, _) = join_token(&world, "office", "alice", Some(&a_token));
+        assert_ne!(a2.id, a.id, "an expired leave is a fresh identity");
     }
 
     #[test]
@@ -2251,16 +2437,20 @@ mod tests {
     }
 
     #[test]
-    fn explicit_leave_beats_the_reconnect_window() {
+    fn explicit_leave_is_immediate_but_holds_identity() {
         let world = World::new(test_maps());
-        let (mut a, a_token, _) = join_token(&world, "office", "alice", None);
+        let (mut a, a_token, a_session) = join_token(&world, "office", "alice", None);
         let (mut b, _, _) = join_token(&world, "office", "bob", None);
         a.rx.try_recv().unwrap();
 
-        world.leave("office", &a.id);
+        // Unlike a drop, an explicit leave tells the room at once (no ghost
+        // waiting out the reconnect window).
+        world.leave("office", &a.id, a_session);
         assert!(matches!(b.rx.try_recv().unwrap(), ServerMsg::Left { .. }));
-        // Her token dies with her: no restore.
+        // But it is still a departure, not an identity death: a reload
+        // (token re-join) inside the reconnect window restores the same
+        // user, so a tab close + quick reopen is not a fresh avatar.
         let (a2, _, _) = join_token(&world, "office", "alice", Some(&a_token));
-        assert_ne!(a2.id, a.id, "an explicit leave forfeits the token");
+        assert_eq!(a2.id, a.id, "a leave holds the token for the window");
     }
 }

@@ -17,6 +17,30 @@ interface WebTransport {
     readonly readable: ReadableStream<Uint8Array>;
     readonly writable: WritableStream<Uint8Array>;
   };
+  /** Connection stats (W3C `WebTransportConnectionStats`). Guarded at the
+   *  call site: Chrome has not enabled it by default yet (Chromium issue
+   *  573538454, the `WebTransportStats` runtime feature), and it is
+   *  absent from the instance API in browsers that have not shipped it —
+   *  hence `typeof getStats === "function"` before use. */
+  getStats(): Promise<WebTransportStats>;
+}
+
+/** W3C `WebTransportConnectionStats` — the fields campfire uses. Every
+ *  field is optional: the API itself is flag-gated in Chrome (see above),
+ *  and a snapshot may omit fields it cannot measure. */
+interface WebTransportStats {
+  /** Smoothed RTT, ms. */
+  smoothedRtt?: number;
+  /** Minimum RTT observed, ms. */
+  minRtt?: number;
+  /** RTT variation (jitter), ms. */
+  rttVariation?: number;
+  /** Cumulative bytes sent. */
+  bytesSent?: number;
+  /** Cumulative bytes received. */
+  bytesReceived?: number;
+  /** Estimated send rate, bits/s (Chrome, when the flag is on). */
+  estimatedSendRate?: number;
 }
 
 /** WHATWG Encoding: carry a partial multibyte character across `decode()`

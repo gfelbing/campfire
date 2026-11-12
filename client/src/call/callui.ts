@@ -36,8 +36,12 @@ interface Tile {
   media: HTMLCanvasElement | null;
   nameEl: HTMLElement;
   stateEl: HTMLElement;
-  /** Downlink latency label (delay + jitter), live tiles only. */
+  /** Downlink latency label (e2e delay + transport RTT), live tiles only. */
   latencyEl: HTMLElement;
+  /** E2e-delay sparkline (the last ~90 s at the 1 Hz refresh). */
+  spark: HTMLCanvasElement | null;
+  /** Delay samples behind the sparkline (ring; trimmed at SPARK_LEN). */
+  sparkSamples: number[];
   muteEl: HTMLElement;
   camEl: HTMLElement;
   screenEl: HTMLElement;
@@ -72,6 +76,42 @@ function stateText(state: DownlinkState): string {
     default:
       return state;
   }
+}
+
+/** Sparkline length (samples): ~90 s at the 1 Hz roster refresh. */
+const SPARK_LEN = 90;
+/** Sparkline canvas size (CSS px = canvas px; the tile is small). */
+const SPARK_W = 60;
+const SPARK_H = 20;
+
+/** Draw the tile's e2e-delay history (last SPARK_LEN samples, right edge =
+ *  now). A flat delay renders as a flat line near the bottom; the y-scale
+ *  is the running max so a delay spike is visible without reflow. */
+function drawSpark(t: Tile): void {
+  const c = t.spark;
+  if (!c) return;
+  const ctx = c.getContext("2d");
+  if (!ctx) return;
+  const s = t.sparkSamples;
+  ctx.clearRect(0, 0, SPARK_W, SPARK_H);
+  if (s.length < 2) return;
+  let max = 0;
+  for (const v of s) max = Math.max(max, v);
+  // Floor the scale at the entry delay (1 s, video-catch-up work) so the
+  // line is readable from the first second and does not reflow as the
+  // entry sample ages out of the ring.
+  max = Math.max(max, 1000);
+  ctx.beginPath();
+  const step = SPARK_W / (SPARK_LEN - 1);
+  for (let i = 0; i < s.length; i++) {
+    const x = SPARK_W - (s.length - 1 - i) * step;
+    const y = SPARK_H - 1 - (s[i] / max) * (SPARK_H - 2);
+    if (i === 0) ctx.moveTo(x, y);
+    else ctx.lineTo(x, y);
+  }
+  ctx.strokeStyle = "rgba(255,255,255,0.75)";
+  ctx.lineWidth = 1;
+  ctx.stroke();
 }
 
 export function createCallUI(container: HTMLElement, actions: CallUiActions): CallUI {
@@ -188,7 +228,7 @@ export function createCallUI(container: HTMLElement, actions: CallUiActions): Ca
     const el = document.createElement("div");
     el.className = `theater-tile${screen ? " screen" : ""}`;
     el.innerHTML = `
-      <div class="theater-tile-info"><span class="tile-name"></span><span class="tile-state"></span><span class="tile-latency hidden"></span></div>
+      <div class="theater-tile-info"><span class="tile-name"></span><span class="tile-state"></span><canvas class="tile-spark" width="${SPARK_W}" height="${SPARK_H}"></canvas><span class="tile-latency hidden"></span></div>
       <span class="call-badge tile-mute hidden">🔇</span>
       <span class="call-badge tile-cam hidden">📷 off</span>
       <span class="call-badge tile-screen hidden">🖥</span>`;
@@ -199,6 +239,8 @@ export function createCallUI(container: HTMLElement, actions: CallUiActions): Ca
       nameEl: el.querySelector<HTMLElement>(".tile-name")!,
       stateEl: el.querySelector<HTMLElement>(".tile-state")!,
       latencyEl: el.querySelector<HTMLElement>(".tile-latency")!,
+      spark: el.querySelector<HTMLCanvasElement>(".tile-spark"),
+      sparkSamples: [],
       muteEl: el.querySelector<HTMLElement>(".tile-mute")!,
       camEl: el.querySelector<HTMLElement>(".tile-cam")!,
       screenEl: el.querySelector<HTMLElement>(".tile-screen")!,
@@ -221,16 +263,27 @@ export function createCallUI(container: HTMLElement, actions: CallUiActions): Ca
     return tile;
   }
 
-  function updateTile(t: Tile, name: string, state: DownlinkState, canvas: HTMLCanvasElement | null, stream: MediaStream | null, audioOn: boolean, videoOn: boolean, delay: number, jitter: number): void {
+  function updateTile(t: Tile, name: string, state: DownlinkState, canvas: HTMLCanvasElement | null, stream: MediaStream | null, audioOn: boolean, videoOn: boolean, delay: number, rtt: number | null): void {
     t.nameEl.textContent = t.key.endsWith(":scr") ? `${name} · screen` : name;
     t.stateEl.textContent = stateText(state);
-    // Latency (playback delay from the live edge) and jitter buffer depth,
-    // once the downlink is live (the issue: "show delay in other streams").
+    // Latency: e2e playback delay (how far the canvas trails the live
+    // edge) plus the transport RTT of our signaling connection — a proxy
+    // for the path to the SFU. The RTT part is omitted when the transport
+    // cannot measure it (SSE fallback, or no `WebTransport.getStats()`).
+    // The sparkline tracks the e2e delay over the last ~90 s.
     if (state === "live") {
-      t.latencyEl.textContent = `${Math.round(delay)} ms · ${Math.round(jitter)} ms`;
+      t.latencyEl.textContent =
+        rtt != null
+          ? `${Math.round(delay)} ms · RTT ${Math.round(rtt)} ms`
+          : `${Math.round(delay)} ms`;
       t.latencyEl.classList.remove("hidden");
+      t.sparkSamples.push(delay);
+      if (t.sparkSamples.length > SPARK_LEN) t.sparkSamples.shift();
+      drawSpark(t);
     } else {
       t.latencyEl.classList.add("hidden");
+      t.sparkSamples.length = 0;
+      drawSpark(t);
     }
     t.muteEl.classList.toggle("hidden", audioOn);
     t.camEl.classList.toggle("hidden", videoOn);
@@ -337,7 +390,7 @@ export function createCallUI(container: HTMLElement, actions: CallUiActions): Ca
         stream: MediaStream | null;
         state: DownlinkState;
         delay: number;
-        jitter: number;
+        rtt: number | null;
         audioOn: boolean;
         videoOn: boolean;
       }
@@ -351,7 +404,7 @@ export function createCallUI(container: HTMLElement, actions: CallUiActions): Ca
           stream: p.cameraStream,
           state: p.state,
           delay: p.delay,
-          jitter: p.jitter,
+          rtt: p.rtt,
           audioOn: p.audioOn,
           videoOn: p.videoOn,
         });
@@ -364,7 +417,7 @@ export function createCallUI(container: HTMLElement, actions: CallUiActions): Ca
             stream: null, // the screen share carries no audio
             state: p.state,
             delay: p.delay,
-            jitter: p.jitter,
+            rtt: p.rtt,
             audioOn: true,
             videoOn: true,
           });
@@ -378,7 +431,7 @@ export function createCallUI(container: HTMLElement, actions: CallUiActions): Ca
           t = makeTile(v.key, v.name, v.screen);
           tiles.set(v.key, t);
         }
-        updateTile(t, v.name, v.state, v.canvas, v.stream, v.audioOn, v.videoOn, v.delay, v.jitter);
+        updateTile(t, v.name, v.state, v.canvas, v.stream, v.audioOn, v.videoOn, v.delay, v.rtt);
       }
       for (const [key, t] of tiles) {
         if (!seen.has(key)) {

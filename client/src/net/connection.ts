@@ -121,9 +121,18 @@ export class Connection {
       // WebTransport and the page later restores frozen. Close cleanly on
       // hide, and reconnect on the restore — the sessionStorage token
       // re-joins with the same identity, so movement keeps flowing.
-      window.addEventListener("pagehide", () => {
+      window.addEventListener("pagehide", (e) => {
         this.reconnectGen += 1; // cancel any pending reconnect timer
         this.closing = true;
+        // A hard close (tab closed, navigated away, not saved to the bfcache):
+        // tell the server to drop us immediately, so our avatar leaves now
+        // instead of waiting out the 30 s reconnect window. Best effort — the
+        // write is flushed in the same packet batch as the close. For a
+        // bfcache hide (persisted) skip it: the page restores frozen and
+        // re-joins with the same identity via the sessionStorage token.
+        if (!(e as PageTransitionEvent).persisted) {
+          this.transport?.sendMsg({ t: "leave" });
+        }
         this.transport?.close();
         this.transport = null;
       });
@@ -200,6 +209,15 @@ export class Connection {
 
   sendCallLeave(): void {
     this.transport?.sendMsg({ t: "call_leave" });
+  }
+
+  /** Transport RTT in ms (the `/wt` QUIC connection's `smoothedRtt`), or
+   *  `null` when unsupported (the SSE fallback, or a browser without
+   *  `WebTransport.getStats()`). The `/wt` connection is a second QUIC
+   *  connection to the same host — a close proxy for the MoQ session's
+   *  path, which is what the call tiles display next to their e2e delay. */
+  getRtt(): Promise<number | null> {
+    return this.transport?.getRtt() ?? Promise.resolve(null);
   }
 
   /** Leave the room immediately (README §5): the server tears the session
@@ -470,6 +488,19 @@ class WTConn {
     void this.writer?.write(encodeLine(msg));
   }
 
+  /** Transport RTT in ms via `getStats().smoothedRtt` — `WebTransport`
+   *  has no `rtt` event (MDN/spec). `null` when unsupported (Chrome gates
+   *  `getStats()` behind a runtime flag; see webtransport.d.ts) or when
+   *  the transport is down. */
+  getRtt(): Promise<number | null> {
+    const wt = this.wt;
+    if (!wt || typeof wt.getStats !== "function") return Promise.resolve(null);
+    return wt
+      .getStats()
+      .then((s) => (typeof s.smoothedRtt === "number" ? s.smoothedRtt : null))
+      .catch(() => null);
+  }
+
   sendMove(id: string, x: number, y: number, d: Dir, moving: boolean, seq: number): void {
     if (!this.dgWriter || !this.live) return;
     const batch: MovementBatch = {
@@ -554,6 +585,11 @@ class SSEConn {
 
   sendMove(): void {
     // The fallback has no datagram path; movement is not relayed.
+  }
+
+  /** No QUIC transport, no RTT to measure. */
+  getRtt(): Promise<number | null> {
+    return Promise.resolve(null);
   }
 
   close(): void {

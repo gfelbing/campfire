@@ -6,7 +6,19 @@ import { Container, Graphics, Text } from "pixi.js";
 import type { Dir, UserBrief, UserState } from "../net/types";
 
 const SNAP_MAX_LAG_MS = 150;
-const SNAP_THRESHOLD_TILES = 0.3;
+
+/** How far in the past avatars are rendered (`tRender = now - LOOKAHEAD`).
+ *  The snapshot history is then always slightly in the future of the
+ *  render point, so each frame interpolates between two received
+ *  snapshots instead of jumping to the newest one — a 15 Hz step
+ *  function is what made the movement feel laggy. ≈ 2× the 66 ms send
+ *  interval, so two snapshots usually bracket the render point. */
+const RENDER_LOOKAHEAD_MS = 140;
+/** How long to keep extrapolating along the last motion after snapshots
+ *  stop arriving (the sender stopped moving) before freezing the avatar. */
+const EXTRAPOLATE_MS = 250;
+/** Snapshot history depth: ~10 ≈ 1 s at the 15 Hz send rate. */
+const SNAP_HISTORY = 10;
 
 export class AvatarView {
   readonly container = new Container();
@@ -115,6 +127,14 @@ export class AvatarView {
   }
 }
 
+/** One received movement snapshot (tile coordinates, arrival-time
+ *  stamped). */
+interface Snap {
+  x: number;
+  y: number;
+  t: number;
+}
+
 interface Remote {
   id: string;
   name: string;
@@ -123,13 +143,9 @@ interface Remote {
   dir: Dir;
   moving: boolean;
   lastSeq: number;
-  // Two newest snapshots for dead reckoning (tile coordinates).
-  curX: number;
-  curY: number;
-  curT: number;
-  prevX: number;
-  prevY: number;
-  prevT: number;
+  /** Snapshot history, oldest → newest (depth ~SNAP_HISTORY): the
+   *  interpolation source for `update` (see RENDER_LOOKAHEAD_MS). */
+  snap: Snap[];
 }
 
 const REMOTE_PALETTE = [0xe05f38, 0x4a90d9, 0x58a858, 0x9b59b6, 0xd4a017, 0x16a2a2];
@@ -180,9 +196,8 @@ export class AvatarManager {
         // The roster is the color authority: re-apply it on reconnect.
         existing.color = colorOf(u);
         existing.view.setColor(existing.color);
-        existing.curX = u.x;
-        existing.curY = u.y;
-        existing.curT = now;
+        // The hello snapshot is authoritative: reset the history to it.
+        existing.snap = [{ x: u.x, y: u.y, t: now }];
       } else {
         const color = colorOf(u);
         const view = new AvatarView(u.name, color);
@@ -196,12 +211,7 @@ export class AvatarManager {
           dir: u.d,
           moving: false,
           lastSeq: 0,
-          curX: u.x,
-          curY: u.y,
-          curT: now,
-          prevX: u.x,
-          prevY: u.y,
-          prevT: now,
+          snap: [{ x: u.x, y: u.y, t: now }],
         });
       }
     }
@@ -220,12 +230,7 @@ export class AvatarManager {
       dir: "s",
       moving: false,
       lastSeq: 0,
-      curX: 0,
-      curY: 0,
-      curT: now,
-      prevX: 0,
-      prevY: 0,
-      prevT: now,
+      snap: [{ x: 0, y: 0, t: now }],
     });
   }
 
@@ -264,12 +269,8 @@ export class AvatarManager {
       }
       if (e.s <= r.lastSeq) continue;
       r.lastSeq = e.s;
-      r.prevX = r.curX;
-      r.prevY = r.curY;
-      r.prevT = r.curT;
-      r.curX = e.x;
-      r.curY = e.y;
-      r.curT = now;
+      r.snap.push({ x: e.x, y: e.y, t: now });
+      if (r.snap.length > SNAP_HISTORY) r.snap.shift();
       r.dir = e.d;
       r.moving = e.mv === 1;
       r.view.setDir(e.d);
@@ -292,7 +293,10 @@ export class AvatarManager {
    */
   latestPositions(): Map<string, [number, number]> {
     const out = new Map<string, [number, number]>();
-    for (const [id, r] of this.remotes) out.set(id, [r.curX, r.curY]);
+    for (const [id, r] of this.remotes) {
+      const n = r.snap[r.snap.length - 1];
+      if (n) out.set(id, [n.x, n.y]);
+    }
     return out;
   }
 
@@ -300,24 +304,70 @@ export class AvatarManager {
   update(nowMs: number, tileSize: number): void {
     this.lastTiles.clear();
     for (const [id, r] of this.remotes) {
-      let px: number;
-      let py: number;
-      if (r.curT === r.prevT || (r.curX === r.prevX && r.curY === r.prevY)) {
-        px = r.curX;
-        py = r.curY;
-      } else {
-        const t = Math.min((nowMs - r.prevT) / (r.curT - r.prevT), 1);
-        px = r.prevX + (r.curX - r.prevX) * t;
-        py = r.prevY + (r.curY - r.prevY) * t;
-        // Snap when we drift too far from the newest known position.
-        if (Math.hypot(px - r.curX, py - r.curY) > SNAP_THRESHOLD_TILES) {
-          px = r.curX;
-          py = r.curY;
-        }
-      }
+      const [px, py] = this.interpolated(r, nowMs);
       this.lastTiles.set(id, [px, py]);
       r.view.setPos(px * tileSize, py * tileSize);
-      r.view.setMoving(r.moving && nowMs - r.curT < SNAP_MAX_LAG_MS + 300, nowMs);
+      const newest = r.snap[r.snap.length - 1];
+      r.view.setMoving(
+        r.moving && newest !== undefined && nowMs - newest.t < SNAP_MAX_LAG_MS + 300,
+        nowMs,
+      );
     }
+  }
+
+  /**
+   * The position to render for `r` at `nowMs`.
+   *
+   * Renders the snapshot history at `nowMs - RENDER_LOOKAHEAD_MS` instead
+   * of at `nowMs`. The history is then slightly in the future of the
+   * render point, so each frame interpolates between the two snapshots
+   * that bracket it — smooth 60 fps motion instead of a 15 Hz step
+   * function (the old code clamped `t` to 1 because `now >= curT` always
+   * held at render time, which is what made avatars lag).
+   *
+   * If no snapshot brackets the render point because the newest is older
+   * than it (the sender stopped moving, or a gap), extrapolate along the
+   * last motion for up to EXTRAPOLATE_MS, then freeze.
+   */
+  private interpolated(r: Remote, nowMs: number): [number, number] {
+    const h = r.snap;
+    const newest = h[h.length - 1];
+    if (!newest) return [0, 0];
+    // One snapshot cannot bracket or extrapolate: render it as-is. This is
+    // the just-joined window (the history starts with a single entry),
+    // where the render point is usually still ahead of it.
+    if (h.length === 1) return [newest.x, newest.y];
+    const target = nowMs - RENDER_LOOKAHEAD_MS;
+
+    if (newest.t <= target) {
+      // The render point is past the newest snapshot: the sender stopped.
+      // While we still think they were moving, keep them going along the
+      // last motion for a short margin, then freeze at the last position.
+      const over = target - newest.t;
+      if (r.moving && over <= EXTRAPOLATE_MS && h.length >= 2) {
+        const prev = h[h.length - 2];
+        const span = newest.t - prev.t;
+        if (span > 0) {
+          const vx = ((newest.x - prev.x) / span) * 1000;
+          const vy = ((newest.y - prev.y) / span) * 1000;
+          const dt = over / 1000;
+          return [newest.x + vx * dt, newest.y + vy * dt];
+        }
+      }
+      return [newest.x, newest.y];
+    }
+
+    // Walk back to the last snapshot at or before the render point, then
+    // interpolate to the next. Clamp t to [0, 1] for the boundary cases
+    // (a just-joined avatar whose whole history is after the render point,
+    // or two snapshots at the same instant).
+    let i = h.length - 1;
+    while (i > 0 && h[i].t > target) i--;
+    const a = h[i];
+    const b = h[i + 1];
+    const span = b.t - a.t;
+    if (span <= 0) return [b.x, b.y];
+    const t = Math.min(Math.max((target - a.t) / span, 0), 1);
+    return [a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t];
   }
 }

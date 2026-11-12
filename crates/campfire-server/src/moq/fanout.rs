@@ -11,7 +11,7 @@
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use moq_net::origin::Producer;
@@ -28,7 +28,14 @@ const POOL_CAPACITY: u64 = 16 * 1024 * 1024;
 /// finishes its driver task.
 #[derive(Clone, Default)]
 pub struct Fanout {
-    origins: Arc<Mutex<HashMap<u64, Producer>>>,
+    origins: Arc<Mutex<HashMap<u64, OriginEntry>>>,
+}
+
+/// A call's origin plus when it was last touched (the sweeper's signal).
+struct OriginEntry {
+    producer: Producer,
+    /// Last time a session admitted into this origin (see [`Fanout::sweep`]).
+    last_used: Instant,
 }
 
 impl Fanout {
@@ -40,7 +47,7 @@ impl Fanout {
     /// use.
     pub fn origin(&self, call_id: u64) -> Producer {
         let mut origins = self.origins.lock().unwrap();
-        if !origins.contains_key(&call_id) {
+        let entry = origins.entry(call_id).or_insert_with(|| {
             let mut config = moq_net::origin::Config::new(moq_net::Hop::random());
             config.pool = moq_net::cache::Pool::new(
                 moq_net::cache::Config::default()
@@ -51,14 +58,33 @@ impl Fanout {
             tokio::spawn(async move {
                 let _ = moq_net::time::run(driver).await;
             });
-            origins.insert(call_id, producer.clone());
-        }
-        origins[&call_id].clone()
+            OriginEntry {
+                producer,
+                last_used: Instant::now(),
+            }
+        });
+        entry.last_used = Instant::now();
+        entry.producer.clone()
     }
 
     /// Drop a call's origin (the call ended); a no-op when it is gone.
     pub fn drop_call(&self, call_id: u64) {
         self.origins.lock().unwrap().remove(&call_id);
+    }
+
+    /// Drop origins whose call is no longer live. The world is the source of
+    /// truth: an origin whose `call_id` is absent from `live_calls` is stale
+    /// — its call ended (or the call-end hook never fired, or the call died
+    /// between the admission check and origin creation). Dropping the last
+    /// `Producer` handle ends the origin and its driver task. Live calls are
+    /// never swept here, no matter how long the origin has been quiet, so a
+    /// multi-hour call is safe; the call-end path (`drop_call`) is the fast
+    /// route and this is the backstop. Returns the number dropped.
+    pub fn sweep(&self, live_calls: &[u64]) -> usize {
+        let mut origins = self.origins.lock().unwrap();
+        let before = origins.len();
+        origins.retain(|call_id, _| live_calls.contains(call_id));
+        before - origins.len()
     }
 
     /// Live call origins (the fan-out width gauge).
