@@ -39,6 +39,18 @@ pub async fn start_server_with_world() -> (
     CertificateDer<'static>,
     campfire_server::world::World,
 ) {
+    start_server_with_auth(None).await
+}
+
+/// [`start_server_with_world`], but with OpenID Connect auth wired into the
+/// `AppState` (`auth: None` when disabled).
+pub async fn start_server_with_auth(
+    auth: Option<std::sync::Arc<campfire_server::auth::Auth>>,
+) -> (
+    SocketAddr,
+    CertificateDer<'static>,
+    campfire_server::world::World,
+) {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -66,7 +78,7 @@ pub async fn start_server_with_world() -> (
         static_dir: None,
         metrics: metrics.clone(),
         moq,
-        auth: None,
+        auth,
         fallback: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
     };
     let app = campfire_server::api::router(state);

@@ -685,7 +685,75 @@ past the previous ~10-minute breakage point with stable quality.
 
 # infinite redirects on login
 
-when enabling authentication, after login and redirect I get a 302 again from the server which starts the whole authentication over.
+## Finding
+
+When enabling authentication, after login and redirect I get a 302 again
+from the server which starts the whole authentication over.
+
+## Analysis
+
+Flow: the client probes `/api/v1/auth` on boot (`boot.ts` `resolveForcedName`);
+with auth on and no session it does `location.replace(/auth/login?return_to=…)`
+→ 302 to the IdP → the IdP redirects to `/auth/callback?code&state` → on
+success the server sets the `campfire_auth` cookie and 302s back to
+`return_to`, where the probe now sees the name.
+
+There is no other place the server 302s into the auth flow: the second 302
+the user sees is the *client* re-running the probe with no valid cookie and
+redirecting to `/auth/login` again. So the loop is: **the cookie the
+callback set is not valid on the next probe**. Two root causes:
+
+1. **The callback fails, and the failure is silent** (`api.rs`
+   `auth_callback`): every `handle_callback` error 302s to `/` **without
+   setting a cookie**. The probe then finds no session and sends the
+   visitor to the IdP again — an infinite loop whose only trace is one
+   `auth callback failed` WARN line in the server log. Every sub-failure
+   looks identical to the user:
+   - token-exchange failure (redirect URI mismatch against the IdP
+     registration, wrong client secret, expired code);
+   - `iss` validation failure — **a code bug**: `Auth::new` stores the
+     configured issuer verbatim and uses it for `iss` validation, while
+     the discovery URL is built with the trailing slash trimmed
+     (`auth.rs` `discovery()`). A `--auth-openid-issuer=https://sso/`
+     (trailing slash, a common way to type a URL) therefore fails `iss`
+     against every IdP that issues the slash-less value — a guaranteed
+     loop;
+   - nonce mismatch (an IdP that omits the `nonce` claim in the
+     `id_token`);
+   - no usable name claim.
+2. **The browser never stored the cookie** (deployment): a `Secure`
+   cookie served over plain HTTP behind a terminating proxy, or a proxy
+   stripping `Set-Cookie`. Not fixable in the code — but cause 1's silent
+   302 makes every such deployment an unbreakable loop with no feedback.
+
+## Plan
+
+1. **Normalize the issuer** in `Auth::new`: store
+   `issuer.trim_end_matches('/')`, so `iss` validation and the discovery
+   URL always use the same canonical value (trailing-slash configs work).
+2. **Break the loop on callback failure**: instead of the silent 302 to
+   `/`, answer the callback error with a small 200 error page ("Sign-in
+   failed: \<reason\>" + a *Try again* link to `/auth/login`). The reason
+   is shown as-is: the audience is the operator, who needs it to fix the
+   config. The server WARN is kept.
+3. **Test** (new `tests/auth.rs`, mock IdP): a loopback mock IdP
+   (discovery document, authorization endpoint that echoes `state`/`nonce`
+   into a signed `id_token`, JWKS, token endpoint) plus the real server
+   with auth enabled; drive the browser's steps with a cookie-keeping
+   client:
+   - full happy path: probe (no name) → `/auth/login` → mock IdP →
+     `/auth/callback` → Set-Cookie → probe returns the forced name;
+   - the same path with a **trailing-slash issuer** (regression for the
+     `iss` bug);
+   - a failed callback (unknown code) answers the error page, **not** a
+     302 to `/`.
+
+## Verification
+
+`cargo test -p campfire-server` (the new `tests/auth.rs`), then a manual
+run with a real IdP: first login lands on the requested page with the
+forced name; a deliberately broken `--auth-openid-redirect-uri` shows the
+error page instead of looping.
 
 ---
 

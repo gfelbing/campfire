@@ -159,6 +159,11 @@ impl Auth {
         if redirect_uri.is_empty() {
             anyhow::bail!("auth: --auth-openid-redirect-uri is required when auth is enabled");
         }
+        // Canonical form: discovery and `iss` validation must use the same
+        // value, and an issuer configured with a trailing slash (a common
+        // way to type a URL) must not fail `iss` against the slash-less
+        // value every IdP issues.
+        let issuer = issuer.trim_end_matches('/').to_owned();
         let http = reqwest::Client::builder().timeout(HTTP_TIMEOUT).build()?;
         Ok(Self {
             inner: Arc::new(Inner {

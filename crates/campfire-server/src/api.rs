@@ -375,9 +375,25 @@ async fn auth_callback(State(state): State<AppState>, Query(q): Query<CallbackQu
         }
         Err(err) => {
             tracing::warn!(error = %err, "auth callback failed");
-            // Land on the page; the client sees auth enabled + unsigned in
-            // `/api/v1/auth` and redirects to login again.
-            (StatusCode::FOUND, [(header::LOCATION, "/")]).into_response()
+            // Show the reason instead of a silent 302 to `/`: the latter
+            // leaves the visitor with no session and the client's probe
+            // sends them to the IdP again — an unbreakable redirect loop
+            // whose only trace was this log line. The reason is shown
+            // as-is: the audience is the operator, who needs it to fix
+            // the config.
+            let reason = err.to_string().replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
+            (
+                StatusCode::OK,
+                [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+                format!(
+                    "<!doctype html><meta charset=\"utf-8\"><title>Sign-in failed</title>\n\
+                     <body style=\"font-family:system-ui;margin:3rem\">\n\
+                     <h1>Sign-in failed</h1>\n\
+                     <p><code>{reason}</code></p>\n\
+                     <p><a href=\"/auth/login\">Try again</a></p>\n"
+                ),
+            )
+                .into_response()
         }
     }
 }
