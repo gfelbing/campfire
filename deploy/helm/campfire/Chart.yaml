@@ -2,8 +2,8 @@ apiVersion: v2
 name: campfire
 description: virtual office — one Rust binary on one port (443 TCP + UDP), HTTP/3 + WebTransport.
 type: application
-version: 0.0.6
-appVersion: "0.0.6"
+version: 0.0.7
+appVersion: "0.0.7"
 keywords:
   - virtual-office
   - http3

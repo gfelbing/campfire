@@ -4,6 +4,65 @@ All notable releases of campfire. Versions follow calendar-agnostic
 semver; releases are cut by tagging `vX.Y.Z` (the Docker image is built
 and pushed to GHCR on each tag).
 
+## [0.0.7] — 2026-11-12
+
+Patch release: the MoQ leak cluster behind the ~10-minute call breakage,
+the login redirect loop, and the image build.
+
+### Added
+
+- A 30-minute soak gate (`just soak`, part of the e2e suite): two
+  clients in a call with camera on; asserts per-window delivery, stable
+  session/origin gauges, no panics or unexplained session ends,
+  post-teardown gauges back to zero, and an RSS growth gate. First run:
+  19.9k frames, RSS +0.4 MB.
+- E2E stages for screen share, mute/camera-off presence and delivery,
+  tab-refresh identity (re-join as the same user), and walk-away.
+- Latency view: per-peer RTT plus a jitter sparkline.
+- Integration tests for the OpenID Connect flow against a loopback mock
+  IdP: the full happy path, a trailing-slash issuer, and a failed
+  callback (the error page, not a redirect).
+
+### Changed
+
+- Vendored `h3-quinn` 0.0.10 under `third_party/h3-quinn` (patch
+  documented in its `PATCH.md`): `stop_sending` no longer unwraps the
+  in-flight stream, so a teardown-race panic can no longer skip the
+  session task's cleanup.
+- Client patches under `third_party/moq-watch` and
+  `third_party/moq-publish` (run from the `npm` postinstall, each
+  documented in its `PATCH.md`): a bounded decoder pacing wait with a
+  ring-reset re-anchor, and a pinned catalog `stalled` flag that stops
+  the screen-share re-announce churn (the encoder reinit storm).
+- Catch-up audio: a driven 1 s entry / 300 ms steady delay; the ring
+  drains backlogs at up to 2.5x instead of skipping frames.
+- Keep-alive at `idle_timeout/3`; the fanout sweep drops origins of
+  dead calls; session admission is reordered behind a 60 s fallback
+  sweeper; a session-task watchdog closes the QUIC connection on panic.
+- Graceful close: `pagehide` sends a leave, so the avatar leaves at
+  once; `World::leave` holds the identity under the token for the
+  reconnect window (session-guarded), so a reload re-joins as the same
+  user.
+- Avatar movement interpolates instead of snapping; the uplink bitrate
+  scales from the measured send rate; the TCP fallback page self-heals
+  when QUIC becomes reachable.
+
+### Fixed
+
+- The connection/session/origin leaks behind the ~10-minute call
+  breakage (the Changed items above: keep-alive, fanout sweep, sweeper,
+  watchdog, vendored h3-quinn) — the 30-minute soak passes clean.
+- The audio flatline on the screen-share re-route.
+- Infinite redirects on login: `Auth::new` now normalizes the issuer,
+  so a trailing-slash `--auth-openid-issuer` no longer fails `iss`
+  validation against every IdP; and a failed callback answers an error
+  page with the reason instead of a silent 302 to `/` that re-triggered
+  the client's login loop.
+- The image build: the build stage now copies `third_party/h3-quinn`
+  (a `[patch.crates-io]` path cargo needs to load) and
+  `third_party/moq-watch` / `third_party/moq-publish` (the client
+  postinstall's patch scripts).
+
 ## [0.0.6] — 2026-11-11
 
 Patch release: the image build is now warning-free.
