@@ -12,7 +12,7 @@ import { createChat, type ChatUI } from "./ui/chat";
 import { createHeader } from "./ui/header";
 import { createPresence } from "./ui/presence";
 import { createSidebar } from "./ui/sidebar";
-import { isWalkablePoint, parseMap, tileAt, type MapData, type Zone } from "./world/mapdata";
+import { isWalkablePoint, parseMap, tileAt, zoneContains, type MapData, type Zone } from "./world/mapdata";
 import { createWorld, drawBubble, followCamera } from "./world/render";
 
 declare global {
@@ -432,9 +432,24 @@ async function main(): Promise<void> {
   window.addEventListener("focus", () => {
     if (autoAway) {
       autoAway = false;
-      header.setStatus("online");
+      // Still inside a silent zone? Then the zone's away takes over (the
+      // restore below would otherwise put us online inside it).
+      if (inSilentZone && header.status() === "away") {
+        silentAway = true;
+      } else {
+        header.setStatus("online");
+      }
     }
   });
+
+  // Silent zones (README roadmap "Map enhancements"): standing inside one
+  // is "do not disturb me here", so our presence goes away — like the
+  // auto-away above, only from `online` (dnd and a manual away never
+  // change) and restored to `online` on leaving the zone (unless the
+  // blur auto-away still holds us). The proximity-audio muting for the
+  // zone's occupants is unchanged (server-side `sz` flag).
+  let silentAway = false;
+  let inSilentZone = false;
 
   // Game loop: integrate local movement, draw, send at ≤15 Hz (2 Hz idle).
   let lastSend = 0;
@@ -534,6 +549,20 @@ async function main(): Promise<void> {
     if (now - lastSend >= (moving ? SEND_EVERY_MS : IDLE_EVERY_MS)) {
       lastSend = now;
       conn.sendMove(x, y, dir, moving);
+    }
+
+    // Silent-zone presence (see `silentAway` above): edge-triggered on
+    // entering/leaving a `silentZone`.
+    const nowSilent = map.zones.some((z) => z.silent && zoneContains(z, x, y));
+    if (nowSilent !== inSilentZone) {
+      inSilentZone = nowSilent;
+      if (nowSilent && header.status() === "online") {
+        silentAway = true;
+        header.setStatus("away");
+      } else if (!nowSilent && silentAway) {
+        silentAway = false;
+        if (header.status() === "away" && !autoAway) header.setStatus("online");
+      }
     }
   };
 
