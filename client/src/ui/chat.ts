@@ -29,35 +29,35 @@ export function createChat(
 ): ChatUI {
   const scope = opts.scope;
   const panel = document.createElement("div");
-  panel.className = "chat";
+  panel.className = "cf-chat";
   panel.innerHTML = `
-    <div class="chat-list"></div>
-    <div class="chat-typing hidden"></div>
-    <form class="chat-form">
-      <input class="chat-input" maxlength="500"
+    <div class="cf-chat-list"></div>
+    <div class="cf-chat-typing hidden"></div>
+    <form class="cf-chat-form">
+      <input class="cf-chat-input" maxlength="500"
              placeholder="say something (Enter to send)" autocomplete="off" />
       <button type="submit">Send</button>
     </form>`;
   container.appendChild(panel);
 
-  const list = panel.querySelector<HTMLElement>(".chat-list")!;
-  const typingEl = panel.querySelector<HTMLElement>(".chat-typing")!;
-  const input = panel.querySelector<HTMLInputElement>(".chat-input")!;
-  const form = panel.querySelector<HTMLFormElement>(".chat-form")!;
+  const list = panel.querySelector<HTMLElement>(".cf-chat-list")!;
+  const typingEl = panel.querySelector<HTMLElement>(".cf-chat-typing")!;
+  const input = panel.querySelector<HTMLInputElement>(".cf-chat-input")!;
+  const form = panel.querySelector<HTMLFormElement>(".cf-chat-form")!;
 
   const typers = new Set<string>();
 
   function line(cls: string, name: string | null, text: string): void {
     const div = document.createElement("div");
-    div.className = `chat-line ${cls}`.trim();
+    div.className = `cf-chat-line ${cls}`.trim();
     if (name) {
       const n = document.createElement("span");
-      n.className = "chat-name";
+      n.className = "cf-chat-name";
       n.textContent = name;
       div.appendChild(n);
     }
     const t = document.createElement("span");
-    t.className = "chat-text";
+    t.className = "cf-chat-text";
     t.textContent = text;
     div.appendChild(t);
     list.appendChild(div);

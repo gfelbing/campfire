@@ -58,7 +58,7 @@ const presenceNames = (page) =>
 
 const chatLines = (page) =>
   page.evaluate(() =>
-    [...document.querySelectorAll(".chat-line")].map((e) => e.textContent),
+    [...document.querySelectorAll(".cf-chat-line")].map((e) => e.textContent),
   );
 
 /** The client does not expose call state globally; read the presence badge
@@ -148,8 +148,8 @@ const userCount = (page) =>
 
     console.log("3. chat broadcast A → B…");
     await pageA.evaluate((stamp) => {
-      const input = document.querySelector(".chat-input");
-      const form = document.querySelector(".chat-form");
+      const input = document.querySelector(".cf-chat-input");
+      const form = document.querySelector(".cf-chat-form");
       input.value = `e2e-hello-${stamp}`;
       form.dispatchEvent(new Event("submit", { cancelable: true, bubbles: true }));
     }, STAMP);

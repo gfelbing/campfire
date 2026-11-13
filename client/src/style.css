@@ -588,7 +588,7 @@ body {
 
 /* --- chat panel ------------------------------------------------------------ */
 
-.chat {
+..cf-chat {
   position: relative;
   flex: 1;
   min-height: 0;
@@ -597,7 +597,7 @@ body {
   gap: 0.4rem;
 }
 
-.chat-list {
+.cf-chat-list {
   min-height: 0;
   overflow-y: auto;
   display: grid;
@@ -606,33 +606,33 @@ body {
   scrollbar-width: thin;
 }
 
-.chat-line {
+.cf-chat-line {
   line-height: 1.3;
   word-break: break-word;
 }
 
-.chat-name {
+.cf-chat-name {
   font-weight: 700;
   color: var(--accent);
   margin-right: 0.4em;
 }
 
-.chat-line.me .chat-name {
+.cf-chat-line.me .cf-chat-name {
   color: #58a858;
 }
 
-.chat-line.system {
+.cf-chat-line.system {
   color: var(--muted);
   font-style: italic;
 }
 
-.chat-typing {
+.cf-chat-typing {
   font-size: 0.75rem;
   color: var(--muted);
   font-style: italic;
 }
 
-.chat-form {
+.cf-chat-form {
   display: flex;
   gap: 0.4rem;
   /* grid item: without this, min-width: auto pins the form to its
@@ -640,7 +640,7 @@ body {
   min-width: 0;
 }
 
-.chat-input {
+.cf-chat-input {
   flex: 1;
   min-width: 0;
   font: inherit;
@@ -652,12 +652,12 @@ body {
   padding: 0.45rem 0.65rem;
 }
 
-.chat-input:focus {
+.cf-chat-input:focus {
   outline: 2px solid var(--accent);
   outline-offset: -1px;
 }
 
-.chat-form button {
+.cf-chat-form button {
   font: inherit;
   font-size: 0.85rem;
   color: #fff;
