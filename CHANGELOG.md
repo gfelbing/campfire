@@ -4,6 +4,49 @@ All notable releases of campfire. Versions follow calendar-agnostic
 semver; releases are cut by tagging `vX.Y.Z` (the Docker image is built
 and pushed to GHCR on each tag).
 
+## [0.0.8] — 2026-11-13
+
+The UI redesign release: a one-line top bar, an accordion sidebar, a
+profile menu, and presence statuses that shape call behavior.
+
+### Added
+
+- One-line top bar (Google Chat style): burger + Campfire logo + map
+  switcher on the left; global 🎤/📷 mute/camera buttons (they work in
+  and out of a call and persist across calls), a 🖥 screen-share button
+  (in-call only) and the profile button on the right.
+- Sidebar collapsed to an icon rail by default (per session) with
+  exactly two accordion sections — Users and Chat; the rail icons
+  expand it, the section headers collapse individual sections.
+- Profile menu: name + avatar color edits (drafted, applied on "Done"
+  via a rejoin) and presence status rows — online / away / do not
+  disturb, persisted in `localStorage`.
+- Presence statuses drive call behavior: `away` auto-joins calls with
+  mic + camera disabled, `dnd` opts out of proximity calls entirely
+  (the server syncs `bubble_off`), `online` is the normal path. The
+  user list shows a status dot for every member.
+- Auto-away: hiding the tab with no active call switches to `away`;
+  focusing it again restores `online` (only from an auto-away, never
+  over a manual status).
+- Call-scoped chat: a message sent inside a call reaches only that
+  call's participants; messages sent outside reach everyone not in a
+  call. Both the live relay and the reconnect history filter the same
+  way.
+- The call theater keeps only the hangup control in its header; focus
+  and resize behavior unchanged.
+
+### Changed
+
+- The landing page (`#boot` form) is gone: `GET /` redirects (303) to
+  the first map, joining without settings picks the first map and a
+  random adjective+noun name with a random color.
+- Identity (name, color) and status persist in `localStorage` instead
+  of URL get params; URL params remain a fallback so e2e drivers keep
+  working with fresh profiles.
+- New wire fields (backward-compatible, omitted when default):
+  `status` on `Join`/`UserBrief`/`UserState`, the `Status` message
+  pair, and status-scoped chat delivery.
+
 ## [0.0.7] — 2026-11-12
 
 Patch release: the MoQ leak cluster behind the ~10-minute call breakage,
