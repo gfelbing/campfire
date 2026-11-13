@@ -30,7 +30,7 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 use bytes::Bytes;
 use campfire_protocol::{
-    ClientMsg, Dir, MovementBatch, MovementEntry, ServerMsg, from_line, to_line,
+    ChatScope, ClientMsg, Dir, MovementBatch, MovementEntry, ServerMsg, from_line, to_line,
 };
 use clap::Parser;
 use tokio::io::AsyncWriteExt as _;
@@ -283,6 +283,7 @@ async fn bot(
                 name: name.clone(),
                 avatar: None,
                 token: None,
+                status: None,
             })
             .as_bytes(),
         )
@@ -403,6 +404,7 @@ async fn bot(
                 .write_all(
                     to_line(&ClientMsg::Chat {
                         text: "load ping".into(),
+                        scope: ChatScope::Room,
                     })
                     .as_bytes(),
                 )

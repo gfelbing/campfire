@@ -11,7 +11,7 @@
 // a change navigates away and back with the new values); status applies
 // immediately and also governs call behavior (see call/manager.ts).
 
-import { COLORS, saveIdentity, saveStatus } from "./boot";
+import { COLORS, saveIdentity } from "./boot";
 import type { OwnStatus } from "../net/types";
 import type { SidebarUI } from "./sidebar";
 
@@ -71,6 +71,8 @@ export function createHeader(
   const screenBtn = topbar.querySelector<HTMLButtonElement>("#screen-btn")!;
   const profileBtn = topbar.querySelector<HTMLButtonElement>("#profile-btn")!;
   const profileMenu = topbar.querySelector<HTMLElement>("#profile-menu")!;
+  const statusBtn = topbar.querySelector<HTMLButtonElement>("#status-btn")!;
+  const statusMenu = topbar.querySelector<HTMLElement>("#status-menu")!;
 
   // --- left: burger + logo --------------------------------------------------
 
@@ -144,8 +146,6 @@ export function createHeader(
   nameInput.value = name;
   const swatches = document.createElement("div");
   swatches.className = "profile-swatches";
-  const statusRows = document.createElement("div");
-  statusRows.className = "profile-status-rows";
   const nameError = document.createElement("div");
   nameError.className = "profile-error hidden";
   const doneBtn = document.createElement("button");
@@ -173,10 +173,12 @@ export function createHeader(
     swatches.appendChild(b);
   }
 
+  // Status rows live in their own topbar popover (issues.md #1), not in
+  // the profile menu.
   for (const s of STATUSES) {
     const b = document.createElement("button");
     b.type = "button";
-    b.className = "profile-status";
+    b.className = "map-item profile-status";
     const dot = document.createElement("span");
     dot.className = `sdot ${s.id}`;
     const label = document.createElement("span");
@@ -184,8 +186,9 @@ export function createHeader(
     b.append(dot, label);
     b.addEventListener("click", () => {
       applyStatus(s.id);
+      closeAll();
     });
-    statusRows.appendChild(b);
+    statusMenu.appendChild(b);
   }
 
   doneBtn.addEventListener("click", () => {
@@ -216,8 +219,6 @@ export function createHeader(
     nameError,
     label("Color"),
     swatches,
-    label("Status"),
-    statusRows,
     doneBtn,
   );
 
@@ -230,9 +231,10 @@ export function createHeader(
   }
 
   function renderStatusRows(): void {
-    for (let i = 0; i < statusRows.children.length; i++) {
-      (statusRows.children[i] as HTMLElement).classList.toggle("current", STATUSES[i].id === status);
+    for (let i = 0; i < statusMenu.children.length; i++) {
+      (statusMenu.children[i] as HTMLElement).classList.toggle("current", STATUSES[i].id === status);
     }
+    statusBtn.querySelector<HTMLElement>(".sdot")!.className = `sdot ${status}`;
   }
 
   function syncSwatchSelection(): void {
@@ -241,10 +243,9 @@ export function createHeader(
     }
   }
 
-  /** Shared status-change path (row clicks and `ui.setStatus`). */
+  /** Shared status-change path (popover clicks and `ui.setStatus`). */
   function applyStatus(s: OwnStatus): void {
     status = s;
-    saveStatus(s);
     renderProfileAvatar();
     renderStatusRows();
     opts.onStatusChange(s);
@@ -255,6 +256,7 @@ export function createHeader(
   function closeAll(): void {
     mapList.classList.add("hidden");
     profileMenu.classList.add("hidden");
+    statusMenu.classList.add("hidden");
   }
 
   function discardDraft(): void {
@@ -279,9 +281,17 @@ export function createHeader(
     closeAll();
     if (willOpen) {
       renderProfileAvatar();
-      renderStatusRows();
       syncSwatchSelection();
       profileMenu.classList.remove("hidden");
+    }
+  });
+
+  statusBtn.addEventListener("click", () => {
+    const willOpen = statusMenu.classList.contains("hidden");
+    closeAll();
+    if (willOpen) {
+      renderStatusRows();
+      statusMenu.classList.remove("hidden");
     }
   });
 

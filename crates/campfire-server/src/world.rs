@@ -14,7 +14,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use campfire_protocol::{
-    Avatar, ChatMsg, Dir, ErrorCode, MovementBatch, MovementEntry, ServerMsg, Status, UserBrief,
+    Avatar, ChatMsg, ChatScope, Dir, ErrorCode, MovementBatch, MovementEntry, ServerMsg, Status,
+    UserBrief,
     UserState,
 };
 use rand::RngCore;
@@ -110,7 +111,11 @@ struct LeftEntry {
 #[derive(Default)]
 struct Room {
     users: HashMap<UserId, Member>,
+    /// Room-wide chat history (issues.md #2).
     chat: VecDeque<ChatMsg>,
+    /// Bubble-local chat history (issues.md #2): messages sent inside
+    /// calls, visible only while in a call.
+    chat_call: VecDeque<ChatMsg>,
     /// The room's calls (README §7): at most one proximity bubble
     /// (`zone: None`) plus one call per occupied jitsi zone. A user is in
     /// at most one call at a time.
@@ -372,6 +377,7 @@ impl World {
                 token: member.token.clone(),
                 users: user_snapshot(room_entry, Some(map)),
                 chat: Self::chat_for(room_entry, &id),
+                call_chat: Self::chat_call_for(room_entry),
                 ticket,
             };
             return Ok(joined);
@@ -420,6 +426,7 @@ impl World {
                 token: token_out,
                 users: user_snapshot(room_entry, Some(map)),
                 chat: Self::chat_for(room_entry, &id),
+                call_chat: Self::chat_call_for(room_entry),
                 ticket: None,
             };
             for (uid, m) in &room_entry.users {
@@ -487,6 +494,7 @@ impl World {
             token,
             users: user_snapshot(room_entry, Some(map)),
             chat: Self::chat_for(room_entry, &id),
+            call_chat: Self::chat_call_for(room_entry),
             call: room_entry
                 .calls
                 .iter()
@@ -734,55 +742,76 @@ impl World {
         }
     }
 
-    /// Send a chat message, scoped by call membership (README §8): a member
-    /// IN a call reaches only that call's participants; a member OUT of any
-    /// call reaches everyone else who is out of a call. Recorded history is
-    /// filtered the same way at `hello` time (see [`chat_for`]).
+    /// Send a chat message (issues.md #2): scope `room` reaches everyone in
+    /// the room; scope `call` reaches only the sender's call's participants
+    /// and is kept in the room's bubble-chat history. A `call` message from
+    /// someone not in a call degrades to the room chat (the client only
+    /// sends `call` while in a call, so this is a safety net).
     pub fn broadcast_chat(&self, room: &str, msg: ChatMsg) {
         let mut rooms = self.rooms.lock().unwrap();
         let Some(entry) = rooms.get_mut(room) else {
             return;
         };
-        entry.chat.push_back(msg.clone());
-        while entry.chat.len() > CHAT_HISTORY {
-            entry.chat.pop_front();
-        }
-        let from_call = call_containing(entry, &msg.from);
-        for (uid, m) in &entry.users {
-            let recipient_in_call = call_containing(entry, uid);
-            let same_scope = match from_call {
-                Some(ci) => recipient_in_call == Some(ci),
-                None => recipient_in_call.is_none(),
-            };
-            if same_scope {
-                let _ = m.tx.send(ServerMsg::Chat {
-                    from: msg.from.clone(),
-                    name: msg.name.clone(),
-                    text: msg.text.clone(),
-                    ts: msg.ts,
-                });
+        let build = |msg: &ChatMsg| ServerMsg::Chat {
+            from: msg.from.clone(),
+            name: msg.name.clone(),
+            text: msg.text.clone(),
+            ts: msg.ts,
+            scope: msg.scope,
+        };
+        match msg.scope {
+            ChatScope::Room => {
+                entry.chat.push_back(msg.clone());
+                while entry.chat.len() > CHAT_HISTORY {
+                    entry.chat.pop_front();
+                }
+                let wire = build(&msg);
+                for (_, m) in &entry.users {
+                    let _ = m.tx.send(wire.clone());
+                }
+            }
+            ChatScope::Call => {
+                let call_participants = match call_containing(entry, &msg.from) {
+                    Some(ci) => entry.calls[ci].participants.keys().cloned().collect::<Vec<_>>(),
+                    // Not in a call: degrade to the room chat.
+                    None => {
+                        let mut msg = msg;
+                        msg.scope = ChatScope::Room;
+                        entry.chat.push_back(msg.clone());
+                        while entry.chat.len() > CHAT_HISTORY {
+                            entry.chat.pop_front();
+                        }
+                        let wire = build(&msg);
+                        for (_, m) in &entry.users {
+                            let _ = m.tx.send(wire.clone());
+                        }
+                        return;
+                    }
+                };
+                entry.chat_call.push_back(msg.clone());
+                while entry.chat_call.len() > CHAT_HISTORY {
+                    entry.chat_call.pop_front();
+                }
+                let wire = build(&msg);
+                for uid in call_participants {
+                    if let Some(m) = entry.users.get(&uid) {
+                        let _ = m.tx.send(wire.clone());
+                    }
+                }
             }
         }
     }
 
-    /// The chat history as seen by `uid` (call-scoped, like
-    /// [`World::broadcast_chat`]): a call participant gets the lines sent
-    /// inside their call, everyone else the lines sent outside any call.
-    fn chat_for(entry: &Room, uid: &str) -> Vec<ChatMsg> {
-        match call_containing(entry, uid) {
-            Some(ci) => entry
-                .chat
-                .iter()
-                .filter(|m| entry.calls[ci].participants.contains_key(&m.from))
-                .cloned()
-                .collect(),
-            None => entry
-                .chat
-                .iter()
-                .filter(|m| call_containing(entry, &m.from).is_none())
-                .cloned()
-                .collect(),
-        }
+    /// The room-wide chat history for `hello` (issues.md #2).
+    fn chat_for(entry: &Room, _uid: &str) -> Vec<ChatMsg> {
+        entry.chat.iter().cloned().collect()
+    }
+
+    /// The bubble-chat history for `hello` (issues.md #2): the room's call
+    /// messages. Only carried by the bubble channel, which exists while in
+    /// a call.
+    fn chat_call_for(entry: &Room) -> Vec<ChatMsg> {
+        entry.chat_call.iter().cloned().collect()
     }
 
     /// Relay a typing indicator to everyone except the typer.
@@ -1435,6 +1464,8 @@ pub struct Joined {
     pub users: Vec<UserState>,
     /// Last chat lines of the room.
     pub chat: Vec<ChatMsg>,
+    /// The room's bubble-chat history (issues.md #2).
+    pub call_chat: Vec<ChatMsg>,
     /// The room's current call participants (empty when no call is running).
     pub call: Vec<UserBrief>,
     /// The joiner's media ticket when they are in an active call
@@ -1932,6 +1963,7 @@ mod tests {
                 name: "a".into(),
                 text: "hi".into(),
                 ts: 7,
+                scope: ChatScope::Room,
             },
         );
         for rx in [&mut rx_a, &mut rx_b] {

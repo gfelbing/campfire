@@ -41,22 +41,15 @@ const COLOR_KEY = "campfire.color";
 /** Presence-status persistence (the profile menu). */
 const STATUS_KEY = "campfire.status";
 
+/** Every fresh load joins `online` (issues.md #1): a persisted `away`/`dnd`
+ *  from the previous session no longer survives a reload. */
 export function loadStatus(): OwnStatus {
   try {
-    const v = localStorage.getItem(STATUS_KEY);
-    if (v === "online" || v === "away" || v === "dnd") return v;
+    localStorage.removeItem(STATUS_KEY);
   } catch {
     // storage unavailable (private mode): the default
   }
   return "online";
-}
-
-export function saveStatus(s: OwnStatus): void {
-  try {
-    localStorage.setItem(STATUS_KEY, s);
-  } catch {
-    // storage unavailable: the choice just does not persist
-  }
 }
 
 function loadIdentity(): { name?: string; color?: string } {

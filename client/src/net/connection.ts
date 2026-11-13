@@ -24,6 +24,9 @@ export interface ConnHandlers {
     token: string;
     users: UserState[];
     chat: ChatMsg[];
+    /** The room's bubble-chat history (issues.md #2); only shown while in
+     *  a call. */
+    call_chat?: ChatMsg[];
     call: UserBrief[];
     /** Media ticket for an active call (reconnect catch-up, docs/moq-sfu.md
      *  §7). Present only when the user is in a call. */
@@ -180,8 +183,8 @@ export class Connection {
     this.transport = null;
   }
 
-  sendChat(text: string): void {
-    this.transport?.sendMsg({ t: "chat", text });
+  sendChat(text: string, scope: "room" | "call" = "room"): void {
+    this.transport?.sendMsg({ t: "chat", text, scope });
   }
 
   sendTyping(on: boolean): void {
@@ -412,7 +415,28 @@ class WTConn {
   async connect(): Promise<void> {
     // WebTransport requires an absolute URL — relative paths throw on
     // construction (the WS-style `/wt` shortcut is not valid here).
-    const wt = new WebTransport(new URL("/wt", location.origin).toString());
+    const url = new URL("/wt", location.origin);
+    // Auth (issues.md #4): the WebTransport handshake carries no cookies in
+    // Chromium, so when auth is on, mint a one-time ticket over an
+    // authenticated HTTP request and present it as `?ticket=`. A failure
+    // here falls through to the cookie path (older server, auth probe
+    // failed) and surfaces the server's rejection as usual.
+    try {
+      const probe = await fetch("/api/v1/auth", { credentials: "same-origin" });
+      if (probe.ok) {
+        const data = (await probe.json()) as { enabled: boolean; name?: string };
+        if (data.enabled && data.name) {
+          const t = await fetch("/api/v1/wt_ticket", { credentials: "same-origin" });
+          if (t.ok) {
+            const { ticket } = (await t.json()) as { ticket: string };
+            if (ticket) url.searchParams.set("ticket", ticket);
+          }
+        }
+      }
+    } catch {
+      // no ticket: the cookie path decides
+    }
+    const wt = new WebTransport(url.toString());
     this.wt = wt;
     this.live = false;
     wt.closed.then(

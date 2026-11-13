@@ -5,9 +5,14 @@
 
 export interface SidebarUI {
   /** The body element of a section (to mount a panel into). */
-  pane(id: "players" | "chat"): HTMLElement;
+  pane(id: "players" | "chat" | "bubble"): HTMLElement;
   /** A chat mention-ish hint: dot on the Chat header while it is hidden. */
   chatActivity(on: boolean): void;
+  /** A new bubble-chat line: dot on the Bubble chat header while hidden. */
+  bubbleActivity(on: boolean): void;
+  /** Show/hide the bubble chat (rail icon + accordion); only offered
+   *  while in a call (issues.md #2). */
+  setBubbleVisible(on: boolean): void;
   /** Update the member count shown on the Users header. */
   setUserCount(n: number): void;
   /** Collapse/expand the whole rail (the header's burger); returns the new state. */
@@ -19,6 +24,9 @@ export function createSidebar(): SidebarUI {
   const usersCount = sidebar.querySelector<HTMLElement>("#users-count")!;
   const chatSection = sidebar.querySelector<HTMLElement>('.accordion[data-acc="chat"]')!;
   const chatDot = chatSection.querySelector<HTMLElement>(".acc-dot")!;
+  const bubbleSection = sidebar.querySelector<HTMLElement>('.accordion[data-acc="bubble"]')!;
+  const bubbleDot = bubbleSection.querySelector<HTMLElement>(".acc-dot")!;
+  const bubbleRail = sidebar.querySelector<HTMLButtonElement>('.sidebar-rail [data-open="bubble"]')!;
 
   // Always start collapsed (the header's burger or a rail icon expands it);
   // the state is per-session, so a stale "open" can never stick around.
@@ -34,6 +42,7 @@ export function createSidebar(): SidebarUI {
       sidebar.classList.remove("collapsed");
       section(b.dataset.open!).classList.remove("closed");
       if (b.dataset.open === "chat") chatDot.hidden = true;
+      if (b.dataset.open === "bubble") bubbleDot.hidden = true;
     });
   }
 
@@ -42,11 +51,16 @@ export function createSidebar(): SidebarUI {
     h.addEventListener("click", () => {
       const nowClosed = section(h.dataset.toggle!).classList.toggle("closed");
       if (h.dataset.toggle === "chat" && !nowClosed) chatDot.hidden = true;
+      if (h.dataset.toggle === "bubble" && !nowClosed) bubbleDot.hidden = true;
     });
   }
 
   function chatVisible(): boolean {
     return !sidebar.classList.contains("collapsed") && !chatSection.classList.contains("closed");
+  }
+
+  function bubbleVisible(): boolean {
+    return !sidebar.classList.contains("collapsed") && !bubbleSection.classList.contains("closed");
   }
 
   return {
@@ -56,6 +70,15 @@ export function createSidebar(): SidebarUI {
     },
     chatActivity(on) {
       chatDot.hidden = !(on && !chatVisible());
+    },
+    bubbleActivity(on) {
+      bubbleDot.hidden = !(on && !bubbleVisible());
+    },
+    setBubbleVisible(on) {
+      bubbleRail.classList.toggle("hidden", !on);
+      bubbleSection.classList.toggle("hidden", !on);
+      // Leaving the call takes the whole channel with it.
+      if (!on) bubbleSection.classList.add("closed");
     },
     toggle: () => sidebar.classList.toggle("collapsed"),
   };

@@ -31,19 +31,31 @@ const MAP: Record<string, keyof KeyState> = {
 
 let attached = false;
 
+/** True when the event target is a text-entry element: typing WASD in the
+ *  profile form (issues.md #5) must not drive movement. */
+function isTypingTarget(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) return false;
+  return (
+    target.tagName === "INPUT" ||
+    target.tagName === "TEXTAREA" ||
+    target.tagName === "SELECT" ||
+    target.isContentEditable
+  );
+}
+
 /** Attach keyboard listeners once (movement keys are the only ones we eat). */
 export function attachKeys(): void {
   if (attached) return;
   attached = true;
   window.addEventListener("keydown", (e) => {
     const k = MAP[e.code];
-    if (!k) return;
+    if (!k || isTypingTarget(e.target)) return;
     keys[k] = true;
     if (k !== "run") e.preventDefault();
   });
   window.addEventListener("keyup", (e) => {
     const k = MAP[e.code];
-    if (!k) return;
+    if (!k || isTypingTarget(e.target)) return;
     keys[k] = false;
   });
   window.addEventListener("blur", () => {

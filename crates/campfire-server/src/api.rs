@@ -59,6 +59,13 @@ pub struct AppState {
     /// when set, a join without a valid session cookie is refused and a
     /// valid one forces the display name from the IdP.
     pub auth: Option<std::sync::Arc<crate::auth::Auth>>,
+    /// One-time `/wt` auth tickets (issues.md #4): Chromium does not send
+    /// cookies on the WebTransport handshake, so the client first fetches
+    /// a short-lived single-use ticket over an authenticated HTTP request
+    /// and presents it as `?ticket=` on the `/wt` CONNECT. ticket →
+    /// (forced name, minted at).
+    pub wt_tickets:
+        std::sync::Arc<Mutex<HashMap<String, (String, std::time::Instant)>>>,
     /// Live SSE fallback sessions, keyed by their per-session secret (S1).
     /// State-owned, not process-global (Q1).
     pub fallback: FallbackMap,
@@ -100,6 +107,7 @@ impl AppState {
             metrics,
             moq,
             auth,
+            wt_tickets: Arc::new(Mutex::new(HashMap::new())),
             fallback: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -141,6 +149,7 @@ pub fn router(state: AppState) -> Router {
         // logout. The status endpoint is always 200 (the client uses it to
         // decide whether to redirect to login).
         .route("/api/v1/auth", get(auth_status))
+        .route("/api/v1/wt_ticket", get(wt_ticket))
         .route("/auth/login", get(auth_login))
         .route("/auth/callback", get(auth_callback))
         .route("/auth/logout", get(auth_logout))
@@ -296,6 +305,38 @@ pub(crate) fn enforce_auth(
         .identity_for_cookie(&cookie)
         .ok_or(StatusCode::UNAUTHORIZED)?;
     Ok(Some(identity.name))
+}
+
+/// TTL of a `/wt` auth ticket (issues.md #4): the client presents it
+/// within milliseconds of minting; anything left that long is a leak.
+const WT_TICKET_TTL: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Mint a one-time `/wt` auth ticket for the signed-in user. The
+/// WebTransport handshake carries no cookies (Chromium attaches none to
+/// the extended CONNECT, issues.md #4), so the client fetches this first
+/// and passes the ticket as `?ticket=` on the `/wt` CONNECT.
+async fn wt_ticket(State(state): State<AppState>, headers: HeaderMap) -> Result<Json<serde_json::Value>, StatusCode> {
+    let auth = state.auth.as_ref().ok_or(StatusCode::NOT_FOUND)?;
+    let cookie = auth_cookie(&headers).ok_or(StatusCode::UNAUTHORIZED)?;
+    let identity = auth
+        .identity_for_cookie(&cookie)
+        .ok_or(StatusCode::UNAUTHORIZED)?;
+    let mut raw = [0u8; 32];
+    use rand::RngCore;
+    rand::thread_rng().fill_bytes(&mut raw);
+    let ticket: String = raw.iter().map(|b| format!("{b:02x}")).collect();
+    let mut map = state.wt_tickets.lock().unwrap();
+    map.retain(|_, (_, minted)| minted.elapsed() < WT_TICKET_TTL);
+    map.insert(ticket.clone(), (identity.name, std::time::Instant::now()));
+    Ok(Json(serde_json::json!({ "ticket": ticket })))
+}
+
+/// Consume a one-time `/wt` ticket: its forced name, or `None` when
+/// unknown/expired/already used.
+pub(crate) fn consume_wt_ticket(state: &AppState, ticket: &str) -> Option<String> {
+    let mut map = state.wt_tickets.lock().unwrap();
+    let (name, minted) = map.remove(ticket)?;
+    (minted.elapsed() < WT_TICKET_TTL).then_some(name)
 }
 
 /// `return_to` must be a same-origin absolute path (no `//`, no backslash,
@@ -545,6 +586,7 @@ async fn fallback_event(
                             room: room.clone(),
                             users: joined.users,
                             chat: joined.chat,
+                            call_chat: joined.call_chat,
                             call: joined.call,
                             ticket: joined.ticket,
                         });
@@ -612,7 +654,7 @@ async fn fallback_event(
                 // Rate-limit chat here, while the session's limiter is still
                 // reachable (it lives in the map entry).
                 let chat_allowed = match &msg {
-                    ClientMsg::Chat { text } => {
+                    ClientMsg::Chat { text, .. } => {
                         if text.chars().count() > MAX_CHAT_CHARS {
                             return Err(err(ErrorCode::ChatTooLong));
                         }
@@ -634,7 +676,7 @@ async fn fallback_event(
                 return Err(err(ErrorCode::RateLimited));
             }
             match msg {
-                ClientMsg::Chat { text } => {
+                ClientMsg::Chat { text, scope } => {
                     state.world.broadcast_chat(
                         &room,
                         ChatMsg {
@@ -642,6 +684,7 @@ async fn fallback_event(
                             name,
                             text,
                             ts: unix_ts(),
+                            scope,
                         },
                     );
                 }

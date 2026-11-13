@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use campfire_protocol::{
-    ClientMsg, Dir, ErrorCode, MovementBatch, MovementEntry, ServerMsg, from_line, to_line,
+    ChatScope, ClientMsg, Dir, ErrorCode, MovementBatch, MovementEntry, ServerMsg, from_line, to_line,
 };
 use tokio::io::AsyncWriteExt;
 use wtransport::Connection;
@@ -192,6 +192,7 @@ async fn join_hello_presence_chat_typing_leave() {
     // Bob chats; both clients see the echo (sender included).
     b.send(&ClientMsg::Chat {
         text: "hello world".into(),
+        scope: ChatScope::Room,
     })
     .await;
     let ServerMsg::Chat {
@@ -234,6 +235,7 @@ async fn chat_rate_limit_allows_one_per_second() {
     for i in 0..5 {
         c.send(&ClientMsg::Chat {
             text: format!("msg {i}"),
+            scope: ChatScope::Room,
         })
         .await;
     }
@@ -330,6 +332,7 @@ async fn validation_errors_are_reported() {
     // Chat/typing before joining is a state error.
     c.send(&ClientMsg::Chat {
         text: "too early".into(),
+        scope: ChatScope::Room,
     })
     .await;
     assert!(matches!(
@@ -360,6 +363,7 @@ async fn validation_errors_are_reported() {
     assert!(matches!(c.recv().await, ServerMsg::Hello { .. }));
     c.send(&ClientMsg::Chat {
         text: "y".repeat(501),
+        scope: ChatScope::Room,
     })
     .await;
     assert!(matches!(
@@ -372,6 +376,7 @@ async fn validation_errors_are_reported() {
     // The session survived all of that: a normal chat still works.
     c.send(&ClientMsg::Chat {
         text: "recovered".into(),
+        scope: ChatScope::Room,
     })
     .await;
     assert!(matches!(c.recv().await, ServerMsg::Chat { .. }));
@@ -390,6 +395,7 @@ async fn datagrams_are_drained_without_breaking_the_session() {
 
     c.send(&ClientMsg::Chat {
         text: "still here".into(),
+        scope: ChatScope::Room,
     })
     .await;
     let ServerMsg::Chat { text, .. } = c.recv().await else {
@@ -470,8 +476,8 @@ async fn movement_relay_invalid_move_rejected_chat_history() {
     );
 
     // Chat round-trip; the third joiner gets the history.
-    a.send(&ClientMsg::Chat { text: "hey".into() }).await;
-    b.send(&ClientMsg::Chat { text: "yo".into() }).await;
+    a.send(&ClientMsg::Chat { text: "hey".into(), scope: ChatScope::Room }).await;
+    b.send(&ClientMsg::Chat { text: "yo".into(), scope: ChatScope::Room }).await;
     let ServerMsg::Chat { from, text, .. } = a.recv().await else {
         panic!("expected chat echo at alice");
     };

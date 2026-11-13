@@ -16,7 +16,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use axum::Extension;
-use axum::extract::State;
+use axum::extract::{Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use bytes::Bytes;
@@ -24,6 +24,7 @@ use campfire_protocol::{
     ChatMsg, ClientMsg, ErrorCode, MovementBatch, ServerMsg, from_line, to_line,
 };
 use h3_axum::WebTransportSession;
+use std::collections::HashMap;
 use h3_webtransport::server::AcceptedBi;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::mpsc;
@@ -70,14 +71,22 @@ pub async fn handle_wt(
     State(state): State<AppState>,
     Extension(conn): Extension<quinn::Connection>,
     headers: HeaderMap,
+    Query(params): Query<HashMap<String, String>>,
     upgrade: h3_axum::WebTransportUpgrade,
 ) -> Response {
-    // Auth (README §11): when enabled, a valid session cookie is required
-    // before the upgrade, and the IdP name is forced onto the join. A 401
+    // Auth (README §11, issues.md #4): when enabled, the IdP name comes
+    // either from a one-time `?ticket=` (the WebTransport handshake carries
+    // no cookies in Chromium) or, failing that, the session cookie. A 401
     // here (before `accept`) rejects the upgrade outright.
-    let forced_name = match crate::api::enforce_auth(&state, &headers) {
-        Ok(name) => name,
-        Err(status) => return status.into_response(),
+    let forced_name = match params
+        .get("ticket")
+        .and_then(|t| crate::api::consume_wt_ticket(&state, t))
+    {
+        Some(name) => Some(name),
+        None => match crate::api::enforce_auth(&state, &headers) {
+            Ok(name) => name,
+            Err(status) => return status.into_response(),
+        },
     };
     match upgrade.accept().await {
         Ok(session) => {
@@ -409,6 +418,7 @@ fn dispatch(
                         room,
                         users: joined.users,
                         chat: joined.chat,
+                        call_chat: joined.call_chat,
                         call: joined.call,
                         ticket: joined.ticket,
                     };
@@ -431,7 +441,7 @@ fn dispatch(
             info!(user = %id, room = %room, "user left");
             false
         }
-        Ok(ClientMsg::Chat { text }) => {
+        Ok(ClientMsg::Chat { text, scope }) => {
             let Some((room, id, name)) = session.clone() else {
                 return send(tx, ErrorCode::BadMessage);
             };
@@ -447,6 +457,7 @@ fn dispatch(
                 name,
                 text,
                 ts: unix_ts(),
+                scope,
             };
             world.broadcast_chat(&room, msg);
             true

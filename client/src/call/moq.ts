@@ -33,7 +33,7 @@ import { Signal } from "@moq/signals";
  *  `Sync.wait` wakes on the change (the bundle watches
  *  `in.delay.changed`), so the shrink takes effect live and the ring
  *  resize on shrink keeps the newest samples. */
-const ENTRY_DELAY_MS = 1000;
+const ENTRY_DELAY_MS = 300;
 const STEADY_DELAY_MS = 300;
 /** How long the entry delay is held: long enough for a slow start to
  *  settle, short enough to be unnoticeable. */
@@ -85,6 +85,9 @@ export interface DownlinkView {
   delay: number;
   /** Jitter buffer depth, ms. */
   jitter: number;
+  /** Decoded frame resolution, px (0x0 until the first frame). */
+  width: number;
+  height: number;
 }
 
 /** State exposed for the e2e harness (debug hook; the `build:e2e` client
@@ -886,8 +889,10 @@ export class MoqCall {
       frames: d.camDecoder.out.stats.peek()?.frameCount ?? 0,
       screenFrames: d.scrDecoder.out.stats.peek()?.frameCount ?? 0,
       audioBytes: d.audDecoder.out.stats.peek()?.bytesReceived ?? 0,
-      delay: Number(d.sync.out.delay.peek()),
+      delay: Number(d.sync.in.delay.peek()),
       jitter: Number(d.sync.out.jitter.peek()),
+      width: d.canvas.width,
+      height: d.canvas.height,
     };
   }
 

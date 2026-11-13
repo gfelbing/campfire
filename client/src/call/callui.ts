@@ -247,7 +247,7 @@ export function createCallUI(container: HTMLElement, actions: CallUiActions): Ca
     return tile;
   }
 
-  function updateTile(t: Tile, name: string, state: DownlinkState, canvas: HTMLCanvasElement | null, stream: MediaStream | null, audioOn: boolean, videoOn: boolean, delay: number, rtt: number | null): void {
+  function updateTile(t: Tile, name: string, state: DownlinkState, canvas: HTMLCanvasElement | null, stream: MediaStream | null, audioOn: boolean, videoOn: boolean, delay: number, rtt: number | null, width = 0, height = 0): void {
     t.nameEl.textContent = t.key.endsWith(":scr") ? `${name} · screen` : name;
     t.stateEl.textContent = stateText(state);
     // Latency: e2e playback delay (how far the canvas trails the live
@@ -260,6 +260,7 @@ export function createCallUI(container: HTMLElement, actions: CallUiActions): Ca
         rtt != null
           ? `${Math.round(delay)} ms · RTT ${Math.round(rtt)} ms`
           : `${Math.round(delay)} ms`;
+      if (width > 0 && height > 0) t.latencyEl.textContent += ` · ${width}×${height}`;
       t.latencyEl.classList.remove("hidden");
       t.sparkSamples.push(delay);
       if (t.sparkSamples.length > SPARK_LEN) t.sparkSamples.shift();
@@ -271,6 +272,9 @@ export function createCallUI(container: HTMLElement, actions: CallUiActions): Ca
     }
     t.muteEl.classList.toggle("hidden", audioOn);
     t.camEl.classList.toggle("hidden", videoOn);
+    // Camera off (issues.md #3): the canvas keeps the last decoded frame;
+    // hide it so the stale image does not show to others' viewers.
+    t.media?.classList.toggle("hidden", !videoOn);
     // The downlink's canvas is the paint target; move it in when it first
     // appears (rebuilding it would restart the decode pipeline).
     if (canvas !== t.media) {
@@ -374,6 +378,9 @@ export function createCallUI(container: HTMLElement, actions: CallUiActions): Ca
         rtt: number | null;
         audioOn: boolean;
         videoOn: boolean;
+        /** Decoded resolution, px (0x0 until the first frame). */
+        width: number;
+        height: number;
       }
       const views: View[] = [];
       for (const p of peers) {
@@ -388,6 +395,8 @@ export function createCallUI(container: HTMLElement, actions: CallUiActions): Ca
           rtt: p.rtt,
           audioOn: p.audioOn,
           videoOn: p.videoOn,
+          width: p.width,
+          height: p.height,
         });
         if (p.screen) {
           views.push({
@@ -401,6 +410,8 @@ export function createCallUI(container: HTMLElement, actions: CallUiActions): Ca
             rtt: p.rtt,
             audioOn: true,
             videoOn: true,
+            width: p.width,
+            height: p.height,
           });
         }
       }
@@ -412,7 +423,7 @@ export function createCallUI(container: HTMLElement, actions: CallUiActions): Ca
           t = makeTile(v.key, v.name, v.screen);
           tiles.set(v.key, t);
         }
-        updateTile(t, v.name, v.state, v.canvas, v.stream, v.audioOn, v.videoOn, v.delay, v.rtt);
+        updateTile(t, v.name, v.state, v.canvas, v.stream, v.audioOn, v.videoOn, v.delay, v.rtt, v.width, v.height);
       }
       for (const [key, t] of tiles) {
         if (!seen.has(key)) {

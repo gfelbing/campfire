@@ -322,6 +322,45 @@ body {
   gap: 0.15rem;
 }
 
+/* Toasts (issues.md #2): system/log lines surface here instead of in the
+ * chats; fixed above the map, bottom-left, each fading after 5 s. */
+#toasts {
+  position: fixed;
+  left: 1rem;
+  bottom: 1rem;
+  display: grid;
+  gap: 0.4rem;
+  z-index: 20;
+  pointer-events: none;
+}
+
+.toast {
+  background: var(--panel);
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 0.5rem 0.75rem;
+  font-size: 0.85rem;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+}
+
+/* Status popover (topbar, issues.md #1): anchored under its own button. */
+.status-drop {
+  position: relative;
+}
+
+.status-drop .status-menu {
+  left: auto;
+  right: 0;
+}
+
+.status-menu .profile-status {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  width: 100%;
+}
+
 .profile-status {
   display: flex;
   align-items: center;

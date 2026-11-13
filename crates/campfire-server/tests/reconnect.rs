@@ -13,7 +13,7 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use bytes::Bytes;
-use campfire_protocol::{ClientMsg, Dir, MovementBatch, MovementEntry, ServerMsg, to_line};
+use campfire_protocol::{ChatScope, ClientMsg, Dir, MovementBatch, MovementEntry, ServerMsg, to_line};
 use tokio::io::AsyncWriteExt;
 use wtransport::Connection;
 
@@ -386,6 +386,7 @@ async fn chat_and_signaling_survive_5_percent_packet_loss() {
     // Chat round-trip under loss: both sides get the echo.
     b.send(&ClientMsg::Chat {
         text: "hello over the lossy link".into(),
+        scope: ChatScope::Room,
     })
     .await;
     for (c, which) in [(&mut a, 0), (&mut b, 1)] {

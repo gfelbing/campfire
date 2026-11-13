@@ -17,8 +17,8 @@ export async function getLocalMedia(): Promise<MediaStream> {
       autoGainControl: true,
     },
     video: {
-      width: { ideal: 1280 },
-      height: { ideal: 720 },
+      width: { ideal: 800, max: 800 },
+      height: { ideal: 600, max: 600 },
       frameRate: { ideal: 30, max: 30 },
     },
   });

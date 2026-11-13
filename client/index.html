@@ -34,7 +34,13 @@
           <button id="mic-btn" class="topbar-toggle" title="mute / unmute (🎤)">🎤</button>
           <button id="cam-btn" class="topbar-toggle" title="camera on / off (📷)">📷</button>
           <button id="screen-btn" class="topbar-toggle hidden" title="share the screen (🖥)">🖥</button>
-          <button id="profile-btn" class="profile-btn" title="profile and status" aria-haspopup="true">
+          <div class="status-drop">
+            <button id="status-btn" class="topbar-toggle" title="presence status" aria-haspopup="true">
+              <span class="sdot online"></span>
+            </button>
+            <div id="status-menu" class="map-list status-menu hidden"></div>
+          </div>
+          <button id="profile-btn" class="profile-btn" title="profile" aria-haspopup="true">
             <span class="status-initial"></span>
             <span class="sdot online"></span>
           </button>
@@ -46,6 +52,7 @@
           <nav class="sidebar-rail">
             <button data-open="players" title="users">👥</button>
             <button data-open="chat" title="chat">💬</button>
+            <button data-open="bubble" class="hidden" title="bubble chat">🗣</button>
           </nav>
           <div class="sidebar-panes">
             <section class="accordion" data-acc="players">
@@ -63,6 +70,14 @@
                 <span class="acc-caret">▾</span>
               </button>
               <div class="accordion-body" data-pane="chat"></div>
+            </section>
+            <section class="accordion hidden" data-acc="bubble">
+              <button class="accordion-header" data-toggle="bubble">
+                <span class="acc-label">🗣 Bubble chat</span>
+                <span class="acc-dot" hidden></span>
+                <span class="acc-caret">▾</span>
+              </button>
+              <div class="accordion-body" data-pane="bubble"></div>
             </section>
           </div>
         </aside>

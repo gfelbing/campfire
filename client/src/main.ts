@@ -28,6 +28,23 @@ const IDLE_EVERY_MS = 500;
 /// Avatar radius in tiles for local collision checks.
 const AVATAR_R = 0.3;
 
+/** A transient toast (issues.md #2): system/log lines (errors, connection
+ *  issues) no longer pollute the chats. Multiple toasts stack; each fades
+ *  after 5 s. */
+function toast(text: string): void {
+  let host = document.getElementById("toasts");
+  if (!host) {
+    host = document.createElement("div");
+    host.id = "toasts";
+    document.body.appendChild(host);
+  }
+  const el = document.createElement("div");
+  el.className = "toast";
+  el.textContent = text;
+  host.appendChild(el);
+  window.setTimeout(() => el.remove(), 5000);
+}
+
 /** True if an avatar centred at (x, y) overlaps a blocked tile. */
 function blocked(map: MapData, x: number, y: number): boolean {
   return (
@@ -117,6 +134,7 @@ async function main(): Promise<void> {
   let moving = false;
   let myId = "";
   let chat: ChatUI | null = null;
+  let bubbleChat: ChatUI | null = null;
 
   // Click-to-walk (README roadmap "Map enhancements"): the path queue the
   // game loop consumes; keyboard input clears it.
@@ -193,6 +211,7 @@ async function main(): Promise<void> {
       world.manager.hello(h.users, h.you);
       refreshUsersHook();
       chat?.history(h.chat, h.you);
+      bubbleChat?.history(h.call_chat ?? [], h.you);
       sidebar.setUserCount(roster.size);
       manager.setSelfId(h.you);
       presence.setUsers(h.users, new Set(h.call.map((u) => u.id)));
@@ -227,10 +246,13 @@ async function main(): Promise<void> {
       refreshUsersHook();
     },
     onChat: (c: ChatMsg) => {
-      chat?.add(c, myId);
-      if (c.from !== myId) sidebar.chatActivity(true);
+      if ((c.scope ?? "room") === "call") bubbleChat?.add(c, myId);
+      else chat?.add(c, myId);
     },
-    onTyping: (id, on) => chat?.typing(id, on),
+    onTyping: (id, on) => {
+      chat?.typing(id, on);
+      bubbleChat?.typing(id, on);
+    },
     onUserStatus: (id, s) => presence.setStatus(id, s),
     onMovement: (batch: MovementBatch) => {
       world.manager.movement(batch.m);
@@ -283,7 +305,7 @@ async function main(): Promise<void> {
     // the URL → map-id rule and tells us the target; same name + color.
     onNavigate: (map) => navigateToRoom(map, 50),
     onError: (code) => {
-      chat?.system(`server error: ${code}`);
+      toast(`server error: ${code}`);
       manager.onError(code);
     },
     onStatus: () => {
@@ -312,7 +334,15 @@ async function main(): Promise<void> {
   const sidebar = createSidebar();
   const ui = document.getElementById("ui")!; // the theater's overlay layer
   const presence = createPresence(sidebar.pane("players"));
-  chat = createChat(sidebar.pane("chat"), (t) => conn.sendChat(t), (on) => conn.sendTyping(on));
+  chat = createChat(sidebar.pane("chat"), (t, scope) => conn.sendChat(t, scope), (on) => conn.sendTyping(on));
+  // Bubble chat (issues.md #2): a second channel that exists only while in
+  // a call; it sends with the `call` scope and shows the call history.
+  bubbleChat = createChat(
+    sidebar.pane("bubble"),
+    (t, scope) => conn.sendChat(t, scope),
+    (on) => conn.sendTyping(on),
+    { scope: "call", onActivity: () => sidebar.bubbleActivity(true) },
+  );
   const callUI = createCallUI(ui, {
     onHangup: () => manager.hangup(),
   });
@@ -320,12 +350,14 @@ async function main(): Promise<void> {
     onPhase: (ph) => {
       callUI.setPhase(ph);
       header.setInCall(ph.p === "in-call" || ph.p === "joining");
+      // The bubble chat exists only while in a call (issues.md #2).
+      sidebar.setBubbleVisible(ph.p === "in-call");
     },
     onLocalStream: (s) => callUI.setLocalStream(s),
     onPeers: (ps) => callUI.setPeers(ps),
     onLocalMute: (a, v) => header.setMute(a, v),
     onLocalScreen: (on) => header.setScreen(on),
-    onLog: (t) => chat?.system(t),
+    onLog: (t) => toast(t),
     onCallSound: (s) => playCallSound(s),
   }, opts.room);
   // Top bar: the burger toggles the sidebar; the map switcher navigates the
@@ -348,19 +380,14 @@ async function main(): Promise<void> {
   });
   header.setMute(true, true);
 
-  // Auto-away (the tab in the background is not "present"): leaving the tab
-  // with no active call switches to `away`; coming back restores `online`
-  // (only from an auto-away, never over a manual status).
-  let autoAway = false;
+  // Auto-away (issues.md #1): leaving the tab with no active call switches
+  // `online` → `away`; coming back switches any `away` (manual or automatic)
+  // back to `online`. `dnd` never changes automatically, either direction.
   document.addEventListener("visibilitychange", () => {
     if (document.hidden) {
-      if (!manager.inCall() && header.status() === "online") {
-        autoAway = true;
-        header.setStatus("away");
-      }
-    } else if (autoAway) {
-      autoAway = false;
-      if (!manager.inCall()) header.setStatus("online");
+      if (!manager.inCall() && header.status() === "online") header.setStatus("away");
+    } else if (header.status() === "away") {
+      header.setStatus("online");
     }
   });
 

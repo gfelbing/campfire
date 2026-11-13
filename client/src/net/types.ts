@@ -33,11 +33,17 @@ export interface UserBrief {
   status?: OwnStatus;
 }
 
+/** Which chat a message belongs to (issues.md #2): the room-wide chat or
+ *  the bubble-local one (visible only while in a call). */
+export type ChatScope = "room" | "call";
+
 export interface ChatMsg {
   from: string;
   name: string;
   text: string;
   ts: number;
+  /** Room chat or bubble chat; absent means `room` (pre-0.0.9 sender). */
+  scope?: ChatScope;
 }
 
 export type ErrorCode =
@@ -61,6 +67,9 @@ export type ServerMsg =
       token: string;
       users: UserState[];
       chat: ChatMsg[];
+      /** The room's bubble-chat history (issues.md #2); only shown while
+       *  in a call. */
+      call_chat?: ChatMsg[];
       /** The room's current call participants (empty when no call) — the
        *  authoritative catch-up so a reconnected client knows whether the
        *  call survived the drop. */
@@ -71,7 +80,7 @@ export type ServerMsg =
     }
   | { t: "joined"; user: UserBrief }
   | { t: "left"; id: string }
-  | { t: "chat"; from: string; name: string; text: string; ts: number }
+  | { t: "chat"; from: string; name: string; text: string; ts: number; scope?: ChatScope }
   | { t: "typing"; id: string; on: boolean }
   /** `id`'s presence status changed (profile menu); not sent to the sender. */
   | { t: "status"; id: string; status: OwnStatus }
@@ -112,7 +121,7 @@ export type ClientMsg =
       /** The joiner's presence status; absent means `online`. */
       status?: OwnStatus;
     }
-  | { t: "chat"; text: string }
+  | { t: "chat"; text: string; scope?: ChatScope }
   | { t: "typing"; on: boolean }
   /** Presence status changed (the profile menu): `dnd` opts out of
    *  proximity calls, `away` auto-joins them muted. */

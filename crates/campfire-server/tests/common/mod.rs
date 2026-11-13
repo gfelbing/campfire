@@ -79,6 +79,7 @@ pub async fn start_server_with_auth(
         metrics: metrics.clone(),
         moq,
         auth,
+        wt_tickets: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         fallback: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
     };
     let app = campfire_server::api::router(state);

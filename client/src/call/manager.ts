@@ -46,6 +46,9 @@ export interface PeerView {
   delay: number;
   /** Downlink jitter buffer depth, ms (0 while no downlink). */
   jitter: number;
+  /** Decoded camera-frame resolution, px (0x0 until the first frame). */
+  width: number;
+  height: number;
   /** Presence from `call_mute` (default on). */
   audioOn: boolean;
   videoOn: boolean;
@@ -531,6 +534,8 @@ export class CallManager {
           state: dl?.status ?? "subscribing",
           delay: dl?.delay ?? 0,
           jitter: dl?.jitter ?? 0,
+          width: dl?.width ?? 0,
+          height: dl?.height ?? 0,
           audioOn: pres.audio,
           videoOn: pres.video,
           screenOn: pres.screen,

@@ -83,6 +83,16 @@ pub struct UserState {
     pub status: Option<Status>,
 }
 
+/// Which chat a message belongs to (issues.md #2): the room-wide chat or
+/// the bubble-local one (visible only while in a call).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChatScope {
+    #[default]
+    Room,
+    Call,
+}
+
 /// A chat message (history entries and live events share this shape).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChatMsg {
@@ -91,6 +101,9 @@ pub struct ChatMsg {
     pub text: String,
     /// Unix timestamp (seconds).
     pub ts: u64,
+    /// Room chat or bubble chat; absent on pre-0.0.9 senders means `room`.
+    #[serde(default)]
+    pub scope: ChatScope,
 }
 
 /// Why the server rejected something (README §5 `error`).
@@ -135,6 +148,9 @@ pub enum ClientMsg {
     },
     Chat {
         text: String,
+        /// Room chat or bubble chat (issues.md #2); absent means `room`.
+        #[serde(default)]
+        scope: ChatScope,
     },
     Typing {
         on: bool,
@@ -188,6 +204,11 @@ pub enum ServerMsg {
         token: String,
         users: Vec<UserState>,
         chat: Vec<ChatMsg>,
+        /// The room's bubble-chat history (issues.md #2): messages sent
+        /// inside calls. Absent/empty on older clients' view; the bubble
+        /// channel only shows while in a call.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        call_chat: Vec<ChatMsg>,
         /// The room's current call participants (empty when no call is
         /// running): the authoritative catch-up for badges and mid-call
         /// rejoin (README §6.3).
@@ -208,6 +229,9 @@ pub enum ServerMsg {
         name: String,
         text: String,
         ts: u64,
+        /// Room chat or bubble chat (issues.md #2).
+        #[serde(default)]
+        scope: ChatScope,
     },
     Typing {
         id: String,
@@ -360,6 +384,14 @@ mod tests {
                 name: "jules".into(),
                 text: "welcome!".into(),
                 ts: 1_762_410_000,
+                scope: ChatScope::Room,
+            }],
+            call_chat: vec![ChatMsg {
+                from: "u_77ab".into(),
+                name: "jules".into(),
+                text: "(in the bubble) hello?".into(),
+                ts: 1_762_410_005,
+                scope: ChatScope::Call,
             }],
             call: vec![UserBrief {
                 id: "u_77ab".into(),

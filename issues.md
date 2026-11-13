@@ -168,3 +168,7 @@ Remaining questions: does the deployed binary actually link the vendored h3-quin
 1. Verify deployment builds against the vendored `third_party/h3-quinn` (path dependency, not registry) so the panic fix is actually in the binary.
 2. Confirm `keep_alive_interval` (`tls.rs:64`, set to `idle_timeout / 3`) applies to the MoQ/WebTransport listener too, so idle sessions ping instead of timing out.
 3. Soak test with 3 participants for an extended period; watch for `ConnectionError: Timeout` / `StreamClosed` warnings and any panic.
+
+## verification (2026-11-13)
+
+- 1 and 2 verified in-repo: `Cargo.toml` `[patch.crates-io]` maps `h3-quinn` (and `moq-net`) to the vendored copies, and the single QUIC endpoint that serves `/wt` and `/moq/{ticket}` is built from `tls::server_config*`, which sets `keep_alive_interval` — every connection, MoQ included, pings. Item 3 (soak) remains a deployment test.

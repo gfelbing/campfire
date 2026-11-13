@@ -1,6 +1,9 @@
 // Chat panel: history, live lines, typing indicator, input (README §8).
+// Two instances (issues.md #2): the room-wide chat and the bubble-local
+// chat; each sends with its scope and reports new foreign lines to its
+// unread indicator.
 
-import type { ChatMsg } from "../net/types";
+import type { ChatMsg, ChatScope } from "../net/types";
 
 export interface ChatUI {
   /** Append one live chat line (also used for history). */
@@ -11,15 +14,20 @@ export interface ChatUI {
   system(text: string): void;
   /** Someone started/stopped typing. */
   typing(id: string, on: boolean): void;
+  /** The chat's scope (which channel it sends on). */
+  scope: ChatScope;
+  /** Unsent-input state flush (used when the call ends, no-op otherwise). */
 }
 
 const MAX_LINES = 200;
 
 export function createChat(
   container: HTMLElement,
-  onSend: (text: string) => void,
+  onSend: (text: string, scope: ChatScope) => void,
   onTyping: (on: boolean) => void,
+  opts: { scope: ChatScope; onActivity?: () => void } = { scope: "room" },
 ): ChatUI {
+  const scope = opts.scope;
   const panel = document.createElement("div");
   panel.className = "chat";
   panel.innerHTML = `
@@ -57,11 +65,13 @@ export function createChat(
     list.scrollTop = list.scrollHeight;
   }
 
-  const add = (m: ChatMsg, myId: string): void =>
+  const add = (m: ChatMsg, myId: string, notify = true): void => {
     line(m.from === myId ? "me" : "", m.name, m.text);
+    if (notify && m.from !== myId) opts.onActivity?.();
+  };
 
   const history = (msgs: ChatMsg[], myId: string): void => {
-    for (const m of msgs) add(m, myId);
+    for (const m of msgs) add(m, myId, false);
   };
 
   const system = (text: string): void => line("system", null, text);
@@ -90,7 +100,7 @@ export function createChat(
     e.preventDefault();
     const text = input.value.trim();
     if (text.length === 0) return;
-    onSend(text);
+    onSend(text, scope);
     input.value = "";
     if (typingSent) {
       onTyping(false);
@@ -98,5 +108,5 @@ export function createChat(
     }
   });
 
-  return { add, history, system, typing };
+  return { add, history, system, typing, scope };
 }
