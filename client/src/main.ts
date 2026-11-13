@@ -3,7 +3,7 @@
 
 import { CallManager } from "./call/manager";
 import { createCallUI } from "./call/callui";
-import { playCallSound } from "./call/sound";
+import { playBlob, playCallSound } from "./call/sound";
 import { attachKeys, desiredVelocity, keys } from "./input/keys";
 import { Connection } from "./net/connection";
 import type { ChatMsg, Dir, MovementBatch, UserBrief } from "./net/types";
@@ -30,8 +30,8 @@ const AVATAR_R = 0.3;
 
 /** A transient toast (issues.md #2): system/log lines (errors, connection
  *  issues) no longer pollute the chats. Multiple toasts stack; each fades
- *  after 5 s. */
-function toast(text: string): void {
+ *  after 5 s. `name` renders bold before the text (chat toasts). */
+function toast(text: string, name?: string): void {
   let host = document.getElementById("toasts");
   if (!host) {
     host = document.createElement("div");
@@ -40,7 +40,12 @@ function toast(text: string): void {
   }
   const el = document.createElement("div");
   el.className = "toast";
-  el.textContent = text;
+  if (name !== undefined) {
+    const b = document.createElement("b");
+    b.textContent = name;
+    el.appendChild(b);
+  }
+  el.append(text);
   host.appendChild(el);
   window.setTimeout(() => el.remove(), 5000);
 }
@@ -334,14 +339,34 @@ async function main(): Promise<void> {
   const sidebar = createSidebar();
   const ui = document.getElementById("ui")!; // the theater's overlay layer
   const presence = createPresence(sidebar.pane("players"));
-  chat = createChat(sidebar.pane("chat"), (t, scope) => conn.sendChat(t, scope), (on) => conn.sendTyping(on));
+  chat = createChat(sidebar.pane("chat"), (t, scope) => conn.sendChat(t, scope), (on) => conn.sendTyping(on), {
+    scope: "room",
+    onActivity: (m) => {
+      sidebar.chatActivity(true);
+      // Off-screen chat arrives as a toast with the "blob" blip; the panel
+      // itself stays quiet (the line is already in the list).
+      if (!sidebar.chatOpen()) {
+        toast(`${m.name}: ${m.text}`, m.name);
+        playBlob();
+      }
+    },
+  });
   // Bubble chat (issues.md #2): a second channel that exists only while in
   // a call; it sends with the `call` scope and shows the call history.
   bubbleChat = createChat(
     sidebar.pane("bubble"),
     (t, scope) => conn.sendChat(t, scope),
     (on) => conn.sendTyping(on),
-    { scope: "call", onActivity: () => sidebar.bubbleActivity(true) },
+    {
+      scope: "call",
+      onActivity: (m) => {
+        sidebar.bubbleActivity(true);
+        if (!sidebar.bubbleOpen()) {
+          toast(`${m.name}: ${m.text}`, m.name);
+          playBlob();
+        }
+      },
+    },
   );
   const callUI = createCallUI(ui, {
     onHangup: () => manager.hangup(),

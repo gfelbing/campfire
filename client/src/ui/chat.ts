@@ -18,14 +18,13 @@ export interface ChatUI {
   scope: ChatScope;
   /** Unsent-input state flush (used when the call ends, no-op otherwise). */
 }
-
 const MAX_LINES = 200;
 
 export function createChat(
   container: HTMLElement,
   onSend: (text: string, scope: ChatScope) => void,
   onTyping: (on: boolean) => void,
-  opts: { scope: ChatScope; onActivity?: () => void } = { scope: "room" },
+  opts: { scope: ChatScope; onActivity?: (m: ChatMsg) => void } = { scope: "room" },
 ): ChatUI {
   const scope = opts.scope;
   const panel = document.createElement("div");
@@ -67,7 +66,7 @@ export function createChat(
 
   const add = (m: ChatMsg, myId: string, notify = true): void => {
     line(m.from === myId ? "me" : "", m.name, m.text);
-    if (notify && m.from !== myId) opts.onActivity?.();
+    if (notify && m.from !== myId) opts.onActivity?.(m);
   };
 
   const history = (msgs: ChatMsg[], myId: string): void => {

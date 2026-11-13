@@ -344,6 +344,11 @@ body {
   box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
 }
 
+.toast b {
+  margin-right: 0.4em;
+  color: var(--accent);
+}
+
 /* Status popover (topbar, issues.md #1): anchored under its own button. */
 .status-drop {
   position: relative;

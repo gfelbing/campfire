@@ -10,6 +10,10 @@ export interface SidebarUI {
   chatActivity(on: boolean): void;
   /** A new bubble-chat line: dot on the Bubble chat header while hidden. */
   bubbleActivity(on: boolean): void;
+  /** Whether the room chat panel is currently visible (toasts gate on it). */
+  chatOpen(): boolean;
+  /** Whether the bubble chat panel is currently visible. */
+  bubbleOpen(): boolean;
   /** Show/hide the bubble chat (rail icon + accordion); only offered
    *  while in a call (issues.md #2). */
   setBubbleVisible(on: boolean): void;
@@ -88,6 +92,8 @@ export function createSidebar(): SidebarUI {
       bubbleDot.hidden = !show;
       bubbleRailDot.hidden = !show;
     },
+    chatOpen: chatVisible,
+    bubbleOpen: bubbleVisible,
     setBubbleVisible(on) {
       bubbleRail.classList.toggle("hidden", !on);
       bubbleSection.classList.toggle("hidden", !on);

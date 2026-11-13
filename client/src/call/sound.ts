@@ -49,3 +49,22 @@ export function playCallSound(kind: CallSound): void {
     tone(ac, 523.25, t + 0.12, 0.3, 0.08);
   }
 }
+
+/** A short "blob" for an incoming chat message: one sine blip sliding
+ *  down (320 → 140 Hz), the classic water-drop shape. */
+export function playBlob(): void {
+  const ac = audio();
+  if (!ac) return;
+  const t = ac.currentTime + 0.02;
+  const osc = ac.createOscillator();
+  const gain = ac.createGain();
+  osc.type = "sine";
+  osc.frequency.setValueAtTime(320, t);
+  osc.frequency.exponentialRampToValueAtTime(140, t + 0.12);
+  gain.gain.setValueAtTime(0, t);
+  gain.gain.linearRampToValueAtTime(0.08, t + 0.01);
+  gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.18);
+  osc.connect(gain).connect(ac.destination);
+  osc.start(t);
+  osc.stop(t + 0.25);
+}
