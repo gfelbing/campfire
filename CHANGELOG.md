@@ -4,6 +4,51 @@ All notable releases of campfire. Versions follow calendar-agnostic
 semver; releases are cut by tagging `vX.Y.Z` (the Docker image is built
 and pushed to GHCR on each tag).
 
+## [0.0.9] — 2026-11-13
+
+The call-quality release: the theater tiles tell the truth (real
+resolution and real delay), and a round of chat, status and sidebar
+repairs from the issues.md audit.
+
+### Fixed
+
+- Call theater resolution: the 800x600 cap now holds end to end. The
+  live track is re-constrained after `getUserMedia` (some cameras
+  deliver 1280x720 despite max constraints), and the vendored
+  `@moq/publish` Capture reports the frame's *display* dimensions to
+  the encoder — Chrome's `MediaStreamTrackProcessor` keeps delivering
+  native coded frames (1280x720) after `applyConstraints` downsizes the
+  track, so the encoder sized its renditions from the coded dims and
+  the pixel budget auto-scaled a 16:9 frame to 912x512. Tiles now stay
+  within the cap.
+- Call delay indicator: computed from the root catalog's `clock` (PTS
+  zero mapped to the moq epoch wall clock) instead of `out.reference`.
+  The wire timestamps are the publisher's page clock and watch anchors
+  against the viewer's own `performance.now()`, so the old indicator
+  carried the two pages' load-time offset — one tab showed +4-5 s,
+  another -4.3 s.
+- Chat UI: the bubble chat accordion shares the sidebar pane with the
+  room chat (it collapsed to zero height and squeezed the input forms
+  out of view), a broken `.cf-chat` selector kept the panel from
+  filling its accordion body (long chats pushed the input out of
+  view), and a short message list no longer spreads over the whole
+  height (align-content pinned to start).
+- Chat panel CSS classes renamed to `cf-chat*`: Brave Shields' filter
+  lists hide elements matching generic `.chat*` selectors.
+- Auto-away keys off window focus/blur instead of visibilitychange and
+  restores `online` only from an automatic away — a manually chosen
+  `away`/`dnd` never changes on its own.
+- Sidebar Users list: a status change now updates the sender's own row
+  (the server never echoed `status` back), and a rename/color change
+  survives the reload re-join (the token-restore path applied the
+  parked member's stale name/avatar instead of the join's).
+
+### Changed
+
+- Call-scoped chat hardened: system and log lines surface as toasts
+  instead of chat lines; joining a call opens the bubble chat
+  accordion automatically.
+
 ## [0.0.8] — 2026-11-13
 
 The UI redesign release: a one-line top bar, an accordion sidebar, a
