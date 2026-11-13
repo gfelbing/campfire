@@ -601,6 +601,9 @@ body {
   min-height: 0;
   overflow-y: auto;
   display: grid;
+  /* align-content start: grid `stretch` (the default) would grow the auto
+   * rows to spread a few messages over the whole height. */
+  align-content: start;
   gap: 0.25rem;
   font-size: 0.85rem;
   scrollbar-width: thin;
