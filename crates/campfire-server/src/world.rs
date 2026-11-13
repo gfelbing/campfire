@@ -398,6 +398,18 @@ impl World {
             let now = Instant::now();
             let id = left_entry.user_id;
             let mut member = left_entry.member;
+            // Identity edits made before the reload (name/color in the
+            // profile menu) ride in this join request: apply them over the
+            // parked member's old values.
+            member.name = name.to_owned();
+            if avatar.is_some() {
+                member.avatar = avatar.clone();
+            }
+            // A fresh page always joins `online` (issues.md #1): the join
+            // request's status (absent = `online` on the client) wins over
+            // the parked one.
+            member.status = status;
+            member.bubble_off = status == Status::Dnd;
             // The parked member's session channels are dead; the movement
             // counters restart with the rejoining session.
             member.session = session_id;

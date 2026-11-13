@@ -373,6 +373,9 @@ async function main(): Promise<void> {
     onStatusChange: (s) => {
       conn.sendStatus(s);
       manager.setStatus(s);
+      // The server does not echo `status` back to the sender (their UI is
+      // expected to already show it) — update our own Users-list row here.
+      if (myId) presence.setStatus(myId, s);
     },
     onToggleMute: () => manager.toggleMute(),
     onToggleCamera: () => manager.toggleCamera(),
