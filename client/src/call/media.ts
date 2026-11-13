@@ -10,7 +10,7 @@
  * capped at 800x600 (issues.md #3) so the SFU uplink stays within budget.
  */
 export async function getLocalMedia(): Promise<MediaStream> {
-  return navigator.mediaDevices.getUserMedia({
+  const stream = await navigator.mediaDevices.getUserMedia({
     audio: {
       echoCancellation: true,
       noiseSuppression: true,
@@ -22,6 +22,25 @@ export async function getLocalMedia(): Promise<MediaStream> {
       frameRate: { ideal: 30, max: 30 },
     },
   });
+  // Some cameras deliver 1280x720 despite the gUM `max` (the constraint is
+  // advisory when the device can't comply). Re-apply it on the live track:
+  // if the camera still refuses, the encoder's 800x600 pixel budget is the
+  // last resort (a 16:9 frame then lands just under 800 wide, e.g. 912x512
+  // from 1280x720).
+  const video = stream.getVideoTracks()[0];
+  if (video) {
+    try {
+      await video.applyConstraints({
+        width: { max: 800 },
+        height: { max: 600 },
+        frameRate: { max: 30 },
+      });
+    } catch (e) {
+      console.warn("video resolution cap rejected:", e);
+    }
+    console.log("video capture settings:", JSON.stringify(video.getSettings()));
+  }
+  return stream;
 }
 
 /** Acquire the user's screen (or window/tab) for screen sharing (README
