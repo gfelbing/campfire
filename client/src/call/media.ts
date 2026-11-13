@@ -38,7 +38,6 @@ export async function getLocalMedia(): Promise<MediaStream> {
     } catch (e) {
       console.warn("video resolution cap rejected:", e);
     }
-    console.log("video capture settings:", JSON.stringify(video.getSettings()));
   }
   return stream;
 }
