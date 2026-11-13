@@ -3,7 +3,7 @@
 
 import { Container, Graphics, Text } from "pixi.js";
 
-import type { Dir, UserBrief, UserState } from "../net/types";
+import type { Dir, OwnStatus, UserBrief, UserState } from "../net/types";
 
 const SNAP_MAX_LAG_MS = 150;
 
@@ -29,6 +29,8 @@ export class AvatarView {
   private inCallBadge: Text;
   /** 🔇 shown above the label while the user stands in a silentZone. */
   private dndBadge: Text;
+  /** Presence dot right of the name (same palette as the Users list). */
+  private statusDot: Graphics;
   private baseX = 0;
   private baseY = 0;
   private bobbing = false;
@@ -65,19 +67,36 @@ export class AvatarView {
     this.dndBadge.anchor.set(0.5, 1);
     this.dndBadge.y = -42;
     this.dndBadge.visible = false;
+    this.statusDot = new Graphics();
     this.container.addChild(
       this.body,
       this.facing,
       this.label,
+      this.statusDot,
       this.inCallBadge,
       this.dndBadge,
     );
     this.setName(name);
     this.setColor(color);
+    this.setStatus("online");
   }
 
   setName(name: string): void {
     this.label.text = name;
+    this.layoutStatusDot();
+  }
+
+  /** Presence dot right of the name: green/amber/red like the Users
+   *  list (`presence-status` in style.css). Absent status = `online`. */
+  setStatus(status: OwnStatus): void {
+    const color = status === "away" ? 0xd4a017 : status === "dnd" ? 0xe06060 : 0x58a858;
+    this.statusDot.clear().circle(0, 0, 3).fill({ color }).stroke({ width: 1, color: 0x14161a, alpha: 0.6 });
+    this.layoutStatusDot();
+  }
+
+  /** The dot sits just right of the (name-width-dependent) label. */
+  private layoutStatusDot(): void {
+    this.statusDot.position.set(this.label.width / 2 + 5, -24);
   }
 
   /** Toggle the headphone badge (call state is room-wide, README §5). */
@@ -196,12 +215,14 @@ export class AvatarManager {
         // The roster is the color authority: re-apply it on reconnect.
         existing.color = colorOf(u);
         existing.view.setColor(existing.color);
+        existing.view.setStatus(u.status ?? "online");
         // The hello snapshot is authoritative: reset the history to it.
         existing.snap = [{ x: u.x, y: u.y, t: now }];
       } else {
         const color = colorOf(u);
         const view = new AvatarView(u.name, color);
         view.setDir(u.d);
+        view.setStatus(u.status ?? "online");
         this.layer.addChild(view.container);
         this.remotes.set(u.id, {
           id: u.id,
@@ -221,6 +242,7 @@ export class AvatarManager {
     const now = performance.now();
     const color = colorOf(user);
     const view = new AvatarView(user.name, color);
+    view.setStatus(user.status ?? "online");
     this.layer.addChild(view.container);
     this.remotes.set(user.id, {
       id: user.id,
@@ -251,6 +273,11 @@ export class AvatarManager {
   /** Toggle the 🔇 badge on one remote avatar (silentZone occupancy). */
   setDnd(id: string, on: boolean): void {
     this.remotes.get(id)?.view.setDnd(on);
+  }
+
+  /** Presence dot on one remote avatar (`status` events + rosters). */
+  setStatus(id: string, status: OwnStatus): void {
+    this.remotes.get(id)?.view.setStatus(status);
   }
 
   /** Apply one movement batch; keep only entries with a newer sequence. */

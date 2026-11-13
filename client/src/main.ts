@@ -214,6 +214,9 @@ async function main(): Promise<void> {
       for (const u of h.users) roster.set(u.id, u);
       world.local.setDir(dir);
       world.manager.hello(h.users, h.you);
+      // Presence dots on the map: every rostered avatar (ours included).
+      for (const u of h.users) world.manager.setStatus(u.id, u.status ?? "online");
+      if (me) world.local.setStatus(me.status ?? "online");
       refreshUsersHook();
       chat?.history(h.chat, h.you);
       bubbleChat?.history(h.call_chat ?? [], h.you);
@@ -258,7 +261,11 @@ async function main(): Promise<void> {
       chat?.typing(id, on);
       bubbleChat?.typing(id, on);
     },
-    onUserStatus: (id, s) => presence.setStatus(id, s),
+    onUserStatus: (id, s) => {
+      presence.setStatus(id, s);
+      world.manager.setStatus(id, s);
+      if (id === myId) world.local.setStatus(s);
+    },
     onMovement: (batch: MovementBatch) => {
       world.manager.movement(batch.m);
       refreshUsersHook();
@@ -399,8 +406,10 @@ async function main(): Promise<void> {
       conn.sendStatus(s);
       manager.setStatus(s);
       // The server does not echo `status` back to the sender (their UI is
-      // expected to already show it) — update our own Users-list row here.
+      // expected to already show it) — update our own Users-list row and
+      // map avatar here.
       if (myId) presence.setStatus(myId, s);
+      world.local.setStatus(s);
     },
     onToggleMute: () => manager.toggleMute(),
     onToggleCamera: () => manager.toggleCamera(),
