@@ -77,8 +77,9 @@ export function createSidebar(): SidebarUI {
     setBubbleVisible(on) {
       bubbleRail.classList.toggle("hidden", !on);
       bubbleSection.classList.toggle("hidden", !on);
-      // Leaving the call takes the whole channel with it.
-      if (!on) bubbleSection.classList.add("closed");
+      // Arriving in a call opens the channel; leaving takes it away.
+      if (on) bubbleSection.classList.remove("closed");
+      else bubbleSection.classList.add("closed");
     },
     toggle: () => sidebar.classList.toggle("collapsed"),
   };

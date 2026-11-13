@@ -496,6 +496,13 @@ body {
   border-top: 1px solid var(--line);
 }
 
+/* Bubble chat (issues.md #2): same sizing as the room chat; the two
+ * accordions share the pane while the bubble channel exists. */
+.accordion[data-acc="bubble"] {
+  flex: 1 1 0;
+  border-top: 1px solid var(--line);
+}
+
 .accordion-header {
   flex: none;
   display: flex;
