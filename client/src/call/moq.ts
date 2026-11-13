@@ -24,6 +24,7 @@
 import * as Net from "@moq/net";
 import * as Publish from "@moq/publish";
 import * as Watch from "@moq/watch";
+import { Catalog } from "@moq/hang";
 import { Signal } from "@moq/signals";
 
 /** Catch-up (issues.md "skipping when falling behind"): playback enters a
@@ -82,9 +83,13 @@ export interface DownlinkView {
   /** Encoded audio bytes received (debug/e2e). */
   audioBytes: number;
   /** How far playback trails wall-clock time, ms: the latest media's
-   *  arrival lag behind the live edge (`out.reference`) plus the sync
-   *  target (`out.delay`). Both move with the network — a fixed target
-   *  (`in.delay`) alone would sit flat. */
+   *  arrival lag behind the live edge plus the sync target (`out.delay`).
+   *  Both move with the network — a fixed target (`in.delay`) alone would
+   *  sit flat. Computed from the root catalog's `clock` (see
+   *  `delayOf`), not `out.reference`: the wire timestamps are the
+   *  *publisher's* page clock, so `out.reference` anchors each viewer to
+   *  its own load time and two tabs of the same stream disagreed by
+   *  seconds (observed +5 s vs -4.3 s). */
   delay: number;
   /** Jitter buffer depth, ms. */
   jitter: number;
@@ -883,6 +888,29 @@ export class MoqCall {
     d.scrBroadcast.close();
   }
 
+  /** Playback delay behind the live edge, ms. The wire media timestamps
+   *  are the publisher's `performance.now()` (page uptime), so
+   *  `out.reference` (viewer-now minus frame-ts) bakes in the offset
+   *  between the two pages' load times. The root catalog carries the
+   *  real mapping instead: `clock.wall` is PTS zero in `timescale` units
+   *  since the moq epoch, so a frame's wall time is `wall + timestamp`,
+   *  directly comparable to our own wall clock
+   *  (`performance.timeOrigin - moq epoch + performance.now()`).
+   *  Falls back to the clockless formula when the catalog or the
+   *  timestamp has not arrived yet. */
+  private delayOf(d: Downlink): number {
+    const fallback = () =>
+      Number(d.sync.out.reference.peek() ?? 0) + Number(d.sync.out.delay.peek());
+    const ts = d.sync.out.timestamp.peek();
+    if (ts === undefined) return fallback();
+    const clock = d.broadcast.out.catalog.peek()?.clock;
+    if (!clock) return fallback();
+    const frameWallMs = (clock.wall / clock.timescale) * 1000 + Number(ts);
+    const nowWallMs =
+      performance.timeOrigin - Catalog.MOQ_EPOCH_UNIX_MILLIS + performance.now();
+    return nowWallMs - frameWallMs + Number(d.sync.out.delay.peek());
+  }
+
   private viewOf(d: Downlink): DownlinkView {
     return {
       status: this.statusOf(d),
@@ -892,7 +920,7 @@ export class MoqCall {
       frames: d.camDecoder.out.stats.peek()?.frameCount ?? 0,
       screenFrames: d.scrDecoder.out.stats.peek()?.frameCount ?? 0,
       audioBytes: d.audDecoder.out.stats.peek()?.bytesReceived ?? 0,
-      delay: Number(d.sync.out.reference.peek() ?? 0) + Number(d.sync.out.delay.peek()),
+      delay: this.delayOf(d),
       jitter: Number(d.sync.out.jitter.peek()),
       width: d.canvas.width,
       height: d.canvas.height,
