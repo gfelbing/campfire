@@ -5,6 +5,10 @@
 
 export type Dir = "n" | "s" | "e" | "w";
 
+/** Presence status (the profile menu): `online` = normal calls with mic +
+ *  camera; `away` = calls auto-join muted; `dnd` = no call starts. */
+export type OwnStatus = "online" | "away" | "dnd";
+
 export interface UserState {
   id: string;
   name: string;
@@ -16,6 +20,8 @@ export interface UserState {
   sz?: boolean;
   /** The user's chosen avatar color (`#rrggbb`); present when they set one. */
   color?: string;
+  /** The user's presence status; absent means `online`. */
+  status?: OwnStatus;
 }
 
 export interface UserBrief {
@@ -23,6 +29,8 @@ export interface UserBrief {
   name: string;
   /** The user's chosen avatar color (`#rrggbb`); present when they set one. */
   color?: string;
+  /** The user's presence status; absent means `online`. */
+  status?: OwnStatus;
 }
 
 export interface ChatMsg {
@@ -65,6 +73,8 @@ export type ServerMsg =
   | { t: "left"; id: string }
   | { t: "chat"; from: string; name: string; text: string; ts: number }
   | { t: "typing"; id: string; on: boolean }
+  /** `id`'s presence status changed (profile menu); not sent to the sender. */
+  | { t: "status"; id: string; status: OwnStatus }
   | {
       t: "call_start";
       room: string;
@@ -99,9 +109,14 @@ export type ClientMsg =
       avatar?: { color: string };
       /** Reconnect token (README §5): restore the previous identity. */
       token?: string;
+      /** The joiner's presence status; absent means `online`. */
+      status?: OwnStatus;
     }
   | { t: "chat"; text: string }
   | { t: "typing"; on: boolean }
+  /** Presence status changed (the profile menu): `dnd` opts out of
+   *  proximity calls, `away` auto-joins them muted. */
+  | { t: "status"; status: OwnStatus }
   /** Leave the room immediately (README §5): used for room switching, the
    *  server tears the session down right away. */
   | { t: "leave" }

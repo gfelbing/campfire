@@ -1,8 +1,9 @@
 //! Call theater (README roadmap "UI redesign"): while in a bubble, remote
 //! video streams stack in a column on the right side, over the map, with a
-//! local PiP tile and the mic/camera/share/hang-up bar on top. Every
-//! stream is its own tile — a participant can send camera AND screen at
-//! once, so a sharer appears twice. Remote video is a `<canvas>` the MoQ
+//! local PiP tile. The mic/camera/screen controls live in the top bar
+//! (global buttons); the theater itself only keeps the hang-up button.
+//! Every stream is its own tile — a participant can send camera AND screen
+//! at once, so a sharer appears twice. Remote video is a `<canvas>` the MoQ
 //! downlink paints (docs/moq-sfu.md §9 Phase 3); the local PiP stays a
 //! `<video>` on `localStream`. Clicking a stream focuses it large in
 //! the center overlay; clicking again (or Escape) unfocuses. Joining is
@@ -13,9 +14,6 @@ import type { CallPhase, DownlinkState, PeerView } from "./manager";
 
 export interface CallUiActions {
   onHangup(): void;
-  onToggleMute(): void;
-  onToggleCamera(): void;
-  onToggleScreen(): void;
 }
 
 export interface CallUI {
@@ -23,9 +21,6 @@ export interface CallUI {
   setLocalStream(stream: MediaStream | null): void;
   /** Update the column from the manager's roster (create/update/remove). */
   setPeers(peers: PeerView[]): void;
-  setLocalMute(audio: boolean, video: boolean): void;
-  /** Our own screen share started/stopped (button styling). */
-  setLocalScreen(on: boolean): void;
 }
 
 interface Tile {
@@ -123,11 +118,6 @@ export function createCallUI(container: HTMLElement, actions: CallUiActions): Ca
       <div class="theater-header">
         <span class="theater-name"></span>
         <span class="theater-state">connecting…</span>
-      </div>
-      <div class="call-controls">
-        <button class="call-btn call-mute" title="mute / unmute (🎤)">🎤</button>
-        <button class="call-btn call-camera" title="camera on / off (📷)">📷</button>
-        <button class="call-btn call-screen" title="share the screen (🖥)">🖥</button>
         <button class="call-btn call-hangup" title="leave the call">📞</button>
       </div>
       <div class="theater-tiles">
@@ -149,13 +139,7 @@ export function createCallUI(container: HTMLElement, actions: CallUiActions): Ca
   const pip = root.querySelector<HTMLVideoElement>(".theater-pip")!;
   const focus = root.querySelector<HTMLElement>(".theater-focus")!;
   const focusSlot = root.querySelector<HTMLElement>(".theater-focus-slot")!;
-  const muteBtn = root.querySelector<HTMLButtonElement>(".call-mute")!;
-  const camBtn = root.querySelector<HTMLButtonElement>(".call-camera")!;
-  const screenBtn = root.querySelector<HTMLButtonElement>(".call-screen")!;
 
-  muteBtn.addEventListener("click", () => actions.onToggleMute());
-  camBtn.addEventListener("click", () => actions.onToggleCamera());
-  screenBtn.addEventListener("click", () => actions.onToggleScreen());
   root.querySelector<HTMLButtonElement>(".call-hangup")!.addEventListener("click", () => {
     actions.onHangup();
   });
@@ -370,9 +354,6 @@ export function createCallUI(container: HTMLElement, actions: CallUiActions): Ca
       }
       if (phase.p === "in-call") {
         theaterName.textContent = `Proximity call · ${phase.participants.length + 1}`;
-        muteBtn.classList.remove("off");
-        camBtn.classList.remove("off");
-        screenBtn.classList.remove("on");
       }
       // Call over (or participant tile gone) → drop the focus overlay.
       if (phase.p === "idle") unfocus();
@@ -447,13 +428,6 @@ export function createCallUI(container: HTMLElement, actions: CallUiActions): Ca
       col.dataset.state =
         agg.state === "live" ? "connected" : agg.state === "offline" ? "failed" : "connecting";
       tilesEl.dataset.empty = peers.length === 0 ? "1" : "0";
-    },
-    setLocalMute(audio, video) {
-      muteBtn.classList.toggle("off", !audio);
-      camBtn.classList.toggle("off", !video);
-    },
-    setLocalScreen(on) {
-      screenBtn.classList.toggle("on", on);
     },
   };
 }

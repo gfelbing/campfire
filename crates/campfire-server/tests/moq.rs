@@ -110,6 +110,7 @@ async fn join(addr: SocketAddr, room: &str, name: &str) -> (WtClient, String) {
         name: name.into(),
         avatar: None,
         token: None,
+        status: None,
     })
     .await;
     loop {

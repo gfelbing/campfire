@@ -7,6 +7,7 @@
   --text: #e8e6e3;
   --muted: #9a9894;
   --accent: #e05f38;
+  --topbar-h: 48px;
 }
 
 * {
@@ -23,13 +24,345 @@ body {
   overflow: hidden;
 }
 
-/* Layout (README roadmap "UI redesign"): map canvas (#app) and the sidebar
-   side by side; #ui holds the call theater overlapping the map. */
+/* Layout (README roadmap "UI redesign"): a one-line top bar (#topbar) over
+   a row with the sidebar and the map canvas (#app); #ui holds the call
+   theater overlapping the map. */
 
 #layout {
   display: flex;
+  flex-direction: column;
   height: 100vh;
 }
+
+#main {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+}
+
+/* --- top bar (one line, Google Chat style) --------------------------------- */
+
+#topbar {
+  flex: none;
+  height: var(--topbar-h);
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0 0.6rem;
+  background: var(--panel);
+  border-bottom: 1px solid var(--line);
+  position: relative;
+  z-index: 6; /* above the #ui theater overlay (z 5) */
+}
+
+.topbar-left {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+}
+
+.topbar-logo {
+  font-weight: 700;
+  font-size: 1.05rem;
+  white-space: nowrap;
+}
+
+.map-drop {
+  position: relative;
+  margin-left: 0.35rem;
+}
+
+#burger {
+  font: inherit;
+  font-size: 1.15rem;
+  line-height: 1;
+  width: 36px;
+  height: 36px;
+  background: transparent;
+  color: var(--text);
+  border: none;
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+#burger:hover {
+  background: #1a1d22;
+}
+
+.map-btn {
+  font: inherit;
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: var(--text);
+  background: #1a1d22;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 0.3rem 1rem;
+  cursor: pointer;
+  max-width: 100%;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.map-btn:hover {
+  border-color: var(--accent);
+}
+
+.map-list {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  min-width: 180px;
+  max-width: 320px;
+  max-height: 260px;
+  overflow-y: auto;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 0.3rem;
+  display: grid;
+  gap: 0.2rem;
+  z-index: 7;
+  scrollbar-width: thin;
+}
+
+.map-item {
+  font: inherit;
+  font-size: 0.85rem;
+  text-align: left;
+  color: var(--text);
+  background: #1a1d22;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  padding: 0.35rem 0.55rem;
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.map-item:hover {
+  border-color: var(--accent);
+}
+
+.map-item.current {
+  color: var(--muted);
+  cursor: default;
+}
+
+.map-empty {
+  font-size: 0.75rem;
+  color: var(--muted);
+  font-style: italic;
+  padding: 0.2rem 0.3rem;
+}
+
+.topbar-right {
+  flex: none;
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  position: relative;
+}
+
+/* global media toggles (🎤/📷, 🖥 while in a call) */
+.topbar-toggle {
+  font: inherit;
+  font-size: 1rem;
+  width: 32px;
+  height: 32px;
+  background: #1a1d22;
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  cursor: pointer;
+  padding: 0;
+  flex: none;
+  display: grid;
+  place-items: center;
+}
+
+.topbar-toggle:hover {
+  border-color: var(--accent);
+}
+
+.topbar-toggle.off {
+  background: #3a2020;
+  border-color: #8a3b3b;
+}
+
+.topbar-toggle.on {
+  background: #20304a;
+  border-color: #4a90d9;
+}
+
+/* connection health: no separate dot anymore — the profile avatar doubles
+   as the status indicator (its `sdot`). */
+
+.profile-btn {
+  position: relative;
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  border: 2px solid transparent;
+  cursor: pointer;
+  padding: 0;
+  font: inherit;
+  display: grid;
+  place-items: center;
+  background: #1a1d22;
+}
+
+.profile-btn:hover {
+  border-color: var(--accent);
+}
+
+.status-initial {
+  font-size: 0.85rem;
+  font-weight: 700;
+  color: #fff;
+}
+
+/* own-status dots: on the avatar (bottom right) and in the profile menu */
+.sdot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  flex: none;
+}
+
+.sdot.online {
+  background: #58a858;
+}
+
+.sdot.away {
+  background: #d4a017;
+}
+
+.sdot.dnd {
+  background: #e06060;
+}
+
+#profile-btn .sdot {
+  position: absolute;
+  right: -2px;
+  bottom: -2px;
+  border: 2px solid var(--bg);
+}
+
+/* profile popover: name, avatar color, status */
+.profile-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  width: 240px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 0.7rem;
+  display: grid;
+  gap: 0.4rem;
+  z-index: 7;
+}
+
+.profile-label {
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--muted);
+  margin-top: 0.2rem;
+}
+
+.profile-name-input {
+  font: inherit;
+  font-size: 0.85rem;
+  color: var(--text);
+  background: #1a1d22;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 0.45rem 0.6rem;
+  width: 100%;
+}
+
+.profile-name-input:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: -1px;
+}
+
+.profile-error {
+  color: #e06060;
+  font-size: 0.75rem;
+}
+
+.profile-swatches {
+  display: flex;
+  gap: 0.45rem;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.profile-swatches .swatch {
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  border: 2px solid transparent;
+  cursor: pointer;
+  padding: 0;
+}
+
+.profile-swatches .swatch.selected {
+  border-color: #fff;
+}
+
+.profile-status-rows {
+  display: grid;
+  gap: 0.15rem;
+}
+
+.profile-status {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  font: inherit;
+  font-size: 0.85rem;
+  text-align: left;
+  color: var(--text);
+  background: transparent;
+  border: none;
+  border-radius: 8px;
+  padding: 0.4rem 0.55rem;
+  cursor: pointer;
+}
+
+.profile-status:hover {
+  background: #1a1d22;
+}
+
+.profile-status.current {
+  background: #27212a;
+}
+
+.profile-done {
+  font: inherit;
+  font-size: 0.85rem;
+  font-weight: 600;
+  background: var(--accent);
+  color: #fff;
+  border: none;
+  border-radius: 8px;
+  padding: 0.5rem;
+  cursor: pointer;
+  margin-top: 0.3rem;
+}
+
+.profile-done:hover {
+  filter: brightness(1.1);
+}
+
+/* --- map canvas + theater overlay ------------------------------------------ */
 
 #app {
   flex: 1;
@@ -69,37 +402,26 @@ body {
   display: none;
 }
 
-.sidebar-tabs {
-  display: flex;
-  gap: 0.3rem;
-  padding: 0.5rem;
-  border-bottom: 1px solid var(--line);
-}
-
-/* collapsed: the tab strip becomes a vertical rail */
-#sidebar.collapsed .sidebar-tabs {
+/* collapsed: a narrow rail of section icons */
+.sidebar-rail {
+  display: none;
   flex-direction: column;
   align-items: center;
-  border-bottom: none;
-  border-right: 1px solid var(--line);
+  gap: 0.3rem;
+  padding: 0.5rem 0;
   height: 100%;
 }
 
-#sidebar.collapsed .sidebar-tabs button {
-  flex: none;
+#sidebar.collapsed .sidebar-rail {
+  display: flex;
 }
 
-#sidebar.collapsed #sidebar-collapse {
-  margin-left: 0;
-  margin-top: auto;
-}
-
-.sidebar-tabs button {
+.sidebar-rail button {
   position: relative;
   font: inherit;
   font-size: 1rem;
   width: 38px;
-  height: 34px;
+  height: 38px;
   background: #1a1d22;
   color: var(--text);
   border: 1px solid var(--line);
@@ -107,197 +429,115 @@ body {
   cursor: pointer;
 }
 
-.sidebar-tabs button:hover {
+.sidebar-rail button:hover {
   border-color: var(--accent);
 }
 
-.sidebar-tabs button.active {
-  border-color: var(--accent);
-  background: #27212a;
+/* expanded: two stacked accordions (Users, Chat) */
+.sidebar-panes {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
 }
 
-.sidebar-tabs button.dot::after {
-  content: "";
-  position: absolute;
-  top: 4px;
-  right: 4px;
+.accordion {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.accordion[data-acc="players"] {
+  flex: 0 1 auto;
+  max-height: 45%;
+}
+
+.accordion[data-acc="chat"] {
+  flex: 1 1 0;
+  border-top: 1px solid var(--line);
+}
+
+.accordion-header {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font: inherit;
+  font-size: 0.85rem;
+  font-weight: 600;
+  text-align: left;
+  color: var(--text);
+  background: transparent;
+  border: none;
+  padding: 0.7rem 0.8rem;
+  cursor: pointer;
+}
+
+.accordion-header:hover {
+  background: #1a1d22;
+}
+
+.acc-count {
+  color: var(--muted);
+  font-weight: 400;
+  font-size: 0.75rem;
+}
+
+.acc-caret {
+  margin-left: auto;
+  color: var(--muted);
+  transition: transform 0.15s ease;
+}
+
+.accordion.closed .acc-caret {
+  transform: rotate(-90deg);
+}
+
+.acc-dot {
   width: 8px;
   height: 8px;
   border-radius: 50%;
   background: var(--accent);
 }
 
-#sidebar-collapse {
-  margin-left: auto;
-}
-
-#sidebar.collapsed #sidebar-collapse {
-  transform: scaleX(-1);
-}
-
-.sidebar-panes {
+.accordion-body {
   flex: 1;
   min-height: 0;
-  display: flex;
-}
-
-.sidebar-pane {
-  flex: 1;
-  min-height: 0;
-  overflow-y: auto;
-  padding: 0.7rem;
   display: flex;
   flex-direction: column;
-  gap: 0.6rem;
+  overflow-y: auto;
+  padding: 0.2rem 0.7rem 0.7rem;
   scrollbar-width: thin;
+}
+
+.accordion.closed .accordion-body {
+  display: none;
 }
 
 .hidden {
   display: none !important;
 }
 
-/* --- boot overlay -------------------------------------------------------- */
+/* --- fatal error overlay --------------------------------------------------- */
 
-#boot {
+.fatal {
   position: fixed;
   inset: 0;
   display: grid;
   place-items: center;
   background: var(--bg);
   z-index: 10;
-}
-
-#boot main {
-  width: min(420px, 92vw);
   text-align: center;
 }
 
-#boot h1 {
-  font-size: 2.6rem;
-  margin: 0 0 0.25rem;
-}
-
-#boot .tag {
-  color: var(--muted);
-  margin: 0 0 1.5rem;
-}
-
-#boot form {
-  display: grid;
-  gap: 0.9rem;
-  text-align: left;
-}
-
-#boot label {
-  display: grid;
-  gap: 0.3rem;
-  font-size: 0.85rem;
-  color: var(--muted);
-}
-
-#boot input,
-#boot select,
-#boot button[type="submit"] {
-  font: inherit;
-  color: var(--text);
-  background: #1a1d22;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  padding: 0.55rem 0.75rem;
-}
-
-#boot input:focus,
-#boot select:focus {
-  outline: 2px solid var(--accent);
-  outline-offset: -1px;
-}
-
-#boot button[type="submit"] {
-  background: var(--accent);
-  border: none;
-  color: #fff;
-  font-weight: 600;
-  cursor: pointer;
-}
-
-#boot button[type="submit"]:hover {
-  filter: brightness(1.1);
-}
-
-#boot .swatches {
-  display: flex;
-  gap: 0.5rem;
-  align-items: center;
-}
-
-#boot .swatch {
-  width: 28px;
-  height: 28px;
-  border-radius: 50%;
-  border: 2px solid transparent;
-  cursor: pointer;
-  padding: 0;
-}
-
-#boot .swatch.selected {
-  border-color: #fff;
-}
-
-#boot .error {
-  color: #e06060;
-  font-size: 0.85rem;
-  min-height: 1.2em;
+.fatal h1 {
   margin: 0;
 }
 
-/* --- status panel --------------------------------------------------------- */
-
-.status {
-  position: relative;
-  top: 0;
-  right: 0;
-  background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: 10px;
-  padding: 0.5rem 0.8rem;
-  font-size: 0.8rem;
-  display: grid;
-  gap: 0.15rem;
-  pointer-events: none;
-}
-
-.status-room {
-  font-weight: 700;
-}
-
-.status-users {
+.fatal p {
   color: var(--muted);
-}
-
-.status-conn {
-  display: flex;
-  align-items: center;
-  gap: 0.4rem;
-  color: var(--muted);
-}
-
-.status .dot {
-  width: 9px;
-  height: 9px;
-  border-radius: 50%;
-  background: #58a858;
-}
-
-.status[data-conn="connected"] .dot {
-  background: #58a858;
-}
-
-.status[data-conn="reconnecting"] .dot {
-  background: #d4a017;
-}
-
-.status[data-conn="disconnected"] .dot {
-  background: #e06060;
+  max-width: 40rem;
+  padding: 0 1rem;
 }
 
 /* --- chat panel ------------------------------------------------------------ */
@@ -349,10 +589,14 @@ body {
 .chat-form {
   display: flex;
   gap: 0.4rem;
+  /* grid item: without this, min-width: auto pins the form to its
+     min-content width and the Send button overflows the pane */
+  min-width: 0;
 }
 
 .chat-input {
   flex: 1;
+  min-width: 0;
   font: inherit;
   font-size: 0.85rem;
   color: var(--text);
@@ -378,156 +622,11 @@ body {
   cursor: pointer;
 }
 
-/* --- status panel: call button + target picker (README §6.3) ------------- */
-
-.status-call-row {
-  display: flex;
-  gap: 0.3rem;
-}
-
-.status-call-btn {
-  pointer-events: auto;
-  font: inherit;
-  font-size: 0.85rem;
-  background: #1a1d22;
-  color: var(--text);
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  padding: 0.2rem 0.5rem;
-  cursor: pointer;
-}
-
-.status-call-btn:hover {
-  border-color: var(--accent);
-}
-
-/* "Join call" mode: a huddle is running, we are not in it (README §6.3). */
-.status-call-btn.join {
-  background: #274156;
-  border-color: #4a90d9;
-  font-weight: 600;
-}
-
-.status-call-list {
-  pointer-events: auto;
-  position: absolute;
-  top: 100%;
-  right: 0;
-  margin-top: 4px;
-  min-width: 140px;
-  max-height: 220px;
-  overflow-y: auto;
-  background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: 10px;
-  padding: 0.3rem;
-  display: grid;
-  gap: 0.2rem;
-  z-index: 5;
-}
-
-.status-call-user {
-  font: inherit;
-  font-size: 0.8rem;
-  text-align: left;
-  color: var(--text);
-  background: #1a1d22;
-  border: 1px solid transparent;
-  border-radius: 8px;
-  padding: 0.35rem 0.55rem;
-  cursor: pointer;
-}
-
-.status-call-user:hover {
-  border-color: var(--accent);
-}
-
-.status-call-empty {
-  font-size: 0.75rem;
-  color: var(--muted);
-  font-style: italic;
-  padding: 0.2rem 0.3rem;
-}
-
-/* --- status panel: room switcher (README §11 Phase 7) --------------------- */
-
-.status-rooms-btn {
-  pointer-events: auto;
-  font: inherit;
-  font-size: 0.85rem;
-  background: #1a1d22;
-  color: var(--text);
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  padding: 0.2rem 0.5rem;
-  cursor: pointer;
-}
-
-.status-rooms-btn:hover {
-  border-color: var(--accent);
-}
-
-.status-room-list {
-  pointer-events: auto;
-  position: absolute;
-  top: 100%;
-  right: 0;
-  margin-top: 4px;
-  min-width: 160px;
-  max-height: 220px;
-  overflow-y: auto;
-  background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: 10px;
-  padding: 0.3rem;
-  display: grid;
-  gap: 0.2rem;
-  z-index: 5;
-}
-
-.status-room-item {
-  font: inherit;
-  font-size: 0.8rem;
-  text-align: left;
-  color: var(--text);
-  background: #1a1d22;
-  border: 1px solid transparent;
-  border-radius: 8px;
-  padding: 0.35rem 0.55rem;
-  cursor: pointer;
-}
-
-.status-room-item:hover {
-  border-color: var(--accent);
-}
-
-.status-room-item.current {
-  color: var(--muted);
-  cursor: default;
-}
-
 /* --- presence roster (README §8 Phase 7) --------------------------------- */
 
+/* plain content inside the Users accordion body */
 .presence {
-  position: relative;
-  top: 0;
-  left: 0;
-  background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: 10px;
-  padding: 0.5rem 0.8rem;
   font-size: 0.8rem;
-  max-height: 40vh;
-  overflow-y: auto;
-  pointer-events: auto;
-}
-
-.presence-title {
-  color: var(--muted);
-  font-size: 0.72rem;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-  margin-bottom: 0.25rem;
 }
 
 .presence-list {
@@ -536,6 +635,32 @@ body {
   padding: 0;
   display: grid;
   gap: 0.15rem;
+}
+
+/* status dot before each name (online / away / dnd) */
+.presence-list li {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+}
+
+.presence-status {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex: none;
+}
+
+.presence-status.online {
+  background: #58a858;
+}
+
+.presence-status.away {
+  background: #d4a017;
+}
+
+.presence-status.dnd {
+  background: #e06060;
 }
 
 .presence-call {
@@ -555,7 +680,7 @@ body {
 
 .theater-col {
   position: absolute;
-  top: 12px;
+  top: calc(var(--topbar-h) + 12px);
   right: 12px;
   bottom: 12px;
   width: 280px; /* overridden by the drag handle / saved width */
@@ -589,7 +714,6 @@ body {
 .theater-header {
   flex: none;
   display: flex;
-  justify-content: space-between;
   align-items: baseline;
   gap: 0.5rem;
 }
@@ -825,7 +949,7 @@ body {
 /* outgoing: small toast, top center */
 .call-outgoing {
   position: absolute;
-  top: 12px;
+  top: calc(var(--topbar-h) + 12px);
   left: 50%;
   transform: translateX(-50%);
   display: flex;
@@ -873,39 +997,22 @@ body {
   right: 4px;
 }
 
-.call-controls {
-  flex: none;
-  display: flex;
-  justify-content: center;
-  gap: 0.5rem;
-}
-
-.call-btn {
-  font-size: 1rem;
-  width: 44px;
-  height: 40px;
+/* the theater keeps only the hang-up button (mic/camera/screen live in
+   the top bar) */
+.theater-header .call-hangup {
+  margin-left: auto;
+  font-size: 0.95rem;
+  width: 32px;
+  height: 28px;
   background: #1a1d22;
   color: var(--text);
   border: 1px solid var(--line);
-  border-radius: 10px;
+  border-radius: 8px;
   cursor: pointer;
+  padding: 0;
 }
 
-.call-btn:hover {
-  border-color: var(--accent);
-}
-
-.call-btn.off {
-  background: #3a2020;
+.theater-header .call-hangup:hover {
+  background: #8a3b3b;
   border-color: #8a3b3b;
-}
-
-.call-btn.on {
-  background: #20304a;
-  border-color: #4a90d9;
-}
-
-.call-hangup {
-  background: #8a3b3b !important;
-  border-color: #8a3b3b !important;
 }

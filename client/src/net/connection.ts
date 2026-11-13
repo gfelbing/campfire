@@ -3,6 +3,7 @@ import type {
   ClientMsg,
   Dir,
   MovementBatch,
+  OwnStatus,
   ServerMsg,
   UserBrief,
   UserState,
@@ -32,6 +33,8 @@ export interface ConnHandlers {
   onLeft: (id: string) => void;
   onChat: (c: ChatMsg) => void;
   onTyping: (id: string, on: boolean) => void;
+  /** A member's presence status changed (profile menu). */
+  onUserStatus: (id: string, status: OwnStatus) => void;
   onMovement: (batch: MovementBatch) => void;
   /** A bubble started or grew; `participants` is the full list. `ticket`
    *  is our media ticket when we are a participant (docs/moq-sfu.md §7). */
@@ -97,6 +100,7 @@ export class Connection {
     private room: string,
     private name: string,
     private avatarColor: string,
+    private status: OwnStatus,
     private handlers: ConnHandlers,
   ) {
     try {
@@ -182,6 +186,11 @@ export class Connection {
 
   sendTyping(on: boolean): void {
     this.transport?.sendMsg({ t: "typing", on });
+  }
+
+  /** Announce a presence-status change (the profile menu). */
+  sendStatus(status: OwnStatus): void {
+    this.transport?.sendMsg({ t: "status", status });
   }
 
   /** Send one movement datagram (no-op on the SSE fallback). */
@@ -296,6 +305,9 @@ export class Connection {
       case "typing":
         this.handlers.onTyping(msg.id, msg.on);
         break;
+      case "status":
+        this.handlers.onUserStatus(msg.id, msg.status);
+        break;
       case "call_start":
         this.handlers.onCallStart(msg.participants, msg.zone, msg.ticket);
         break;
@@ -321,16 +333,23 @@ export class Connection {
     }
   }
 
-  /** Inner join payload (`room`, `name`, `avatar`, `token`) — what the SSE
-   *  fallback POSTs, and what `joinMsg` wraps into a tagged stream message.
-   *  The token (when we have one) makes a reconnect restore our identity
-   *  instead of creating a fresh user (README §5). */
-  joinPayload(): { room: string; name: string; avatar?: { color: string }; token?: string } {
+  /** Inner join payload (`room`, `name`, `avatar`, `token`, `status`) — what
+   *  the SSE fallback POSTs, and what `joinMsg` wraps into a tagged stream
+   *  message. The token (when we have one) makes a reconnect restore our
+   *  identity instead of creating a fresh user (README §5). */
+  joinPayload(): {
+    room: string;
+    name: string;
+    avatar?: { color: string };
+    token?: string;
+    status?: OwnStatus;
+  } {
     return {
       room: this.room,
       name: this.name,
       avatar: { color: this.avatarColor },
       ...(this.token ? { token: this.token } : {}),
+      ...(this.status !== "online" ? { status: this.status } : {}),
     };
   }
 

@@ -194,6 +194,7 @@ async fn join(addr: SocketAddr, room: &str, name: &str) -> (TestClient, String, 
         name: name.into(),
         avatar: None,
         token: None,
+        status: None,
     })
     .await;
     let ServerMsg::Hello { you, token, .. } = c.recv().await else {
@@ -226,6 +227,7 @@ async fn reconnect_within_window_keeps_identity_no_flicker() {
         name: "alice".into(),
         avatar: None,
         token: None,
+        status: None,
     })
     .await;
     let ServerMsg::Hello {
@@ -297,6 +299,7 @@ async fn reconnect_within_window_keeps_identity_no_flicker() {
         name: "alice".into(),
         avatar: None,
         token: Some(a_token.clone()),
+        status: None,
     })
     .await;
     let ServerMsg::Hello {

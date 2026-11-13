@@ -7,10 +7,10 @@ import { playCallSound } from "./call/sound";
 import { attachKeys, desiredVelocity, keys } from "./input/keys";
 import { Connection } from "./net/connection";
 import type { ChatMsg, Dir, MovementBatch, UserBrief } from "./net/types";
-import { boot } from "./ui/boot";
+import { boot, loadStatus } from "./ui/boot";
 import { createChat, type ChatUI } from "./ui/chat";
+import { createHeader } from "./ui/header";
 import { createPresence } from "./ui/presence";
-import { createStatus } from "./ui/status";
 import { createSidebar } from "./ui/sidebar";
 import { isWalkablePoint, parseMap, tileAt, type MapData, type Zone } from "./world/mapdata";
 import { createWorld, drawBubble, followCamera } from "./world/render";
@@ -178,7 +178,7 @@ async function main(): Promise<void> {
     presence.setInCall(inCall);
   };
 
-  const conn = new Connection(opts.room, opts.name, opts.color, {
+  const conn = new Connection(opts.room, opts.name, opts.color, loadStatus(), {
     onHello: (h) => {
       myId = h.you;
       const me = h.users.find((u) => u.id === h.you);
@@ -193,7 +193,7 @@ async function main(): Promise<void> {
       world.manager.hello(h.users, h.you);
       refreshUsersHook();
       chat?.history(h.chat, h.you);
-      status.setUsers(h.users.length);
+      sidebar.setUserCount(roster.size);
       manager.setSelfId(h.you);
       presence.setUsers(h.users, new Set(h.call.map((u) => u.id)));
       // Reconnect-with-token (README §5): `hello.call` is the authoritative
@@ -215,14 +215,14 @@ async function main(): Promise<void> {
     onJoined: (u: UserBrief) => {
       world.manager.joined(u);
       roster.set(u.id, u);
-      status.bumpUsers(1);
+      sidebar.setUserCount(roster.size);
       presence.addUser(u);
       refreshUsersHook();
     },
     onLeft: (id) => {
       world.manager.left(id);
       roster.delete(id);
-      status.bumpUsers(-1);
+      sidebar.setUserCount(roster.size);
       presence.removeUser(id);
       refreshUsersHook();
     },
@@ -231,6 +231,7 @@ async function main(): Promise<void> {
       if (c.from !== myId) sidebar.chatActivity(true);
     },
     onTyping: (id, on) => chat?.typing(id, on),
+    onUserStatus: (id, s) => presence.setStatus(id, s),
     onMovement: (batch: MovementBatch) => {
       world.manager.movement(batch.m);
       refreshUsersHook();
@@ -285,56 +286,83 @@ async function main(): Promise<void> {
       chat?.system(`server error: ${code}`);
       manager.onError(code);
     },
-    onStatus: (s) => {
-      status.setConn(s);
+    onStatus: () => {
       // A dropped connection must NOT tear down the call locally: the
       // server keeps our call membership through the reconnect window, and
       // the next `hello.call` roster is the truth (README §5).
     },
   });
 
-  // Sidebar next to the map (README roadmap "UI redesign"): Main Menu
-  // (status + media), Players, Chat — each existing component mounts into
-  // its pane. The call theater overlays the map from `#ui`.
   /** Leave this room immediately (the server broadcasts `left` and tears
-   *  the session down), then reload into `room` with the same name + color.
-   *  The delay lets the `left` broadcast land before navigation kills the
-   *  session (README §11 Phase 7). */
+   *  the session down), then reload into `room`. The identity (name/color)
+   *  lives in localStorage (boot.ts) and survives the reload, so a
+   *  rejoin-with-new-identity is the same code path. The delay lets the
+   *  `left` broadcast land before navigation kills the session
+   *  (README §11 Phase 7). */
   const navigateToRoom = (room: string, delayMs: number): void => {
     conn.sendLeave();
     window.setTimeout(() => {
-      window.location.href =
-        `/play/${room.split("/").map(encodeURIComponent).join("/")}/` +
-        `?name=${encodeURIComponent(opts.name)}` +
-        `&color=${encodeURIComponent(opts.color)}`;
+      window.location.href = `/play/${room.split("/").map(encodeURIComponent).join("/")}/`;
     }, delayMs);
   };
 
+  // Sidebar next to the map (README roadmap "UI redesign"): two accordion
+  // sections — Users, Chat — each existing component mounts into its body.
+  // The call theater overlays the map from `#ui`.
   const sidebar = createSidebar();
   const ui = document.getElementById("ui")!; // the theater's overlay layer
   const presence = createPresence(sidebar.pane("players"));
   chat = createChat(sidebar.pane("chat"), (t) => conn.sendChat(t), (on) => conn.sendTyping(on));
   const callUI = createCallUI(ui, {
     onHangup: () => manager.hangup(),
+  });
+  const manager = new CallManager(conn, {
+    onPhase: (ph) => {
+      callUI.setPhase(ph);
+      header.setInCall(ph.p === "in-call" || ph.p === "joining");
+    },
+    onLocalStream: (s) => callUI.setLocalStream(s),
+    onPeers: (ps) => callUI.setPeers(ps),
+    onLocalMute: (a, v) => header.setMute(a, v),
+    onLocalScreen: (on) => header.setScreen(on),
+    onLog: (t) => chat?.system(t),
+    onCallSound: (s) => playCallSound(s),
+  }, opts.room);
+  // Top bar: the burger toggles the sidebar; the map switcher navigates the
+  // same way room switching does; name/color edits rejoin with the new
+  // identity; the global 🎤/📷/🖥 buttons wire to the manager and transport;
+  // status changes are announced to the room and re-shape call behavior.
+  const header = createHeader(sidebar, opts.room, {
+    name: opts.name,
+    color: opts.color,
+    status: loadStatus(),
+    onSwitchMap: (map) => navigateToRoom(map, 150),
+    onIdentityChange: () => navigateToRoom(opts.room, 150),
+    onStatusChange: (s) => {
+      conn.sendStatus(s);
+      manager.setStatus(s);
+    },
     onToggleMute: () => manager.toggleMute(),
     onToggleCamera: () => manager.toggleCamera(),
     onToggleScreen: () => manager.toggleScreen(),
   });
-  const manager = new CallManager(conn, {
-    onPhase: (ph) => callUI.setPhase(ph),
-    onLocalStream: (s) => callUI.setLocalStream(s),
-    onPeers: (ps) => callUI.setPeers(ps),
-    onLocalMute: (a, v) => callUI.setLocalMute(a, v),
-    onLocalScreen: (on) => callUI.setLocalScreen(on),
-    onLog: (t) => chat?.system(t),
-    onCallSound: (s) => playCallSound(s),
-  }, opts.room);
-  const status = createStatus(
-    sidebar.pane("menu"),
-    (off) => manager.setBubble(off),
-    (room) => navigateToRoom(room, 150),
-  );
-  status.setRoom(opts.room);
+  header.setMute(true, true);
+
+  // Auto-away (the tab in the background is not "present"): leaving the tab
+  // with no active call switches to `away`; coming back restores `online`
+  // (only from an auto-away, never over a manual status).
+  let autoAway = false;
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) {
+      if (!manager.inCall() && header.status() === "online") {
+        autoAway = true;
+        header.setStatus("away");
+      }
+    } else if (autoAway) {
+      autoAway = false;
+      if (!manager.inCall()) header.setStatus("online");
+    }
+  });
 
   // Game loop: integrate local movement, draw, send at ≤15 Hz (2 Hz idle).
   let lastSend = 0;
@@ -443,17 +471,14 @@ async function main(): Promise<void> {
 
 main().catch((err) => {
   console.error(err);
-  const boot = document.getElementById("boot");
-  if (boot) {
-    boot.style.display = "grid";
-    // textContent only: `err` can carry user-influenceable text (URL
-    // params, server error bodies) — innerHTML would be a DOM XSS sink.
-    const mainEl = document.createElement("main");
-    const h1 = document.createElement("h1");
-    h1.textContent = "🔥 Campfire";
-    const p = document.createElement("p");
-    p.textContent = `Something went wrong: ${String(err)}`;
-    mainEl.append(h1, p);
-    boot.replaceChildren(mainEl);
-  }
+  // textContent only: `err` can carry user-influenceable text (URL
+  // params, server error bodies) — innerHTML would be a DOM XSS sink.
+  const overlay = document.createElement("div");
+  overlay.className = "fatal";
+  const h1 = document.createElement("h1");
+  h1.textContent = "🔥 Campfire";
+  const p = document.createElement("p");
+  p.textContent = `Something went wrong: ${String(err)}`;
+  overlay.append(h1, p);
+  document.body.appendChild(overlay);
 });

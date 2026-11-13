@@ -89,9 +89,16 @@ export interface CallSignaling {
 
 export class CallManager {
   phase: CallPhase = { p: "idle" };
-  /** Our mute/camera state (presence, relayed via `call_mute`). */
+  /** Our mute/camera state. These are user preferences (the top-bar 🎤/📷
+   *  buttons work outside a call too): they persist across calls, are
+   *  applied to freshly acquired media, and are announced to the call on
+   *  entry via `call_mute`. */
   audioOn = true;
   videoOn = true;
+  /** True while `videoOn` is false because of the auto voice-only
+   *  degradation (not the user's 📷 button): leaving the call restores
+   *  video, an explicit camera-off does not. */
+  private autoVoicedOff = false;
   /** True while the camera video track carries our screen. */
   screenOn = false;
 
@@ -162,6 +169,30 @@ export class CallManager {
     this.send.sendBubble(off);
   }
 
+  /** Presence status changed (the profile menu, or auto-away):
+   *  `away` = calls auto-join muted (mic + camera off); `online` = normal
+   *  calls (mic + camera on); `dnd` = opt out of bubbles entirely. The
+   *  live tracks follow where applicable, and an in-call mute is
+   *  re-announced. The 🎤/📷 button prefs are restored by `online`. */
+  setStatus(status: "online" | "away" | "dnd"): void {
+    if (status === "dnd") {
+      this.send.sendBubble(true);
+      return;
+    }
+    this.send.sendBubble(false);
+    const want = status === "online";
+    if (this.audioOn !== want || this.videoOn !== want) {
+      this.audioOn = want;
+      this.videoOn = want;
+      this.autoVoicedOff = false;
+      for (const t of this.localStream?.getAudioTracks() ?? []) t.enabled = want;
+      for (const t of this.localStream?.getVideoTracks() ?? []) t.enabled = want;
+      this.moq?.setVideoEnabled(want);
+      if (this.phase.p === "in-call") this.send.sendCallMute(want, want);
+      this.hooks.onLocalMute(want, want);
+    }
+  }
+
   /** Hang up: leave the current bubble (the server dissolves it when ≤ 1
    *  participant remains). */
   hangup(): void {
@@ -170,23 +201,23 @@ export class CallManager {
   }
 
   toggleMute(): void {
-    if (this.phase.p !== "in-call" || !this.localStream) return;
     this.audioOn = !this.audioOn;
     // Disable the local track: the uplink encodes silence and the PiP
-    // reflects it too.
-    for (const t of this.localStream.getAudioTracks()) t.enabled = this.audioOn;
-    this.send.sendCallMute(this.audioOn, this.videoOn);
+    // reflects it too. No stream yet (the top-bar button outside a call):
+    // acquireMedia applies the preference when a call starts.
+    for (const t of this.localStream?.getAudioTracks() ?? []) t.enabled = this.audioOn;
+    if (this.phase.p === "in-call") this.send.sendCallMute(this.audioOn, this.videoOn);
     this.hooks.onLocalMute(this.audioOn, this.videoOn);
   }
 
   toggleCamera(): void {
-    if (this.phase.p !== "in-call" || !this.localStream) return;
     this.videoOn = !this.videoOn;
-    for (const t of this.localStream.getVideoTracks()) t.enabled = this.videoOn;
+    this.autoVoicedOff = false;
+    for (const t of this.localStream?.getVideoTracks() ?? []) t.enabled = this.videoOn;
     // Omit the uplink's video rendition so subscribers stop receiving
     // black frames rather than a stream of them.
     this.moq?.setVideoEnabled(this.videoOn);
-    this.send.sendCallMute(this.audioOn, this.videoOn);
+    if (this.phase.p === "in-call") this.send.sendCallMute(this.audioOn, this.videoOn);
     this.hooks.onLocalMute(this.audioOn, this.videoOn);
   }
 
@@ -331,6 +362,8 @@ export class CallManager {
     const others = participants.filter((u) => u.id !== this.selfId);
     this.setPhase({ p: "in-call", participants: others });
     this.maybeAutoVoiceOnly();
+    // Re-announce our mute/camera state on the fresh connection.
+    this.send.sendCallMute(this.audioOn, this.videoOn);
     this.pushPeers();
     this.hooks.onLog("rejoined the call");
     this.startSession(ticket);
@@ -374,7 +407,9 @@ export class CallManager {
 
   // --- internals ------------------------------------------------------------
 
-  /** Acquire local media; log and return null on refusal. */
+  /** Acquire local media; log and return null on refusal. The 🎤/📷
+   *  preferences (they may have been set before the call) gate the fresh
+   *  tracks right away. */
   private async acquireMedia(): Promise<MediaStream | null> {
     try {
       this.localStream = await getLocalMedia();
@@ -382,6 +417,8 @@ export class CallManager {
       this.hooks.onLog(`cannot access microphone/camera: ${String(err)}`);
       return null;
     }
+    for (const t of this.localStream.getAudioTracks()) t.enabled = this.audioOn;
+    for (const t of this.localStream.getVideoTracks()) t.enabled = this.videoOn;
     this.hooks.onLocalStream(this.localStream);
     return this.localStream;
   }
@@ -393,6 +430,8 @@ export class CallManager {
     const others = participants.filter((u) => u.id !== this.selfId);
     this.setPhase({ p: "in-call", participants: others });
     this.maybeAutoVoiceOnly();
+    // Announce our mute/camera preference (it may predate the call).
+    this.send.sendCallMute(this.audioOn, this.videoOn);
     this.pushPeers();
     this.hooks.onCallSound("enter");
     this.startSession(ticket);
@@ -465,6 +504,7 @@ export class CallManager {
     const total = this.roster.length; // includes us
     if (total >= VOICE_ONLY_AT && this.videoOn && this.localStream) {
       this.videoOn = false;
+      this.autoVoicedOff = true;
       for (const t of this.localStream.getVideoTracks()) t.enabled = false;
       this.moq?.setVideoEnabled(false);
       this.send.sendCallMute(this.audioOn, this.videoOn);
@@ -537,9 +577,13 @@ export class CallManager {
     this.hooks.onLocalScreen(false);
     this.hooks.onLocalStream(null);
     this.hooks.onPeers([]);
-    this.audioOn = true;
-    this.videoOn = true;
-    this.hooks.onLocalMute(true, true);
+    // Leaving the call: the 🎤/📷 preferences persist (the top-bar buttons
+    // are global); only the auto voice-only degradation is undone.
+    if (this.autoVoicedOff) {
+      this.videoOn = true;
+      this.autoVoicedOff = false;
+    }
+    this.hooks.onLocalMute(this.audioOn, this.videoOn);
     if (reason) this.hooks.onLog(reason);
     this.setPhase({ p: "idle" });
   }

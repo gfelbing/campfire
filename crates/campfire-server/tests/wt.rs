@@ -93,6 +93,7 @@ async fn join(addr: SocketAddr, room: &str, name: &str) -> (TestClient, String) 
         name: name.into(),
         avatar: None,
         token: None,
+        status: None,
     })
     .await;
     let ServerMsg::Hello { you, .. } = c.recv().await else {
@@ -144,6 +145,7 @@ async fn join_hello_presence_chat_typing_leave() {
         name: "alice".into(),
         avatar: None,
         token: None,
+        status: None,
     })
     .await;
     let ServerMsg::Hello {
@@ -169,6 +171,7 @@ async fn join_hello_presence_chat_typing_leave() {
         name: "bob".into(),
         avatar: None,
         token: None,
+        status: None,
     })
     .await;
     let ServerMsg::Hello {
@@ -266,6 +269,7 @@ async fn validation_errors_are_reported() {
         name: "alice".into(),
         avatar: None,
         token: None,
+        status: None,
     })
     .await;
     assert!(matches!(
@@ -281,6 +285,7 @@ async fn validation_errors_are_reported() {
         name: "alice".into(),
         avatar: None,
         token: None,
+        status: None,
     })
     .await;
     assert!(matches!(
@@ -296,6 +301,7 @@ async fn validation_errors_are_reported() {
         name: "   ".into(),
         avatar: None,
         token: None,
+        status: None,
     })
     .await;
     assert!(matches!(
@@ -311,6 +317,7 @@ async fn validation_errors_are_reported() {
         name: "x".repeat(25),
         avatar: None,
         token: None,
+        status: None,
     })
     .await;
     assert!(matches!(
@@ -347,6 +354,7 @@ async fn validation_errors_are_reported() {
         name: "alice".into(),
         avatar: None,
         token: None,
+        status: None,
     })
     .await;
     assert!(matches!(c.recv().await, ServerMsg::Hello { .. }));
@@ -487,6 +495,7 @@ async fn movement_relay_invalid_move_rejected_chat_history() {
         name: "carol".into(),
         avatar: None,
         token: None,
+        status: None,
     })
     .await;
     let ServerMsg::Hello { users, chat, .. } = c.recv().await else {

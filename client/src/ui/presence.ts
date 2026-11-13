@@ -2,7 +2,7 @@
 // now, with the 🎧 badge for users in the room's call. Full rebuild on
 // every `hello` (reconnect/room-switch catch-up), incremental otherwise.
 
-import type { UserBrief, UserState } from "../net/types";
+import type { OwnStatus, UserBrief, UserState } from "../net/types";
 
 export interface PresenceUI {
   /** Full roster + in-call set (hello / re-hello). */
@@ -15,14 +15,14 @@ export interface PresenceUI {
   setInCall(inCall: Set<string>): void;
   /** Toggle the 🔇 do-not-disturb badge (silentZone occupancy). */
   setDnd(id: string, on: boolean): void;
+  /** A member's presence status changed (`status`); absent = `online`. */
+  setStatus(id: string, status: OwnStatus): void;
 }
 
 export function createPresence(container: HTMLElement): PresenceUI {
   const panel = document.createElement("div");
   panel.className = "presence";
-  panel.innerHTML = `
-    <div class="presence-title">in this room</div>
-    <ul class="presence-list"></ul>`;
+  panel.innerHTML = `<ul class="presence-list"></ul>`;
   container.appendChild(panel);
 
   const list = panel.querySelector<HTMLOListElement>(".presence-list")!;
@@ -31,6 +31,8 @@ export function createPresence(container: HTMLElement): PresenceUI {
   const members = new Map<string, string>(); // id → name
   let inCall = new Set<string>();
   const dnd = new Set<string>();
+  // id → presence status (absent = `online`).
+  const statusOf = new Map<string, OwnStatus>();
 
   function badge(id: string): boolean {
     return inCall.has(id);
@@ -55,10 +57,12 @@ export function createPresence(container: HTMLElement): PresenceUI {
   function row(id: string, name: string): HTMLLIElement {
     const li = document.createElement("li");
     li.dataset.id = id;
+    const dot = document.createElement("span");
+    dot.className = `presence-status ${statusOf.get(id) ?? "online"}`;
     const label = document.createElement("span");
     label.className = "presence-name";
     label.textContent = name;
-    li.appendChild(label);
+    li.append(dot, label);
     decorate(li, id);
     return li;
   }
@@ -78,8 +82,10 @@ export function createPresence(container: HTMLElement): PresenceUI {
     setUsers: (users, call) => {
       inCall = new Set(call);
       members.clear();
+      statusOf.clear();
       for (const u of users) {
         members.set(u.id, u.name);
+        if (u.status && u.status !== "online") statusOf.set(u.id, u.status);
         // The snapshot carries silentZone occupancy; stale ids fall away
         // with the roster.
         if (u.sz) dnd.add(u.id);
@@ -90,10 +96,12 @@ export function createPresence(container: HTMLElement): PresenceUI {
     addUser: (u) => {
       if (members.has(u.id)) return;
       members.set(u.id, u.name);
+      if (u.status && u.status !== "online") statusOf.set(u.id, u.status);
       list.appendChild(row(u.id, u.name));
     },
     removeUser: (id) => {
       if (!members.delete(id)) return;
+      statusOf.delete(id);
       const li = list.querySelector<HTMLElement>(`li[data-id="${CSS.escape(id)}"]`);
       li?.remove();
     },
@@ -107,6 +115,16 @@ export function createPresence(container: HTMLElement): PresenceUI {
       else dnd.delete(id);
       const li = list.querySelector<HTMLElement>(`li[data-id="${CSS.escape(id)}"]`);
       if (li) decorate(li as HTMLLIElement, id);
+    },
+    setStatus: (id, status) => {
+      if (status === "online") statusOf.delete(id);
+      else statusOf.set(id, status);
+      const li = list.querySelector<HTMLElement>(`li[data-id="${CSS.escape(id)}"]`);
+      li?.querySelector(".presence-status")?.replaceWith(
+        Object.assign(document.createElement("span"), {
+          className: `presence-status ${statusOf.get(id) ?? "online"}`,
+        }),
+      );
     },
   };
 }

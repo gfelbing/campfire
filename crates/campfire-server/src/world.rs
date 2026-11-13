@@ -14,7 +14,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use campfire_protocol::{
-    Avatar, ChatMsg, Dir, ErrorCode, MovementBatch, MovementEntry, ServerMsg, UserBrief, UserState,
+    Avatar, ChatMsg, Dir, ErrorCode, MovementBatch, MovementEntry, ServerMsg, Status, UserBrief,
+    UserState,
 };
 use rand::RngCore;
 
@@ -84,6 +85,10 @@ struct Member {
     /// with this set is never pulled into a bubble and leaves the one they
     /// are in.
     bubble_off: bool,
+    /// Presence status from the profile menu: `dnd` behaves like
+    /// `bubble_off` (set on join/`ClientMsg::Status`, kept in sync with it),
+    /// `away` is only a UI badge + the client's own muted auto-join.
+    status: Status,
     /// Set when a disconnected member re-enters via their token: exempts
     /// them from the bubble-radius check for [`BUBBLE_RETURN_GRACE`] (the
     /// restored position is often outside the radius, and the reconnect
@@ -308,8 +313,8 @@ impl World {
     ///
     /// The room id must name a known map; a fresh joiner spawns at the map's
     /// spawn point.
-    // Eight flat parameters on purpose: four are the join *request* (room,
-    // name, avatar, token), three describe the *connecting session*
+    // Nine flat parameters on purpose: five are the join *request* (room,
+    // name, avatar, token, status), three describe the *connecting session*
     // (session_id, tx, dtx). A struct would churn every call site for no gain.
     #[allow(clippy::too_many_arguments)]
     pub fn join(
@@ -318,6 +323,7 @@ impl World {
         name: &str,
         avatar: Option<Avatar>,
         token: Option<&str>,
+        status: Status,
         session_id: u64,
         tx: tokio::sync::mpsc::UnboundedSender<ServerMsg>,
         dtx: tokio::sync::mpsc::UnboundedSender<Vec<u8>>,
@@ -362,10 +368,10 @@ impl World {
             };
             let joined = Joined {
                 call,
-                you: id,
+                you: id.clone(),
                 token: member.token.clone(),
                 users: user_snapshot(room_entry, Some(map)),
-                chat: room_entry.chat.iter().cloned().collect(),
+                chat: Self::chat_for(room_entry, &id),
                 ticket,
             };
             return Ok(joined);
@@ -403,6 +409,7 @@ impl World {
                 id: id.clone(),
                 name: member.name.clone(),
                 color: member.avatar.as_ref().map(|a| a.color.clone()),
+                status: status_of(&member),
             };
             room_entry.users.insert(id.clone(), member);
             let joined = Joined {
@@ -412,7 +419,7 @@ impl World {
                 you: id.clone(),
                 token: token_out,
                 users: user_snapshot(room_entry, Some(map)),
-                chat: room_entry.chat.iter().cloned().collect(),
+                chat: Self::chat_for(room_entry, &id),
                 ticket: None,
             };
             for (uid, m) in &room_entry.users {
@@ -469,7 +476,8 @@ impl World {
                 session: session_id,
                 token: token.clone(),
                 gone_at: None,
-                bubble_off: false,
+                bubble_off: status == Status::Dnd,
+                status,
                 reentered_at: None,
             },
         );
@@ -478,7 +486,7 @@ impl World {
             you: id.clone(),
             token,
             users: user_snapshot(room_entry, Some(map)),
-            chat: room_entry.chat.iter().cloned().collect(),
+            chat: Self::chat_for(room_entry, &id),
             call: room_entry
                 .calls
                 .iter()
@@ -498,6 +506,7 @@ impl World {
                 .get(&id)
                 .and_then(|m| m.avatar.as_ref())
                 .map(|a| a.color.clone()),
+            status: room_entry.users.get(&id).map(status_of).unwrap_or_default(),
         };
         for (uid, m) in &room_entry.users {
             if uid != &id {
@@ -725,8 +734,10 @@ impl World {
         }
     }
 
-    /// Send a chat message: recorded in history and echoed to everyone in the
-    /// room, including the sender (so clients render their own line once).
+    /// Send a chat message, scoped by call membership (README §8): a member
+    /// IN a call reaches only that call's participants; a member OUT of any
+    /// call reaches everyone else who is out of a call. Recorded history is
+    /// filtered the same way at `hello` time (see [`chat_for`]).
     pub fn broadcast_chat(&self, room: &str, msg: ChatMsg) {
         let mut rooms = self.rooms.lock().unwrap();
         let Some(entry) = rooms.get_mut(room) else {
@@ -736,13 +747,41 @@ impl World {
         while entry.chat.len() > CHAT_HISTORY {
             entry.chat.pop_front();
         }
-        for m in entry.users.values() {
-            let _ = m.tx.send(ServerMsg::Chat {
-                from: msg.from.clone(),
-                name: msg.name.clone(),
-                text: msg.text.clone(),
-                ts: msg.ts,
-            });
+        let from_call = call_containing(entry, &msg.from);
+        for (uid, m) in &entry.users {
+            let recipient_in_call = call_containing(entry, uid);
+            let same_scope = match from_call {
+                Some(ci) => recipient_in_call == Some(ci),
+                None => recipient_in_call.is_none(),
+            };
+            if same_scope {
+                let _ = m.tx.send(ServerMsg::Chat {
+                    from: msg.from.clone(),
+                    name: msg.name.clone(),
+                    text: msg.text.clone(),
+                    ts: msg.ts,
+                });
+            }
+        }
+    }
+
+    /// The chat history as seen by `uid` (call-scoped, like
+    /// [`World::broadcast_chat`]): a call participant gets the lines sent
+    /// inside their call, everyone else the lines sent outside any call.
+    fn chat_for(entry: &Room, uid: &str) -> Vec<ChatMsg> {
+        match call_containing(entry, uid) {
+            Some(ci) => entry
+                .chat
+                .iter()
+                .filter(|m| entry.calls[ci].participants.contains_key(&m.from))
+                .cloned()
+                .collect(),
+            None => entry
+                .chat
+                .iter()
+                .filter(|m| call_containing(entry, &m.from).is_none())
+                .cloned()
+                .collect(),
         }
     }
 
@@ -760,6 +799,26 @@ impl World {
                 });
             }
         }
+    }
+
+    /// The sender's presence status changed (profile menu): store it, keep
+    /// `bubble_off` in sync (`dnd` opts out of proximity calls), and tell
+    /// the room — except the sender, whose UI already updated itself.
+    pub fn set_status(&self, room: &str, id: &str, status: Status) -> Result<(), ErrorCode> {
+        let mut rooms = self.rooms.lock().unwrap();
+        let entry = rooms.get_mut(room).ok_or(ErrorCode::BadMessage)?;
+        let member = entry.users.get_mut(id).ok_or(ErrorCode::BadMessage)?;
+        member.status = status;
+        member.bubble_off = status == Status::Dnd;
+        for (uid, m) in &entry.users {
+            if uid != id {
+                let _ = m.tx.send(ServerMsg::Status {
+                    id: id.to_owned(),
+                    status,
+                });
+            }
+        }
+        Ok(())
     }
 
     // -------------------------------------------------------------------
@@ -1335,8 +1394,14 @@ fn user_snapshot(entry: &Room, map: Option<&campfire_maps::MapData>) -> Vec<User
                     .any(|z| z.silent && z.contains(m.pos.0, m.pos.1))
             }),
             color: m.avatar.as_ref().map(|a| a.color.clone()),
+            status: status_of(m),
         })
         .collect()
+}
+
+/// A member's status for the wire: `online` (the default) is omitted.
+fn status_of(m: &Member) -> Option<Status> {
+    (m.status != Status::Online).then_some(m.status)
 }
 
 /// Split a room's dirty entries into datagram-sized JSON batches: encode all
@@ -1505,7 +1570,8 @@ mod tests {
                 "alice",
                 None,
                 None,
-                a_session,
+                Status::Online,
+                                a_session,
                 tx_a,
                 dtx_a,
             )
@@ -1517,7 +1583,8 @@ mod tests {
                 "bob",
                 None,
                 None,
-                b_session,
+                Status::Online,
+                                b_session,
                 tx_b,
                 dtx_b,
             )
@@ -1549,7 +1616,8 @@ mod tests {
                 "alice",
                 None,
                 None,
-                world.next_session_id(),
+                Status::Online,
+                                world.next_session_id(),
                 tx,
                 dtx
             ),
@@ -1570,7 +1638,8 @@ mod tests {
                 "alice",
                 None,
                 None,
-                world.next_session_id(),
+                Status::Online,
+                                world.next_session_id(),
                 tx,
                 dtx,
             )
@@ -1666,7 +1735,8 @@ mod tests {
                 "alice",
                 None,
                 None,
-                world.next_session_id(),
+                Status::Online,
+                                world.next_session_id(),
                 tx_a,
                 dtx_a,
             )
@@ -1677,7 +1747,8 @@ mod tests {
                 "bob",
                 None,
                 None,
-                world.next_session_id(),
+                Status::Online,
+                                world.next_session_id(),
                 tx_b,
                 dtx_b,
             )
@@ -1750,7 +1821,8 @@ mod tests {
                 "alice",
                 None,
                 None,
-                world.next_session_id(),
+                Status::Online,
+                                world.next_session_id(),
                 tx_a,
                 dtx_a,
             )
@@ -1784,7 +1856,8 @@ mod tests {
                 "alice",
                 None,
                 None,
-                world.next_session_id(),
+                Status::Online,
+                                world.next_session_id(),
                 tx_a,
                 dtx_a,
             )
@@ -1801,7 +1874,8 @@ mod tests {
                 "bob",
                 None,
                 None,
-                world.next_session_id(),
+                Status::Online,
+                                world.next_session_id(),
                 tx_b,
                 dtx_b,
             )
@@ -1831,7 +1905,8 @@ mod tests {
                 "a",
                 None,
                 None,
-                world.next_session_id(),
+                Status::Online,
+                                world.next_session_id(),
                 tx_a,
                 dtx_a,
             )
@@ -1842,7 +1917,8 @@ mod tests {
                 "b",
                 None,
                 None,
-                world.next_session_id(),
+                Status::Online,
+                                world.next_session_id(),
                 tx_b,
                 dtx_b,
             )
@@ -1881,7 +1957,8 @@ mod tests {
                 "a",
                 None,
                 None,
-                world.next_session_id(),
+                Status::Online,
+                                world.next_session_id(),
                 tx_a,
                 dtx_a,
             )
@@ -1892,7 +1969,8 @@ mod tests {
                 "b",
                 None,
                 None,
-                world.next_session_id(),
+                Status::Online,
+                                world.next_session_id(),
                 tx_b,
                 dtx_b,
             )
@@ -1924,7 +2002,7 @@ mod tests {
         let (dtx, drx) = datagram_channel();
         let session = world.next_session_id();
         let joined = world
-            .join(room, name, None, None, session, tx, dtx)
+            .join(room, name, None, None, campfire_protocol::Status::Online, session, tx, dtx)
             .unwrap();
         TestUser {
             id: joined.you,
@@ -2187,7 +2265,7 @@ mod tests {
         let (dtx, drx) = datagram_channel();
         let session = world.next_session_id();
         let joined = world
-            .join(room, name, None, token, session, tx, dtx)
+            .join(room, name, None, token, campfire_protocol::Status::Online, session, tx, dtx)
             .unwrap();
         (
             TestUser {
@@ -2277,7 +2355,7 @@ mod tests {
         let (dtx_b, mut dgr_b) = datagram_channel();
         let session_b = world.next_session_id();
         let joined_b = world
-            .join("office", "bob", None, None, session_b, channel().0, dtx_b)
+            .join("office", "bob", None, None, campfire_protocol::Status::Online, session_b, channel().0, dtx_b)
             .unwrap();
         let b_id = joined_b.you;
         a.rx.try_recv().unwrap();
@@ -2421,7 +2499,7 @@ mod tests {
         let (dtx, _) = datagram_channel();
         let session = world.next_session_id();
         let joined = world
-            .join("office", "ALICE-2", None, Some(&a_token), session, tx, dtx)
+            .join("office", "ALICE-2", None, Some(&a_token), campfire_protocol::Status::Online, session, tx, dtx)
             .unwrap();
         assert_eq!(joined.you, a.id);
         let me = joined

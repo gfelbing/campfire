@@ -120,6 +120,7 @@ async fn join(addr: SocketAddr, room: &str, name: &str) -> (TestClient, String, 
         name: name.into(),
         avatar: None,
         token: None,
+        status: None,
     })
     .await;
     // A tick between the join and the Hello flush can prepend call state
@@ -147,6 +148,7 @@ async fn reconnect(
         name: name.into(),
         avatar: None,
         token: Some(token.to_owned()),
+        status: None,
     })
     .await;
     let (you, call) = loop {

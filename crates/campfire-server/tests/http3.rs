@@ -72,10 +72,10 @@ async fn http3_healthz_index_and_maps() {
     let v: serde_json::Value = serde_json::from_str(&body).unwrap();
     assert_eq!(v["status"], "ok");
 
-    // / — embedded static index over HTTP/3.
+    // / — redirect to the first map (the landing page is gone).
     let (status, body) = get(addr, &root, "/").await;
-    assert_eq!(status, 200);
-    assert!(body.contains("Campfire"));
+    assert_eq!(status, 303);
+    assert!(body.is_empty(), "body: {body}");
 
     // /api/v1/maps — every map on disk, sorted by id; the two bundled maps
     // (island, office) must be present.

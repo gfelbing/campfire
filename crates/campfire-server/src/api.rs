@@ -18,7 +18,7 @@ use axum::extract::{Path as UrlPath, Query, State};
 use axum::http::header;
 use axum::http::{HeaderMap, StatusCode, Uri};
 use axum::response::sse::Event;
-use axum::response::{IntoResponse, Response, Sse};
+use axum::response::{IntoResponse, Redirect, Response, Sse};
 use axum::routing::{connect, get, post};
 use axum::{Json, Router};
 use bytes::Bytes;
@@ -153,6 +153,10 @@ pub fn router(state: AppState) -> Router {
         // office map. The server serves the SPA; the client takes the room
         // id from the path segment.
         .route("/play/{*rest}", get(play))
+        // The landing page is gone: `/` drops the visitor straight into the
+        // first map (the client then picks a random identity, or the URL
+        // params' when present).
+        .route("/", get(root_redirect))
         // Realtime fallback for browsers without WebTransport (README §8).
         .route("/rt/sse", get(sse_stream))
         .route("/rt/event", post(fallback_event))
@@ -521,7 +525,16 @@ async fn fallback_event(
             let user_id =
                 match state
                     .world
-                    .join(&room, &name, avatar, token.as_deref(), session_id, tx, dtx)
+                    .join(
+                        &room,
+                        &name,
+                        avatar,
+                        token.as_deref(),
+                        campfire_protocol::Status::default(),
+                        session_id,
+                        tx,
+                        dtx,
+                    )
                 {
                     Ok(joined) => {
                         // The unbounded channel buffers the hello until the SSE
@@ -634,6 +647,12 @@ async fn fallback_event(
                 }
                 ClientMsg::Typing { on } => {
                     state.world.broadcast_typing(&room, &user_id, on);
+                }
+                // Presence status: same world method as the WebTransport
+                // path (the fallback has no profile menu, so this rarely
+                // fires).
+                ClientMsg::Status { status } => {
+                    let _ = state.world.set_status(&room, &user_id, status);
                 }
                 // Bubble opt-out and call mute/screen: same world methods
                 // as the WebTransport path (README §5); fallback clients
@@ -775,6 +794,22 @@ async fn play(State(state): State<AppState>) -> Response {
     serve_static(&state, "index.html")
         .await
         .unwrap_or_else(|| StatusCode::NOT_FOUND.into_response())
+}
+
+/// `GET /` → the SPA on the first map (the landing page is gone; the client
+/// joins with a random identity or the URL params' when present).
+async fn root_redirect(State(state): State<AppState>, uri: Uri) -> Response {
+    match state.world.maps().all().first() {
+        Some(m) => Redirect::to(&match uri.query() {
+            Some(q) => format!("/play/{}/?{q}", m.id),
+            None => format!("/play/{}/", m.id),
+        })
+        .into_response(),
+        // No maps embedded (a broken build): the SPA will show its error.
+        None => serve_static(&state, "index.html")
+            .await
+            .unwrap_or_else(|| StatusCode::NOT_FOUND.into_response()),
+    }
 }
 
 async fn handle_static(State(state): State<AppState>, uri: Uri) -> Response {

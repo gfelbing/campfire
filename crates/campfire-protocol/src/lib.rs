@@ -28,6 +28,22 @@ pub enum Dir {
     West,
 }
 
+/// A user's presence status (the profile menu): `online` (normal calls with
+/// mic + camera), `away` (calls auto-join muted) or `dnd` (no call starts).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Status {
+    Online,
+    Away,
+    Dnd,
+}
+
+impl Default for Status {
+    fn default() -> Self {
+        Self::Online
+    }
+}
+
 /// Visual customization chosen by the user.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Avatar {
@@ -42,6 +58,9 @@ pub struct UserBrief {
     /// The user's chosen avatar color (`#rrggbb`); present when they set one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub color: Option<String>,
+    /// The user's presence status; `None` means `online` (the default).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<Status>,
 }
 
 /// Full state of a user as seen in a room snapshot (`hello`).
@@ -59,6 +78,9 @@ pub struct UserState {
     /// The user's chosen avatar color (`#rrggbb`); present when they set one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub color: Option<String>,
+    /// The user's presence status; `None` means `online` (the default).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<Status>,
 }
 
 /// A chat message (history entries and live events share this shape).
@@ -106,12 +128,22 @@ pub enum ClientMsg {
         /// creating a new user.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         token: Option<String>,
+        /// The joiner's presence status (the profile menu); `None` means
+        /// `online` (the default).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        status: Option<Status>,
     },
     Chat {
         text: String,
     },
     Typing {
         on: bool,
+    },
+    /// The sender's presence status changed (the profile menu): `dnd` opts
+    /// out of proximity calls, `away` auto-joins them muted. Broadcast to
+    /// the room as `ServerMsg::Status` (the user list shows it).
+    Status {
+        status: Status,
     },
     /// Leave the current room immediately (no reconnect grace period). The
     /// server tears the session down; the client reconnects elsewhere if it
@@ -180,6 +212,12 @@ pub enum ServerMsg {
     Typing {
         id: String,
         on: bool,
+    },
+    /// `id`'s presence status changed (profile menu); not sent to the sender
+    /// (their UI already updated itself).
+    Status {
+        id: String,
+        status: Status,
     },
     /// A call (re)started or someone joined: everyone in the room gets the
     /// full participant list (the authoritative catch-up for badges and
@@ -293,6 +331,7 @@ mod tests {
                 color: "#e05f38".into(),
             }),
             token: None,
+            status: None,
         };
         let line = to_line(&msg);
         assert!(line.starts_with(r#"{"t":"join""#));
@@ -314,6 +353,7 @@ mod tests {
                 d: Dir::South,
                 sz: false,
                 color: Some("#e05f38".into()),
+                status: Some(Status::Away),
             }],
             chat: vec![ChatMsg {
                 from: "u_77ab".into(),
@@ -325,6 +365,7 @@ mod tests {
                 id: "u_77ab".into(),
                 name: "jules".into(),
                 color: None,
+                status: None,
             }],
             // A minted media ticket (docs/moq-sfu.md §7): 32 random bytes,
             // hex-encoded.
@@ -343,6 +384,27 @@ mod tests {
         let line = to_line(&ClientMsg::Ping);
         assert_eq!(line, "{\"t\":\"ping\"}\n");
         assert_eq!(from_line::<ClientMsg>(&line).unwrap(), ClientMsg::Ping);
+    }
+
+    #[test]
+    fn status_roundtrip() {
+        let msg = ClientMsg::Status { status: Status::Dnd };
+        let line = to_line(&msg);
+        assert!(line.contains(r#""status":"dnd""#));
+        assert_eq!(from_line::<ClientMsg>(&line).unwrap(), msg);
+        let srv = ServerMsg::Status {
+            id: "u_1".into(),
+            status: Status::Away,
+        };
+        let line = to_line(&srv);
+        assert!(line.contains(r#""status":"away""#));
+        assert_eq!(from_line::<ServerMsg>(&line).unwrap(), srv);
+    }
+
+    #[test]
+    fn status_defaults_to_online_when_absent() {
+        let brief: UserBrief = serde_json::from_str(r#"{"id":"u_1","name":"n"}"#).unwrap();
+        assert_eq!(brief.status, None);
     }
 
     #[test]
@@ -370,6 +432,7 @@ mod tests {
             name: "n".into(),
             avatar: None,
             token: None,
+            status: None,
         };
         assert_eq!(
             from_line::<ClientMsg>(&to_line(&no_avatar)).unwrap(),

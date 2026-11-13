@@ -363,6 +363,7 @@ fn dispatch(
             name,
             avatar,
             token,
+            status,
         }) => {
             if session.is_some() {
                 return send(tx, ErrorCode::BadMessage);
@@ -393,6 +394,7 @@ fn dispatch(
                 name,
                 avatar.clone(),
                 token.as_deref(),
+                status.unwrap_or_default(),
                 session_id,
                 tx.clone(),
                 dtx.clone(),
@@ -455,6 +457,12 @@ fn dispatch(
             };
             world.broadcast_typing(&room, &id, on);
             true
+        }
+        Ok(ClientMsg::Status { status }) => {
+            let Some((room, id, _)) = session.clone() else {
+                return send(tx, ErrorCode::BadMessage);
+            };
+            call_result(world.set_status(&room, &id, status), tx)
         }
         // Call state + presence (README §5/§6.3): the world validates
         // (same room, sender involved); errors go back as `error` messages.

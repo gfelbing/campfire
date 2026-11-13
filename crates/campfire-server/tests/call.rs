@@ -80,6 +80,7 @@ async fn join(addr: SocketAddr, room: &str, name: &str) -> (TestClient, String) 
         name: name.into(),
         avatar: None,
         token: None,
+        status: None,
     })
     .await;
     let ServerMsg::Hello { you, .. } = c.recv().await else {
