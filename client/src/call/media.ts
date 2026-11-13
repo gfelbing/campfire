@@ -7,7 +7,7 @@
 
 /**
  * Acquire local mic + camera. Audio always on while in a call; video is
- * requested at 720p (README §6.3) so the SFU uplink stays within budget.
+ * capped at 800x600 (issues.md #3) so the SFU uplink stays within budget.
  */
 export async function getLocalMedia(): Promise<MediaStream> {
   return navigator.mediaDevices.getUserMedia({

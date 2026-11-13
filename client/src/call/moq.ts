@@ -81,7 +81,10 @@ export interface DownlinkView {
   screenFrames: number;
   /** Encoded audio bytes received (debug/e2e). */
   audioBytes: number;
-  /** Playback delay from the live edge, ms (the latency budget lives here). */
+  /** How far playback trails wall-clock time, ms: the latest media's
+   *  arrival lag behind the live edge (`out.reference`) plus the sync
+   *  target (`out.delay`). Both move with the network — a fixed target
+   *  (`in.delay`) alone would sit flat. */
   delay: number;
   /** Jitter buffer depth, ms. */
   jitter: number;
@@ -343,10 +346,10 @@ export class MoqCall {
           // decoding at the next keyframe (fast-start, docs §10 T7).
           config: {
             keyframeInterval: Net.Time.Milli(1000),
-            // Auto-sizing bound (the capture already ideals 720p30):
+            // Auto-sizing bound (the capture is capped at 800x600):
             // nothing above it, so the bandwidth grant has a ceiling to
             // scale down from.
-            maxPixels: 1280 * 720,
+            maxPixels: 800 * 600,
             frameRate: 30,
           },
         });
@@ -889,7 +892,7 @@ export class MoqCall {
       frames: d.camDecoder.out.stats.peek()?.frameCount ?? 0,
       screenFrames: d.scrDecoder.out.stats.peek()?.frameCount ?? 0,
       audioBytes: d.audDecoder.out.stats.peek()?.bytesReceived ?? 0,
-      delay: Number(d.sync.in.delay.peek()),
+      delay: Number(d.sync.out.reference.peek() ?? 0) + Number(d.sync.out.delay.peek()),
       jitter: Number(d.sync.out.jitter.peek()),
       width: d.canvas.width,
       height: d.canvas.height,

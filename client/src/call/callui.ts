@@ -92,10 +92,9 @@ function drawSpark(t: Tile): void {
   if (s.length < 2) return;
   let max = 0;
   for (const v of s) max = Math.max(max, v);
-  // Floor the scale at the entry delay (1 s, video-catch-up work) so the
-  // line is readable from the first second and does not reflow as the
-  // entry sample ages out of the ring.
-  max = Math.max(max, 1000);
+  // Floor the scale at the steady delay (300 ms) so the line is readable
+  // and does not reflow as small samples age out of the ring.
+  max = Math.max(max, 300);
   ctx.beginPath();
   const step = SPARK_W / (SPARK_LEN - 1);
   for (let i = 0; i < s.length; i++) {
