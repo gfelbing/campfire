@@ -588,7 +588,7 @@ body {
 
 /* --- chat panel ------------------------------------------------------------ */
 
-..cf-chat {
+.cf-chat {
   position: relative;
   flex: 1;
   min-height: 0;
