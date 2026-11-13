@@ -94,9 +94,9 @@ export class AvatarView {
     this.layoutStatusDot();
   }
 
-  /** The dot sits just right of the (name-width-dependent) label. */
+  /** The dot sits just left of the (name-width-dependent) label. */
   private layoutStatusDot(): void {
-    this.statusDot.position.set(this.label.width / 2 + 5, -24);
+    this.statusDot.position.set(-this.label.width / 2 - 5, -24);
   }
 
   /** Toggle the headphone badge (call state is room-wide, README §5). */
