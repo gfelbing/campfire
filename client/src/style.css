@@ -523,6 +523,13 @@ body {
   background: #1a1d22;
 }
 
+/* unread dot on the collapsed rail's section icons */
+.sidebar-rail .acc-dot {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+}
+
 .acc-count {
   color: var(--muted);
   font-weight: 400;

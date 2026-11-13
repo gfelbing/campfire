@@ -27,6 +27,10 @@ export function createSidebar(): SidebarUI {
   const bubbleSection = sidebar.querySelector<HTMLElement>('.accordion[data-acc="bubble"]')!;
   const bubbleDot = bubbleSection.querySelector<HTMLElement>(".acc-dot")!;
   const bubbleRail = sidebar.querySelector<HTMLButtonElement>('.sidebar-rail [data-open="bubble"]')!;
+  // The rail icons carry the same unread dot as the section headers, so a
+  // collapsed sidebar still shows new chat activity.
+  const chatRailDot = sidebar.querySelector<HTMLElement>('.sidebar-rail [data-open="chat"] .acc-dot')!;
+  const bubbleRailDot = sidebar.querySelector<HTMLElement>('.sidebar-rail [data-open="bubble"] .acc-dot')!;
 
   // Always start collapsed (the header's burger or a rail icon expands it);
   // the state is per-session, so a stale "open" can never stick around.
@@ -41,8 +45,14 @@ export function createSidebar(): SidebarUI {
     b.addEventListener("click", () => {
       sidebar.classList.remove("collapsed");
       section(b.dataset.open!).classList.remove("closed");
-      if (b.dataset.open === "chat") chatDot.hidden = true;
-      if (b.dataset.open === "bubble") bubbleDot.hidden = true;
+      if (b.dataset.open === "chat") {
+        chatDot.hidden = true;
+        chatRailDot.hidden = true;
+      }
+      if (b.dataset.open === "bubble") {
+        bubbleDot.hidden = true;
+        bubbleRailDot.hidden = true;
+      }
     });
   }
 
@@ -69,10 +79,14 @@ export function createSidebar(): SidebarUI {
       usersCount.textContent = String(n);
     },
     chatActivity(on) {
-      chatDot.hidden = !(on && !chatVisible());
+      const show = on && !chatVisible();
+      chatDot.hidden = !show;
+      chatRailDot.hidden = !show;
     },
     bubbleActivity(on) {
-      bubbleDot.hidden = !(on && !bubbleVisible());
+      const show = on && !bubbleVisible();
+      bubbleDot.hidden = !show;
+      bubbleRailDot.hidden = !show;
     },
     setBubbleVisible(on) {
       bubbleRail.classList.toggle("hidden", !on);
