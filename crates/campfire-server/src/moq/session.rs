@@ -28,7 +28,7 @@ use std::time::{Duration, Instant};
 
 use axum::Extension;
 use axum::extract::{Path, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use moq_net::stats::{Registry as StatsRegistry, Tier};
 use tracing::{info, warn};
@@ -130,19 +130,18 @@ impl MoqSfu {
 pub async fn handle_moq(
     State(state): State<crate::api::AppState>,
     Extension(conn): Extension<quinn::Connection>,
-    headers: HeaderMap,
     Path(ticket): Path<String>,
     upgrade: h3_axum::WebTransportUpgrade,
 ) -> Response {
     let sfu = &state.moq;
-    // 0. Auth (README §11): a valid session cookie is required when auth is
-    //    on. The ticket below is the primary gate (it is minted only for a
-    //    user already in a call, which itself needs auth); this is
-    //    defense-in-depth against a leaked ticket.
-    if let Err(status) = crate::api::enforce_auth(&state, &headers) {
-        sfu.metrics.moq_session_reject();
-        return status.into_response();
-    }
+    // Auth (README §11): no session-cookie check here. The WebTransport
+    // handshake carries no cookies in Chromium (issues.md #4 — the same
+    // reason `/wt` mints `?ticket=` auth tickets), so a cookie check
+    // would refuse every browser CONNECT with a 401 (surfaced as
+    // `net::ERR_QUIC_PROTOCOL_ERROR`). The single-use media ticket below
+    // is the gate: it is minted only for an authenticated user's call
+    // membership (TTL 30 s), consumed on first admission, and the
+    // membership is re-checked — a leaked ticket cannot get a session.
     // 1. Ticket: unknown, expired, or already presented (single use).
     let Some(info) = sfu.tickets.admit(&ticket) else {
         sfu.metrics.moq_session_reject();
