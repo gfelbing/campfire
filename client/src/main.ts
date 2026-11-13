@@ -383,13 +383,21 @@ async function main(): Promise<void> {
   });
   header.setMute(true, true);
 
-  // Auto-away (issues.md #1): leaving the tab with no active call switches
-  // `online` → `away`; coming back switches any `away` (manual or automatic)
-  // back to `online`. `dnd` never changes automatically, either direction.
-  document.addEventListener("visibilitychange", () => {
-    if (document.hidden) {
-      if (!manager.inCall() && header.status() === "online") header.setStatus("away");
-    } else if (header.status() === "away") {
+  // Auto-away (issues.md #1): when the tab/window loses focus with no
+  // active call and `online` status, switch to `away` — flagged as
+  // automatic. On refocus, only an automatic `away` returns to `online`
+  // (a status set manually stays). `dnd` never changes automatically,
+  // either direction.
+  let autoAway = false;
+  window.addEventListener("blur", () => {
+    if (!manager.inCall() && header.status() === "online") {
+      autoAway = true;
+      header.setStatus("away");
+    }
+  });
+  window.addEventListener("focus", () => {
+    if (autoAway) {
+      autoAway = false;
       header.setStatus("online");
     }
   });
