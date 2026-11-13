@@ -4,6 +4,35 @@ All notable releases of campfire. Versions follow calendar-agnostic
 semver; releases are cut by tagging `vX.Y.Z` (the Docker image is built
 and pushed to GHCR on each tag).
 
+## [0.0.10] — 2026-11-13
+
+The presence release: chat reaches you even with the sidebar folded,
+and the map shows everyone's status at a glance.
+
+### Added
+
+- Chat toasts: a message arriving while its chat panel is hidden
+  surfaces as a toast (bold sender name) with a short synthesized
+  "blob" blip (a sine sliding 320→140 Hz); an open panel stays quiet.
+- Presence dots on the map: every avatar's name label carries a small
+  status dot left of the name, in the Users-list palette (online green,
+  away amber, dnd red) — set from the rosters, live-updated on `status`
+  events, and applied to our own avatar on a status change.
+- Chat unread dot on the collapsed sidebar's rail icons: the 💬 and 🗣
+  rail buttons carry the same dot as the accordion headers, so new
+  messages are visible while the sidebar is folded.
+
+### Fixed
+
+- `/moq/{ticket}` refused with auth enabled: the handler required a
+  session cookie, but Chromium attaches none to a WebTransport
+  handshake (the same reason `/wt` mints `?ticket=` auth tickets) —
+  every CONNECT died as `net::ERR_QUIC_PROTOCOL_ERROR`. The single-use
+  media ticket is the gate (minted only for an authenticated user's
+  call membership, 30 s TTL, membership re-checked on CONNECT).
+- Room chat never reported activity (only the bubble channel was
+  wired), so the global unread dot — header and rail — never fired.
+
 ## [0.0.9] — 2026-11-13
 
 The call-quality release: the theater tiles tell the truth (real
