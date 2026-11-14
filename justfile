@@ -106,15 +106,17 @@ docker *args:
 # Chromium never trusts user-installed CAs for QUIC (built-in roots only),
 # so `just brave` pins the cert's SPKI for the dev loop. Production uses a
 # publicly-trusted certificate (docs/ops/README.md), which needs neither.
+# Everything here is @-silenced on purpose: `just spki` captures stdout, so
+# any noise here would corrupt the base64 it substitutes into brave's flag.
 certs:
-	mkdir -p certs
-	test -f certs/ca.pem -a -f certs/ca-key.pem || \
+	@mkdir -p certs
+	@test -f certs/ca.pem -a -f certs/ca-key.pem || \
 	  openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 \
 	    -sha256 -days 3650 -nodes -keyout certs/ca-key.pem -out certs/ca.pem \
 	    -subj "/CN=campfire-dev-ca" \
 	    -addext "basicConstraints=critical,CA:TRUE" \
 	    -addext "keyUsage=critical,keyCertSign,cRLSign"
-	if [ ! -f certs/cert.pem -o ! -f certs/key.pem ]; then \
+	@if [ ! -f certs/cert.pem -o ! -f certs/key.pem ]; then \
 	  openssl req -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 \
 	    -sha256 -nodes -keyout certs/key.pem -out certs/req.csr \
 	    -subj "/CN=localhost" && \
@@ -122,7 +124,6 @@ certs:
 	  openssl x509 -req -in certs/req.csr -CA certs/ca.pem \
 	    -CAkey certs/ca-key.pem -CAcreateserial -days 3650 -sha256 \
 	    -extfile certs/san.ext -out certs/cert.pem; fi
-	@echo "dev certs ready in certs/"
 
 # The cert's SPKI sha-256 (base64) — what --ignore-certificate-errors-spki-list wants.
 spki: certs
@@ -141,18 +142,21 @@ spki: certs
 #
 # IPv4 on purpose: Chrome prefers ::1 for `localhost`, and rootless podman's
 # pasta network stack does not forward IPv6 UDP to the container (TCP only),
-# so QUIC to [::1] dies with ERR_QUIC_PROTOCOL_ERROR while 127.0.0.1 works.
-# The SPKI pin is hostname-independent, so 127.0.0.1 needs nothing extra.
+# so QUIC to [::1] dies with ERR_QUIC_PROTOCOL_ERROR while localhost works.
+# The SPKI pin is hostname-independent, so localhost needs nothing extra.
 brave port="8443" *args: spki
-	brave --origin-to-force-quic-on=127.0.0.1:{{port}} \
+	brave --origin-to-force-quic-on=localhost:{{port}} \
 	  --ignore-certificate-errors-spki-list="$(just spki)" \
-	  "https://127.0.0.1:{{port}}/" {{args}}
+	  "https://localhost:{{port}}/" {{args}}
 
 # Install the dev CA into the NSS trust store Brave/Chrome/Chromium use
 # (~/.pki/nssdb). This removes the TCP interstitial; it does NOT enable
 # HTTP/3 (see `brave`). Firefox keeps its own store; import there via
 # Settings → Privacy → Certificates → View Certificates → Authorities.
 trust: certs
+	# Idempotent after a cert rotation: drop the old CA (same nickname)
+	# before importing the current one.
+	certutil -d sql:$HOME/.pki/nssdb -D -n "campfire-dev-ca" 2>/dev/null || true
 	certutil -d sql:$HOME/.pki/nssdb -A -t "C,," -n "campfire-dev-ca" -i certs/ca.pem
 	@echo "campfire-dev-ca trusted for Brave/Chrome/Chromium — restart the browser fully"
 
