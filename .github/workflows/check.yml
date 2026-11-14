@@ -1,7 +1,8 @@
-# PR / main checks. Each job does nothing but set up its toolchain and run
-# one `just` target — all logic lives in the justfile (`ci-rust`,
-# `ci-client`, `ci-e2e`). The `docker` workflow only builds + pushes on
-# version tags; this catches regressions before a tag.
+# PR / main checks. The job does nothing but set up its toolchain and run
+# one `just` target — all logic lives in the justfile (`ci`; the client
+# builds first because the server embeds client/dist at compile time).
+# The `docker` workflow only builds + pushes on version tags; this catches
+# regressions before a tag.
 
 name: check
 
@@ -15,18 +16,7 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  rust:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: just
-
-      - run: just ci-rust
-
-  client:
+  check:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -39,23 +29,4 @@ jobs:
         with:
           tool: just
 
-      - run: just ci-client
-
-  e2e:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: just
-
-      - run: just ci-e2e
-
-      - name: server log (on failure)
-        if: failure()
-        run: cat server.log || true
+      - run: just ci

@@ -25,15 +25,16 @@ check: fmt lint test
 fmt-check:
 	cargo fmt --all --check
 
-# Rust gate: format, then lint and tests.
-ci-rust: fmt-check lint test
-
-# Client gate: deps, eslint, vitest, then tsc + vite build.
-ci-client:
+# The full gate: the client builds first (the server embeds client/dist at
+# compile time), then the client checks and the Rust checks.
+ci:
 	cd client && npm ci
 	cd client && npm run lint
 	cd client && npm run test
 	cd client && npm run build
+	cargo fmt --all --check
+	cargo clippy --workspace --all-targets -- -D warnings
+	cargo test --workspace
 
 # Headless e2e gate: build the client with its e2e debug hooks (C14) and
 # the release server that embeds it, mint dev certs, start the server and
