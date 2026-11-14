@@ -318,21 +318,21 @@ body {
 }
 
 /* Character picker: canvas thumbnails of each character's idle frame
- * (south), tinted with the draft color. Six columns fit the popover's
- * 240 px (padding included); scrolls vertically only. */
+ * (south), tinted with the draft color. Four columns of the 2×-scaled
+ * thumbnails fit the popover's 240 px; scrolls vertically only. */
 .profile-characters {
   display: grid;
-  grid-template-columns: repeat(6, 26px);
+  grid-template-columns: repeat(4, 46px);
   justify-content: start;
   gap: 0.3rem;
-  max-height: 9.5rem;
+  max-height: 11.5rem;
   overflow-y: auto;
   overflow-x: hidden;
 }
 
 .profile-characters .swatch.character {
-  width: 26px;
-  height: 38px;
+  width: 46px;
+  height: 70px;
   border-radius: 5px;
   border: 2px solid transparent;
   cursor: pointer;
@@ -349,6 +349,8 @@ body {
 
 .profile-characters .character-cell {
   image-rendering: pixelated;
+  width: 40px;
+  height: 64px;
 }
 
 .profile-status-rows {
