@@ -12,10 +12,17 @@ vi.mock("pixi.js", () => {
       return this;
     }
   }
+  class Texture {}
+  class Sprite {}
+  class Rectangle {}
+  const Assets = { load: async () => undefined };
   class Container {
     position = new Vec();
     visible = true;
+    zIndex = 0;
+    sortableChildren = false;
     addChild(..._children: unknown[]): void {}
+    addChildAt(..._children: unknown[]): void {}
     removeChild(..._children: unknown[]): void {}
     destroy(_options?: unknown): void {}
   }
@@ -45,7 +52,7 @@ vi.mock("pixi.js", () => {
       this.text = options?.text ?? "";
     }
   }
-  return { Container, Graphics, Text };
+  return { Container, Graphics, Text, Sprite, Texture, Rectangle, Assets };
 });
 
 import { Container } from "pixi.js";

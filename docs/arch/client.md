@@ -25,6 +25,12 @@ not the picture. Tiled **group layers** are flattened in draw order.
 - Local movement (WASD/arrows) with client-side prediction; sends at 15 Hz
   while moving, 2 Hz while idle. Remote avatars are interpolated between the
   server's 50 ms batched datagrams; name labels follow.
+- **Avatars are pixel-art characters** (`world/characters.ts` + 40 sprite
+  sheets in `client/public/characters/` — Jephed / Game Between The Lines,
+  see the `CREDITS.md` there): each user gets a stable variant (a hash of
+  their room-visible name) with a 4-direction 3-frame walk cycle; the
+  user's profile color is baked into the outfit band of their frames. A
+  plain circle renders until the sheets load, or if they fail.
 - **Click-to-walk**: a click routes the avatar along the shortest walkable
   path (BFS over the collision grid); keyboard input cancels.
 - **Zoom**: scroll-wheel scaling of the map canvas, camera keeping the local

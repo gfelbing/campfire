@@ -98,6 +98,14 @@ starter kit — is documented in [`docs/ops/maps.md`](docs/ops/maps.md).
 | [`docs/ops/`](docs/ops/README.md) | deployment and administration: Docker/Helm, TLS, auth, metrics, **building maps** |
 | [`CHANGELOG.md`](CHANGELOG.md) | release history |
 
+## Credits
+
+The avatar sprites are from the free
+[2D Top Down Pixel Art Characters](https://gamebetweenthelines.itch.io/top-down-pixel-art-characters)
+pack — **Jephed, Game Between The Lines, https://gamebetweenthelines.com/**
+(free for commercial and non-commercial use; see
+[`client/public/characters/CREDITS.md`](client/public/characters/CREDITS.md)).
+
 ## License
 
 Campfire is licensed under the **GNU Affero General Public License v3** with

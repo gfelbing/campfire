@@ -1,9 +1,18 @@
 // Avatars: our own + everyone else's, with dead-reckoning interpolation of
 // remote positions between 15 Hz datagram snapshots (docs/arch/client.md).
 
-import { Container, Graphics, Text } from "pixi.js";
+import { Container, Graphics, Sprite, Text } from "pixi.js";
 
 import type { Dir, OwnStatus, UserBrief, UserState } from "../net/types";
+import {
+  CELL_H,
+  IDLE_COL,
+  WALK_CYCLE,
+  WALK_FRAME_MS,
+  dirRow,
+  tintedFrames,
+  variantFor,
+} from "./characters";
 
 const SNAP_MAX_LAG_MS = 150;
 
@@ -24,6 +33,13 @@ export class AvatarView {
   readonly container = new Container();
   private body: Graphics;
   private facing: Graphics;
+  /** The pixel-art sprite (a framed cell of the character sheet); null
+   *  until the sheets are loaded — the circle below is the fallback. */
+  private sprite: Sprite | null = null;
+  private variant = -1;
+  private color = 0;
+  private dir: Dir = "s";
+  private moving = false;
   label: Text;
   /** 🎧 shown above the label while the user is in a call (docs/arch/protocol.md). */
   private inCallBadge: Text;
@@ -48,7 +64,9 @@ export class AvatarView {
       },
     });
     this.label.anchor.set(0.5, 1);
-    this.label.y = -18;
+    // Above the sprite's head (its top sits at −CELL_H/2), with the call
+    // and dnd badges stacked over it.
+    this.label.y = -24;
     this.inCallBadge = new Text({
       text: "🎧",
       style: {
@@ -56,7 +74,7 @@ export class AvatarView {
       },
     });
     this.inCallBadge.anchor.set(0.5, 1);
-    this.inCallBadge.y = -30;
+    this.inCallBadge.y = -38;
     this.inCallBadge.visible = false;
     this.dndBadge = new Text({
       text: "🔇",
@@ -65,7 +83,7 @@ export class AvatarView {
       },
     });
     this.dndBadge.anchor.set(0.5, 1);
-    this.dndBadge.y = -42;
+    this.dndBadge.y = -52;
     this.dndBadge.visible = false;
     this.statusDot = new Graphics();
     this.container.addChild(
@@ -81,6 +99,29 @@ export class AvatarView {
     this.setStatus("online");
   }
 
+  /** Attach the pixel-art sprite for `variant` (a character sheet index):
+   *  replaces the fallback circle once the character sheets are loaded. */
+  setVariant(variant: number): void {
+    if (variant === this.variant) return;
+    this.variant = variant;
+    if (!this.sprite) {
+      const grid = tintedFrames(variant, this.color);
+      if (grid.length === 0) return; // sheets not loaded (or failed)
+      this.sprite = new Sprite();
+      // The feet stand on the avatar's tile: the cell bottom sits at the
+      // tile's bottom edge (the position is the tile center, and the cell
+      // height equals the tile size).
+      this.sprite.anchor.set(0.5, 1);
+      this.sprite.y = CELL_H / 2;
+      this.container.addChildAt(this.sprite, 0);
+      // The circle fallback (and its facing dot) only render when the
+      // sheets are missing.
+      this.body.visible = false;
+      this.facing.visible = false;
+    }
+    this.refreshFrame(performance.now());
+  }
+
   setName(name: string): void {
     this.label.text = name;
     this.layoutStatusDot();
@@ -94,7 +135,8 @@ export class AvatarView {
     this.layoutStatusDot();
   }
 
-  /** The dot sits just left of the (name-width-dependent) label. */
+  /** The dot sits just left of the (name-width-dependent) label, on the
+   *  label's line. */
   private layoutStatusDot(): void {
     this.statusDot.position.set(-this.label.width / 2 - 5, -24);
   }
@@ -110,20 +152,35 @@ export class AvatarView {
   }
 
   setColor(color: number): void {
+    this.color = color;
     this.body
       .clear()
       .circle(0, 0, 10)
       .fill({ color, alpha: 0.95 })
       .stroke({ width: 2, color: 0x14161a, alpha: 0.6 });
+    if (this.sprite) this.refreshFrame(performance.now());
   }
 
   setDir(dir: Dir): void {
-    const dx = dir === "e" ? 1 : dir === "w" ? -1 : 0;
-    const dy = dir === "s" ? 1 : dir === "n" ? -1 : 0;
-    this.facing
-      .clear()
-      .circle(dx * 6, dy * 6, 2.5)
-      .fill({ color: 0xffffff, alpha: 0.9 });
+    this.dir = dir;
+    this.refreshFrame(performance.now());
+  }
+
+  /** The cell for the current direction and walk phase: one of the
+   *  character sheet's direction rows (with the outfit recolored to the
+   *  user's color), cycling the 3-frame walk while moving, the neutral
+   *  middle cell while idle. */
+  private refreshFrame(nowMs: number): void {
+    if (!this.sprite) return;
+    const grid = tintedFrames(this.variant, this.color);
+    const row = grid[dirRow(this.dir)];
+    if (!row) return;
+    const col = this.moving
+      ? WALK_CYCLE[Math.floor(nowMs / WALK_FRAME_MS) % WALK_CYCLE.length]
+      : IDLE_COL;
+    const tex = row[col];
+    if (!tex) return;
+    this.sprite.texture = tex;
   }
 
   /** Set the un-bobbed position in pixels. */
@@ -135,6 +192,8 @@ export class AvatarView {
 
   /** Subtle bob while moving. */
   setMoving(moving: boolean, nowMs: number): void {
+    this.moving = moving;
+    this.refreshFrame(nowMs);
     this.bobbing = moving;
     const bob = moving ? Math.sin(nowMs / 90) * 1.2 : 0;
     this.container.position.set(this.baseX, this.baseY + bob);
@@ -143,6 +202,8 @@ export class AvatarView {
   private apply(): void {
     const bob = this.bobbing ? Math.sin(performance.now() / 90) * 1.2 : 0;
     this.container.position.set(this.baseX, this.baseY + bob);
+    // Overlapping avatars sort by their feet: the lower one draws last.
+    this.container.zIndex = this.baseY;
   }
 }
 
@@ -197,6 +258,9 @@ export class AvatarManager {
 
   constructor(layer: Container) {
     this.layer = layer;
+    // Overlapping avatars sort by depth (the container's `zIndex`, set to
+    // the un-bobbed y in `AvatarView.apply`).
+    layer.sortableChildren = true;
   }
 
   /** Replace the remote set with the hello snapshot (excluding ourself). */
@@ -223,6 +287,7 @@ export class AvatarManager {
         const view = new AvatarView(u.name, color);
         view.setDir(u.d);
         view.setStatus(u.status ?? "online");
+        view.setVariant(variantFor(u.name));
         this.layer.addChild(view.container);
         this.remotes.set(u.id, {
           id: u.id,
@@ -243,6 +308,7 @@ export class AvatarManager {
     const color = colorOf(user);
     const view = new AvatarView(user.name, color);
     view.setStatus(user.status ?? "online");
+    view.setVariant(variantFor(user.name));
     this.layer.addChild(view.container);
     this.remotes.set(user.id, {
       id: user.id,

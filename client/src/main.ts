@@ -14,6 +14,7 @@ import { createPresence } from "./ui/presence";
 import { createSidebar } from "./ui/sidebar";
 import { isWalkablePoint, parseMap, tileAt, zoneContains, type MapData, type Zone } from "./world/mapdata";
 import { createWorld, drawBubble, followCamera } from "./world/render";
+import { variantFor } from "./world/characters";
 
 declare global {
   interface Window {
@@ -213,6 +214,9 @@ async function main(): Promise<void> {
       roster.clear();
       for (const u of h.users) roster.set(u.id, u);
       world.local.setDir(dir);
+      // Our own pixel-art variant keys off our room-visible name, like
+      // everyone else's (the id is random per session).
+      world.local.setVariant(variantFor(me?.name ?? opts.name));
       world.manager.hello(h.users, h.you);
       // Presence dots on the map: every rostered avatar (ours included).
       for (const u of h.users) world.manager.setStatus(u.id, u.status ?? "online");
