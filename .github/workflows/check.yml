@@ -20,11 +20,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: install just
-        run: |
-          curl --proto '=https' --tlsv1.2 -sSfL \
-            https://github.com/casey/just/releases/latest/download/just-linux-x86_64 \
-            -o just && chmod +x just && sudo mv just /usr/local/bin/
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just
 
       - run: just ci-rust
 
@@ -37,11 +35,9 @@ jobs:
         with:
           node-version: 22
 
-      - name: install just
-        run: |
-          curl --proto '=https' --tlsv1.2 -sSfL \
-            https://github.com/casey/just/releases/latest/download/just-linux-x86_64 \
-            -o just && chmod +x just && sudo mv just /usr/local/bin/
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just
 
       - run: just ci-client
 
@@ -54,11 +50,9 @@ jobs:
         with:
           node-version: 22
 
-      - name: install just
-        run: |
-          curl --proto '=https' --tlsv1.2 -sSfL \
-            https://github.com/casey/just/releases/latest/download/just-linux-x86_64 \
-            -o just && chmod +x just && sudo mv just /usr/local/bin/
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just
 
       - run: just ci-e2e
 
