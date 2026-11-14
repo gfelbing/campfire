@@ -29,6 +29,11 @@ const EXTRAPOLATE_MS = 250;
 /** Snapshot history depth: ~10 ≈ 1 s at the 15 Hz send rate. */
 const SNAP_HISTORY = 10;
 
+/** The sprites render at 2× (a 20×32 cell becomes 40×64 px — the
+ *  WorkAdventure-like two-tiles-tall presence on the 32 px map); the
+ *  nearest-scaled pixels stay crisp. */
+const SPRITE_SCALE = 2;
+
 export class AvatarView {
   readonly container = new Container();
   private body: Graphics;
@@ -64,9 +69,9 @@ export class AvatarView {
       },
     });
     this.label.anchor.set(0.5, 1);
-    // Above the sprite's head (its top sits at −CELL_H/2), with the call
-    // and dnd badges stacked over it.
-    this.label.y = -24;
+    // Above the sprite's head (its top sits at −CELL_H/2·SPRITE_SCALE),
+    // with the call and dnd badges stacked over it.
+    this.label.y = -24 * SPRITE_SCALE;
     this.inCallBadge = new Text({
       text: "🎧",
       style: {
@@ -74,7 +79,7 @@ export class AvatarView {
       },
     });
     this.inCallBadge.anchor.set(0.5, 1);
-    this.inCallBadge.y = -38;
+    this.inCallBadge.y = -38 * SPRITE_SCALE;
     this.inCallBadge.visible = false;
     this.dndBadge = new Text({
       text: "🔇",
@@ -83,7 +88,7 @@ export class AvatarView {
       },
     });
     this.dndBadge.anchor.set(0.5, 1);
-    this.dndBadge.y = -52;
+    this.dndBadge.y = -52 * SPRITE_SCALE;
     this.dndBadge.visible = false;
     this.statusDot = new Graphics();
     this.container.addChild(
@@ -110,8 +115,10 @@ export class AvatarView {
       this.sprite = new Sprite();
       // The feet stand on the avatar's tile: the cell bottom sits at the
       // tile's bottom edge (the position is the tile center, and the cell
-      // height equals the tile size).
+      // height equals the tile size). Scaled up (`SPRITE_SCALE`), the
+      // anchor keeps the feet planted where they were.
       this.sprite.anchor.set(0.5, 1);
+      this.sprite.scale.set(SPRITE_SCALE);
       this.sprite.y = CELL_H / 2;
       this.container.addChildAt(this.sprite, 0);
       // The circle fallback (and its facing dot) only render when the
@@ -138,7 +145,7 @@ export class AvatarView {
   /** The dot sits just left of the (name-width-dependent) label, on the
    *  label's line. */
   private layoutStatusDot(): void {
-    this.statusDot.position.set(-this.label.width / 2 - 5, -24);
+    this.statusDot.position.set(-this.label.width / 2 - 5, -24 * SPRITE_SCALE);
   }
 
   /** Toggle the headphone badge (call state is room-wide, docs/arch/protocol.md). */

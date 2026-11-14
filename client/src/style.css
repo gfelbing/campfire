@@ -318,13 +318,16 @@ body {
 }
 
 /* Character picker: canvas thumbnails of each character's idle frame
- * (south), tinted with the draft color. Grid of ~8 per row. */
+ * (south), tinted with the draft color. Six columns fit the popover's
+ * 240 px (padding included); scrolls vertically only. */
 .profile-characters {
   display: grid;
-  grid-template-columns: repeat(8, 26px);
+  grid-template-columns: repeat(6, 26px);
+  justify-content: start;
   gap: 0.3rem;
   max-height: 9.5rem;
   overflow-y: auto;
+  overflow-x: hidden;
 }
 
 .profile-characters .swatch.character {
