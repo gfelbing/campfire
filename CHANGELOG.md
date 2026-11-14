@@ -4,6 +4,39 @@ All notable releases of campfire. Versions follow calendar-agnostic
 semver; releases are cut by tagging `vX.Y.Z` (the Docker image is built
 and pushed to GHCR on each tag).
 
+## [0.0.11] — 2026-11-14
+
+The process release: silent zones hush presence, the dev loop gets
+QUIC-proof cert handling, and CI shrinks to one `just` target per job.
+
+### Added
+
+- Flame favicon: an inline SVG in the accent palette (no asset fetch).
+- Silent zones set presence to dnd: occupants show the 🔇 do-not-disturb
+  badge (was `away`), so nobody expects a call answer from inside one.
+
+### Fixed
+
+- Hang up no longer re-pulls you into the bubble you just left: a leaver
+  standing inside the bubble radius armed the proximity engine again on
+  the next tick (roster broadcast plus a fresh call membership). Hang-up
+  now arms the 2 s re-entry grace, and the bubble-join paths honor it.
+- `just brave` failed the QUIC handshake: `just spki` captured the certs
+  recipe's command echo into the SPKI flag, so the pin was garbage. The
+  certs recipe is silent now, and `just trust` drops a stale CA nickname
+  first, so it stays idempotent across cert rotations.
+
+### Changed
+
+- The check workflow's jobs do nothing but set up a toolchain and run one
+  `just` target (`ci`, `ci-e2e`); all logic lives in the justfile. The
+  rust and client gates merged into one job (the server embeds
+  client/dist at compile time), just installs via `taiki-e/install-action`
+  (just 1.59 dropped the bare binary asset), and the e2e driver runs the
+  two pages in separate browser contexts with the dev cert's SPKI pinned
+  for QUIC.
+- Docs restructured into a user/dev/ops split.
+
 ## [0.0.10] — 2026-11-13
 
 The presence release: chat reaches you even with the sidebar folded,
