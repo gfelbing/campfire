@@ -18,6 +18,59 @@ test:
 check: fmt lint test
 	@echo "all checks passed"
 
+# --- CI gates (the GitHub workflows run exactly one of these each) -----------
+
+# The format gate: checks instead of writing (a plain `cargo fmt` would
+# modify files and never fail).
+fmt-check:
+	cargo fmt --all --check
+
+# Rust gate: format, then lint and tests.
+ci-rust: fmt-check lint test
+
+# Client gate: deps, eslint, vitest, then tsc + vite build.
+ci-client:
+	cd client && npm ci
+	cd client && npm run lint
+	cd client && npm run test
+	cd client && npm run build
+
+# Headless e2e gate: build the client with its e2e debug hooks (C14) and
+# the release server that embeds it, mint dev certs, start the server and
+# run the browser suite against it. Installs a Chrome when the runner has
+# none (the dev loop uses Brave; here the first Chrome/Chromium wins).
+ci-e2e: certs
+	#!/usr/bin/env bash
+	set -euxo pipefail
+	BROWSER="$(command -v google-chrome-stable \
+	  || command -v google-chrome \
+	  || command -v chromium \
+	  || command -v chromium-browser || true)"
+	if [ -z "$BROWSER" ]; then
+	  curl -sSLo /tmp/chrome.deb \
+	    https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
+	  sudo apt-get install -y /tmp/chrome.deb
+	  BROWSER="$(command -v google-chrome-stable)"
+	fi
+	npm --prefix client ci
+	npm --prefix client run build:e2e
+	cargo build --release -p campfire-server
+	npm --prefix tools/e2e ci
+	./target/release/campfire --listen "[::]:8443" \
+	  --cert certs/cert.pem --key certs/key.pem > server.log 2>&1 &
+	SERVER_PID=$!
+	trap 'kill "$SERVER_PID" 2>/dev/null' EXIT
+	for i in $(seq 1 30); do
+	  if curl -sk -o /dev/null https://localhost:8443/healthz; then break; fi
+	  if [ "$i" -eq 30 ]; then
+	    echo "server did not come up:"
+	    cat server.log
+	    exit 1
+	  fi
+	  sleep 1
+	done
+	node tools/e2e/e2e.js --browser "$BROWSER"
+
 # --- web client (Phase 4) ---------------------------------------------------
 
 # Install client deps + build into client/dist (embedded into the binary).

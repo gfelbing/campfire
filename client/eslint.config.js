@@ -13,5 +13,17 @@ export default tseslint.config(
     languageOptions: {
       globals: { ...globals.browser },
     },
+    rules: {
+      // The `_` prefix marks intentionally unused parameters (test stubs
+      // keep a call signature while ignoring the argument).
+      "@typescript-eslint/no-unused-vars": [
+        "error",
+        {
+          argsIgnorePattern: "^_",
+          varsIgnorePattern: "^_",
+          caughtErrorsIgnorePattern: "^_",
+        },
+      ],
+    },
   },
 );

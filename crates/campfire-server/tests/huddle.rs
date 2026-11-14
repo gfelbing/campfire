@@ -184,16 +184,25 @@ async fn assert_quiet(c: &mut TestClient, window: Duration, what: &str) {
 }
 
 async fn as_call_leave(c: &mut TestClient) -> String {
-    match c.recv().await {
-        ServerMsg::CallLeave { id, .. } => id,
-        m => panic!("expected call_leave, got {m:?}"),
+    loop {
+        match c.recv().await {
+            // Roster broadcasts (`CallStart`) are presence noise: a bubble
+            // can reform or regrow between two leaves (spawn-sitters pair up
+            // again), and its broadcast may land in any queue.
+            ServerMsg::CallStart { .. } => continue,
+            ServerMsg::CallLeave { id, .. } => return id,
+            m => panic!("expected call_leave, got {m:?}"),
+        }
     }
 }
 
 async fn as_call_end(c: &mut TestClient) -> String {
-    match c.recv().await {
-        ServerMsg::CallEnd { reason, .. } => reason,
-        m => panic!("expected call_end, got {m:?}"),
+    loop {
+        match c.recv().await {
+            ServerMsg::CallStart { .. } => continue, // roster noise, see as_call_leave
+            ServerMsg::CallEnd { reason, .. } => return reason,
+            m => panic!("expected call_end, got {m:?}"),
+        }
     }
 }
 

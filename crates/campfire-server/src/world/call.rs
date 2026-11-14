@@ -117,14 +117,14 @@ mod tests {
                     id: "u_aaa".into(),
                     name: "alice".into(),
                     color: None,
-                        status: None,
-                                        },
+                    status: None,
+                },
                 UserBrief {
                     id: "u_bbb".into(),
                     name: "bob".into(),
                     color: None,
-                        status: None,
-                                        },
+                    status: None,
+                },
             ]
         );
     }

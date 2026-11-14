@@ -22,8 +22,8 @@
 //! the server handshake). The blast radius is one call; the client
 //! subscribes by roster id.
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use axum::Extension;

@@ -64,8 +64,7 @@ pub struct AppState {
     /// a short-lived single-use ticket over an authenticated HTTP request
     /// and presents it as `?ticket=` on the `/wt` CONNECT. ticket →
     /// (forced name, minted at).
-    pub wt_tickets:
-        std::sync::Arc<Mutex<HashMap<String, (String, std::time::Instant)>>>,
+    pub wt_tickets: std::sync::Arc<Mutex<HashMap<String, (String, std::time::Instant)>>>,
     /// Live SSE fallback sessions, keyed by their per-session secret (S1).
     /// State-owned, not process-global (Q1).
     pub fallback: FallbackMap,
@@ -315,7 +314,10 @@ const WT_TICKET_TTL: std::time::Duration = std::time::Duration::from_secs(60);
 /// WebTransport handshake carries no cookies (Chromium attaches none to
 /// the extended CONNECT, issues.md #4), so the client fetches this first
 /// and passes the ticket as `?ticket=` on the `/wt` CONNECT.
-async fn wt_ticket(State(state): State<AppState>, headers: HeaderMap) -> Result<Json<serde_json::Value>, StatusCode> {
+async fn wt_ticket(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, StatusCode> {
     let auth = state.auth.as_ref().ok_or(StatusCode::NOT_FOUND)?;
     let cookie = auth_cookie(&headers).ok_or(StatusCode::UNAUTHORIZED)?;
     let identity = auth
@@ -426,7 +428,11 @@ async fn auth_callback(State(state): State<AppState>, Query(q): Query<CallbackQu
             // whose only trace was this log line. The reason is shown
             // as-is: the audience is the operator, who needs it to fix
             // the config.
-            let reason = err.to_string().replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
+            let reason = err
+                .to_string()
+                .replace('&', "&amp;")
+                .replace('<', "&lt;")
+                .replace('>', "&gt;");
             (
                 StatusCode::OK,
                 [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
@@ -563,43 +569,39 @@ async fn fallback_event(
             // datagram path (movement is the one thing it cannot carry).
             let (dtx, _dtx_rx) = mpsc::unbounded_channel::<Vec<u8>>();
             let session_id = state.world.next_session_id();
-            let user_id =
-                match state
-                    .world
-                    .join(
-                        &room,
-                        &name,
-                        avatar,
-                        token.as_deref(),
-                        campfire_protocol::Status::default(),
-                        session_id,
-                        tx,
-                        dtx,
-                    )
-                {
-                    Ok(joined) => {
-                        // The unbounded channel buffers the hello until the SSE
-                        // stream claims the receiver.
-                        let _ = hello_tx.send(ServerMsg::Hello {
-                            you: joined.you.clone(),
-                            token: joined.token,
-                            room: room.clone(),
-                            users: joined.users,
-                            chat: joined.chat,
-                            call_chat: joined.call_chat,
-                            call: joined.call,
-                            ticket: joined.ticket,
-                        });
-                        joined.you
-                    }
-                    Err(e) => {
-                        let code = match e {
-                            crate::world::JoinError::RoomFull => ErrorCode::RoomFull,
-                            crate::world::JoinError::UnknownRoom => ErrorCode::UnknownRoom,
-                        };
-                        return Err(err(code));
-                    }
-                };
+            let user_id = match state.world.join(
+                &room,
+                &name,
+                avatar,
+                token.as_deref(),
+                campfire_protocol::Status::default(),
+                session_id,
+                tx,
+                dtx,
+            ) {
+                Ok(joined) => {
+                    // The unbounded channel buffers the hello until the SSE
+                    // stream claims the receiver.
+                    let _ = hello_tx.send(ServerMsg::Hello {
+                        you: joined.you.clone(),
+                        token: joined.token,
+                        room: room.clone(),
+                        users: joined.users,
+                        chat: joined.chat,
+                        call_chat: joined.call_chat,
+                        call: joined.call,
+                        ticket: joined.ticket,
+                    });
+                    joined.you
+                }
+                Err(e) => {
+                    let code = match e {
+                        crate::world::JoinError::RoomFull => ErrorCode::RoomFull,
+                        crate::world::JoinError::UnknownRoom => ErrorCode::UnknownRoom,
+                    };
+                    return Err(err(code));
+                }
+            };
             // The session's relay identity is a per-session secret, never
             // the user id (S1: the id is broadcast to the room and would let
             // any member impersonate this session via POST /rt/event).

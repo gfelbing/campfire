@@ -24,8 +24,8 @@ use campfire_protocol::{
     ChatMsg, ClientMsg, ErrorCode, MovementBatch, ServerMsg, from_line, to_line,
 };
 use h3_axum::WebTransportSession;
-use std::collections::HashMap;
 use h3_webtransport::server::AcceptedBi;
+use std::collections::HashMap;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};

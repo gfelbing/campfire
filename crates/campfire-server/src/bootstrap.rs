@@ -154,7 +154,8 @@ port is not reachable from your browser/network.</p>\
   try { sessionStorage.setItem(KEY, JSON.stringify({ n: n + 1, t: Date.now() })); } catch (e) {}\
   setTimeout(function () { location.replace(location.href); }, WAIT);\
 })();\
-</script>".to_owned();
+</script>"
+            .to_owned();
         (
             format!(
                 "HTTP/1.1 200 OK\r\nAlt-Svc: {alt}\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n",

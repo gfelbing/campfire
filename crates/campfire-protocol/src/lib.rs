@@ -30,18 +30,13 @@ pub enum Dir {
 
 /// A user's presence status (the profile menu): `online` (normal calls with
 /// mic + camera), `away` (calls auto-join muted) or `dnd` (no call starts).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Status {
+    #[default]
     Online,
     Away,
     Dnd,
-}
-
-impl Default for Status {
-    fn default() -> Self {
-        Self::Online
-    }
 }
 
 /// Visual customization chosen by the user.
@@ -420,7 +415,9 @@ mod tests {
 
     #[test]
     fn status_roundtrip() {
-        let msg = ClientMsg::Status { status: Status::Dnd };
+        let msg = ClientMsg::Status {
+            status: Status::Dnd,
+        };
         let line = to_line(&msg);
         assert!(line.contains(r#""status":"dnd""#));
         assert_eq!(from_line::<ClientMsg>(&line).unwrap(), msg);

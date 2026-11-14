@@ -20,6 +20,7 @@ vi.mock("pixi.js", () => {
     destroy(_options?: unknown): void {}
   }
   class Graphics {
+    position = new Vec();
     clear(): this {
       return this;
     }
@@ -35,6 +36,8 @@ vi.mock("pixi.js", () => {
   }
   class Text {
     text: string;
+    /** Only read for layout (`layoutStatusDot`); never measured here. */
+    width = 0;
     y = 0;
     visible = true;
     anchor = new Vec();

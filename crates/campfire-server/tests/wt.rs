@@ -14,7 +14,8 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use campfire_protocol::{
-    ChatScope, ClientMsg, Dir, ErrorCode, MovementBatch, MovementEntry, ServerMsg, from_line, to_line,
+    ChatScope, ClientMsg, Dir, ErrorCode, MovementBatch, MovementEntry, ServerMsg, from_line,
+    to_line,
 };
 use tokio::io::AsyncWriteExt;
 use wtransport::Connection;
@@ -476,8 +477,16 @@ async fn movement_relay_invalid_move_rejected_chat_history() {
     );
 
     // Chat round-trip; the third joiner gets the history.
-    a.send(&ClientMsg::Chat { text: "hey".into(), scope: ChatScope::Room }).await;
-    b.send(&ClientMsg::Chat { text: "yo".into(), scope: ChatScope::Room }).await;
+    a.send(&ClientMsg::Chat {
+        text: "hey".into(),
+        scope: ChatScope::Room,
+    })
+    .await;
+    b.send(&ClientMsg::Chat {
+        text: "yo".into(),
+        scope: ChatScope::Room,
+    })
+    .await;
     let ServerMsg::Chat { from, text, .. } = a.recv().await else {
         panic!("expected chat echo at alice");
     };

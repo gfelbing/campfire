@@ -15,8 +15,7 @@ use std::time::{Duration, Instant};
 
 use campfire_protocol::{
     Avatar, ChatMsg, ChatScope, Dir, ErrorCode, MovementBatch, MovementEntry, ServerMsg, Status,
-    UserBrief,
-    UserState,
+    UserBrief, UserState,
 };
 use rand::RngCore;
 
@@ -90,10 +89,13 @@ struct Member {
     /// `bubble_off` (set on join/`ClientMsg::Status`, kept in sync with it),
     /// `away` is only a UI badge + the client's own muted auto-join.
     status: Status,
-    /// Set when a disconnected member re-enters via their token: exempts
-    /// them from the bubble-radius check for [`BUBBLE_RETURN_GRACE`] (the
-    /// restored position is often outside the radius, and the reconnect
-    /// promise is that call membership survives).
+    /// Set when a disconnected member re-enters via their token, or when a
+    /// member hangs up (`call_leave`): exempts them from the bubble-radius
+    /// check for [`BUBBLE_RETURN_GRACE`] (the restored position is often
+    /// outside the radius, and the reconnect promise is that call
+    /// membership survives) and keeps the bubble engine from pulling them
+    /// right back into a call they just hung up (they are usually still
+    /// standing inside the radius).
     reentered_at: Option<Instant>,
 }
 
@@ -778,13 +780,17 @@ impl World {
                     entry.chat.pop_front();
                 }
                 let wire = build(&msg);
-                for (_, m) in &entry.users {
+                for m in entry.users.values() {
                     let _ = m.tx.send(wire.clone());
                 }
             }
             ChatScope::Call => {
                 let call_participants = match call_containing(entry, &msg.from) {
-                    Some(ci) => entry.calls[ci].participants.keys().cloned().collect::<Vec<_>>(),
+                    Some(ci) => entry.calls[ci]
+                        .participants
+                        .keys()
+                        .cloned()
+                        .collect::<Vec<_>>(),
                     // Not in a call: degrade to the room chat.
                     None => {
                         let mut msg = msg;
@@ -794,7 +800,7 @@ impl World {
                             entry.chat.pop_front();
                         }
                         let wire = build(&msg);
-                        for (_, m) in &entry.users {
+                        for m in entry.users.values() {
                             let _ = m.tx.send(wire.clone());
                         }
                         return;
@@ -975,6 +981,12 @@ impl World {
             return Err(ErrorCode::CallNotAllowed);
         }
         let ended = leave_call(entry, from);
+        // The leaver usually still stands inside the bubble radius: give
+        // them the re-entry grace (see `reentered_at`) so the next tick
+        // does not pull them straight back into a call they just hung up.
+        if let Some(m) = entry.users.get_mut(from) {
+            m.reentered_at = Some(Instant::now());
+        }
         drop(rooms);
         if let Some(call_id) = ended {
             self.call_ended(call_id);
@@ -1259,6 +1271,7 @@ fn create_proximity_call(
         .filter(|(uid, m)| {
             !m.bubble_off
                 && m.gone_at.is_none()
+                && !recently_reentered(m)
                 && !in_any_call(entry, uid)
                 && !in_silent_zone(map, m.pos.0, m.pos.1)
         })
@@ -1300,7 +1313,11 @@ fn bubble_joins(world: &World, room: &str, entry: &mut Room, map: Option<&campfi
         let rect = zone_rect(map, &call.zone);
         let mut best: Option<(f32, String)> = None;
         for (uid, m) in &entry.users {
-            if m.bubble_off || m.gone_at.is_some() || call.contains(uid) || in_any_call(entry, uid)
+            if m.bubble_off
+                || m.gone_at.is_some()
+                || recently_reentered(m)
+                || call.contains(uid)
+                || in_any_call(entry, uid)
             {
                 continue;
             }
@@ -1381,6 +1398,13 @@ fn broadcast_call_start(world: &World, room: &str, entry: &Room, call: &call::Ca
             ticket,
         });
     }
+}
+
+/// True when `m` is inside the [`BUBBLE_RETURN_GRACE`] (reconnect re-entry
+/// or a hang-up): the bubble engine leaves them alone until it expires.
+fn recently_reentered(m: &Member) -> bool {
+    m.reentered_at
+        .is_some_and(|t| Instant::now().duration_since(t) < BUBBLE_RETURN_GRACE)
 }
 
 /// Euclidean distance in tile units.
@@ -1614,7 +1638,7 @@ mod tests {
                 None,
                 None,
                 Status::Online,
-                                a_session,
+                a_session,
                 tx_a,
                 dtx_a,
             )
@@ -1627,7 +1651,7 @@ mod tests {
                 None,
                 None,
                 Status::Online,
-                                b_session,
+                b_session,
                 tx_b,
                 dtx_b,
             )
@@ -1660,7 +1684,7 @@ mod tests {
                 None,
                 None,
                 Status::Online,
-                                world.next_session_id(),
+                world.next_session_id(),
                 tx,
                 dtx
             ),
@@ -1682,7 +1706,7 @@ mod tests {
                 None,
                 None,
                 Status::Online,
-                                world.next_session_id(),
+                world.next_session_id(),
                 tx,
                 dtx,
             )
@@ -1779,7 +1803,7 @@ mod tests {
                 None,
                 None,
                 Status::Online,
-                                world.next_session_id(),
+                world.next_session_id(),
                 tx_a,
                 dtx_a,
             )
@@ -1791,7 +1815,7 @@ mod tests {
                 None,
                 None,
                 Status::Online,
-                                world.next_session_id(),
+                world.next_session_id(),
                 tx_b,
                 dtx_b,
             )
@@ -1865,7 +1889,7 @@ mod tests {
                 None,
                 None,
                 Status::Online,
-                                world.next_session_id(),
+                world.next_session_id(),
                 tx_a,
                 dtx_a,
             )
@@ -1900,7 +1924,7 @@ mod tests {
                 None,
                 None,
                 Status::Online,
-                                world.next_session_id(),
+                world.next_session_id(),
                 tx_a,
                 dtx_a,
             )
@@ -1918,7 +1942,7 @@ mod tests {
                 None,
                 None,
                 Status::Online,
-                                world.next_session_id(),
+                world.next_session_id(),
                 tx_b,
                 dtx_b,
             )
@@ -1949,7 +1973,7 @@ mod tests {
                 None,
                 None,
                 Status::Online,
-                                world.next_session_id(),
+                world.next_session_id(),
                 tx_a,
                 dtx_a,
             )
@@ -1961,7 +1985,7 @@ mod tests {
                 None,
                 None,
                 Status::Online,
-                                world.next_session_id(),
+                world.next_session_id(),
                 tx_b,
                 dtx_b,
             )
@@ -2002,7 +2026,7 @@ mod tests {
                 None,
                 None,
                 Status::Online,
-                                world.next_session_id(),
+                world.next_session_id(),
                 tx_a,
                 dtx_a,
             )
@@ -2014,7 +2038,7 @@ mod tests {
                 None,
                 None,
                 Status::Online,
-                                world.next_session_id(),
+                world.next_session_id(),
                 tx_b,
                 dtx_b,
             )
@@ -2046,7 +2070,16 @@ mod tests {
         let (dtx, drx) = datagram_channel();
         let session = world.next_session_id();
         let joined = world
-            .join(room, name, None, None, campfire_protocol::Status::Online, session, tx, dtx)
+            .join(
+                room,
+                name,
+                None,
+                None,
+                campfire_protocol::Status::Online,
+                session,
+                tx,
+                dtx,
+            )
             .unwrap();
         TestUser {
             id: joined.you,
@@ -2284,6 +2317,17 @@ mod tests {
 
         // Room leave mid-call: the survivor gets the call drop, the leaver
         // (gone) is not notified.
+        // a's hang-up armed the re-entry grace (the engine must not pull a
+        // standing leaver straight back into a call); the bubble reforms
+        // once the grace expires.
+        let cooldown_until = {
+            let rooms = world.rooms.lock().unwrap();
+            rooms["office"].users[&a.id].reentered_at.unwrap() + BUBBLE_RETURN_GRACE
+        };
+        while std::time::Instant::now() < cooldown_until {
+            world.tick();
+            std::thread::sleep(Duration::from_millis(20));
+        }
         world.tick(); // a + b are together again
         expect_start(&mut a);
         expect_start(&mut b);
@@ -2309,7 +2353,16 @@ mod tests {
         let (dtx, drx) = datagram_channel();
         let session = world.next_session_id();
         let joined = world
-            .join(room, name, None, token, campfire_protocol::Status::Online, session, tx, dtx)
+            .join(
+                room,
+                name,
+                None,
+                token,
+                campfire_protocol::Status::Online,
+                session,
+                tx,
+                dtx,
+            )
             .unwrap();
         (
             TestUser {
@@ -2399,7 +2452,16 @@ mod tests {
         let (dtx_b, mut dgr_b) = datagram_channel();
         let session_b = world.next_session_id();
         let joined_b = world
-            .join("office", "bob", None, None, campfire_protocol::Status::Online, session_b, channel().0, dtx_b)
+            .join(
+                "office",
+                "bob",
+                None,
+                None,
+                campfire_protocol::Status::Online,
+                session_b,
+                channel().0,
+                dtx_b,
+            )
             .unwrap();
         let b_id = joined_b.you;
         a.rx.try_recv().unwrap();
@@ -2543,7 +2605,16 @@ mod tests {
         let (dtx, _) = datagram_channel();
         let session = world.next_session_id();
         let joined = world
-            .join("office", "ALICE-2", None, Some(&a_token), campfire_protocol::Status::Online, session, tx, dtx)
+            .join(
+                "office",
+                "ALICE-2",
+                None,
+                Some(&a_token),
+                campfire_protocol::Status::Online,
+                session,
+                tx,
+                dtx,
+            )
             .unwrap();
         assert_eq!(joined.you, a.id);
         let me = joined

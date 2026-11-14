@@ -13,7 +13,9 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use bytes::Bytes;
-use campfire_protocol::{ChatScope, ClientMsg, Dir, MovementBatch, MovementEntry, ServerMsg, to_line};
+use campfire_protocol::{
+    ChatScope, ClientMsg, Dir, MovementBatch, MovementEntry, ServerMsg, to_line,
+};
 use tokio::io::AsyncWriteExt;
 use wtransport::Connection;
 

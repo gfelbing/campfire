@@ -94,7 +94,10 @@ async fn idp_authorize(
     q: axum::extract::Query<AuthorizeQuery>,
 ) -> (http::StatusCode, [(header::HeaderName, String); 1]) {
     let code = format!("code-{}", rand::random::<u128>());
-    idp.codes.lock().unwrap().insert(code.clone(), q.nonce.clone());
+    idp.codes
+        .lock()
+        .unwrap()
+        .insert(code.clone(), q.nonce.clone());
     (
         http::StatusCode::FOUND,
         [(
@@ -105,7 +108,9 @@ async fn idp_authorize(
 }
 
 async fn idp_jwks() -> axum::Json<serde_json::Value> {
-    axum::Json(serde_json::json!({ "keys": [serde_json::from_str::<serde_json::Value>(TEST_JWK).unwrap()] }))
+    axum::Json(
+        serde_json::json!({ "keys": [serde_json::from_str::<serde_json::Value>(TEST_JWK).unwrap()] }),
+    )
 }
 
 #[derive(serde::Deserialize)]
@@ -167,7 +172,10 @@ async fn start_idp() -> (SocketAddr, String) {
         codes: Arc::new(std::sync::Mutex::new(HashMap::new())),
     };
     let app = axum::Router::new()
-        .route("/.well-known/openid-configuration", axum::routing::get(idp_discovery))
+        .route(
+            "/.well-known/openid-configuration",
+            axum::routing::get(idp_discovery),
+        )
         .route("/authorize", axum::routing::get(idp_authorize))
         .route("/jwks", axum::routing::get(idp_jwks))
         .route("/token", axum::routing::post(idp_token))
@@ -225,7 +233,11 @@ async fn get3(
         body.extend_from_slice(chunk.chunk());
     }
     drop(h3_conn); // keep the connection alive while the body is read
-    (status, resp_headers, String::from_utf8_lossy(&body).into_owned())
+    (
+        status,
+        resp_headers,
+        String::from_utf8_lossy(&body).into_owned(),
+    )
 }
 
 // --- the server under test ---------------------------------------------------
@@ -271,12 +283,22 @@ async fn drive_login(
     // 2. `/auth/login` → 302 to the IdP's authorization endpoint.
     let (status, headers, _) = get3(server, root, "/auth/login?return_to=/room-x", &[]).await;
     assert_eq!(status, 302, "login should redirect to the IdP");
-    let idp_url = headers.get(header::LOCATION).unwrap().to_str().unwrap().to_owned();
+    let idp_url = headers
+        .get(header::LOCATION)
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_owned();
 
     // 3. The IdP approves and 302s back to the callback with code + state.
     let idp_res = http.get(&idp_url).send().await.unwrap();
     assert_eq!(idp_res.status(), 302, "IdP should redirect to the callback");
-    let cb_url = idp_res.headers().get(header::LOCATION).unwrap().to_str().unwrap();
+    let cb_url = idp_res
+        .headers()
+        .get(header::LOCATION)
+        .unwrap()
+        .to_str()
+        .unwrap();
 
     // 4. The callback (over HTTP/3).
     let query = cb_url.split('?').nth(1).unwrap_or_default();
@@ -357,7 +379,12 @@ async fn failed_callback_shows_the_error_page() {
     assert_eq!(status, 302, "login should redirect to the IdP");
     let idp_url = headers.get(header::LOCATION).unwrap().to_str().unwrap();
     let idp_res = idp_http().get(idp_url).send().await.unwrap();
-    let cb_url = idp_res.headers().get(header::LOCATION).unwrap().to_str().unwrap();
+    let cb_url = idp_res
+        .headers()
+        .get(header::LOCATION)
+        .unwrap()
+        .to_str()
+        .unwrap();
     let state = cb_url.rsplit_once("state=").unwrap().1;
 
     let (status, headers, body) = get3(

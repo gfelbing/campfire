@@ -33,6 +33,27 @@
  */
 
 const puppeteer = require("puppeteer-core");
+const fs = require("fs");
+const crypto = require("crypto");
+
+// The dev cert's SPKI sha-256 (base64, the `just spki` recipe) — what
+// `--ignore-certificate-errors-spki-list` wants. Chromium trusts only its
+// built-in roots for QUIC: a user-installed CA is accepted for TCP but fails
+// the QUIC handshake (CERTIFICATE_VERIFY_FAILED under the hood), so the dev
+// cert is pinned by SPKI instead (the `brave` recipe, docs/dev/testing.md).
+// Missing certs (running against a non-dev server): no pin.
+const DEV_CERT = "certs/cert.pem";
+function devCertSpki() {
+  try {
+    const cert = new crypto.X509Certificate(fs.readFileSync(DEV_CERT));
+    return crypto
+      .createHash("sha256")
+      .update(cert.publicKey.export({ type: "spki", format: "der" }))
+      .digest("base64");
+  } catch {
+    return null;
+  }
+}
 const fs = require("node:fs");
 
 function arg(name, fallback) {
@@ -231,6 +252,9 @@ async function assertDownlinkLive(page, label, timeoutMs) {
       "--use-fake-device-for-media-stream",
       // Dev cert: headless over TCP must skip the interstitial.
       "--ignore-certificate-errors",
+      // ...and the SPKI pin makes the QUIC handshake pass too (see
+      // devCertSpki above).
+      ...(devCertSpki() ? [`--ignore-certificate-errors-spki-list=${devCertSpki()}`] : []),
       // WebAudio: the audio encoder pumps through an AudioContext, which
       // browsers suspend until a user gesture — headless has none.
       "--autoplay-policy=no-user-gesture-required",
@@ -241,8 +265,13 @@ async function assertDownlinkLive(page, label, timeoutMs) {
   });
   let failed = false;
   try {
-    const pageA = await browser.newPage();
-    const pageB = await browser.newPage();
+    // Two separate browser contexts: storage (localStorage with the saved
+    // identity) is per-context, and boot prefers the stored name over the
+    // `?name=` param — one shared context would make B re-join as A.
+    const contextA = await browser.createBrowserContext();
+    const contextB = await browser.createBrowserContext();
+    const pageA = await contextA.newPage();
+    const pageB = await contextB.newPage();
     const pageErrors = [];
     for (const [label, page] of [["A", pageA], ["B", pageB]]) {
       page.on("pageerror", (e) => {
