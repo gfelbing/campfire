@@ -202,7 +202,15 @@ pub(crate) fn zone_maps() -> campfire_maps::Maps {
             ]}
         ]
     });
-    let dir = std::env::temp_dir().join("campfire-zone-maps-test");
+    // A unique dir per call: parallel tests shared the fixed path before,
+    // and one thread's non-atomic write raced another's `Maps::load`, which
+    // then read a truncated `zonetest.json`, skipped the map and the test
+    // died with UnknownRoom (CI, faster machines worse).
+    static ZONE_MAPS_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let dir = std::env::temp_dir().join(format!(
+        "campfire-zone-maps-test-{}",
+        ZONE_MAPS_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("zonetest.json"), serde_json::to_vec(&raw).unwrap()).unwrap();
     campfire_maps::Maps::load(&dir)
