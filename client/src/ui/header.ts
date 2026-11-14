@@ -14,7 +14,7 @@
 import { COLORS, saveIdentity } from "./boot";
 import type { OwnStatus } from "../net/types";
 import type { SidebarUI } from "./sidebar";
-import { CHARACTER_COUNT, previewCell } from "../world/characters";
+import { CHARACTER_COUNT, previewCell, variantFor } from "../world/characters";
 
 interface MapInfo {
   id: string;
@@ -196,6 +196,7 @@ export function createHeader(
     auto.addEventListener("click", () => {
       character = null;
       syncCharacterSelection();
+      renderProfileAvatar();
     });
     characters.appendChild(auto);
     for (let i = 0; i < CHARACTER_COUNT; i++) {
@@ -211,6 +212,7 @@ export function createHeader(
       b.addEventListener("click", () => {
         character = i;
         syncCharacterSelection();
+        renderProfileAvatar();
       });
       characters.appendChild(b);
     }
@@ -283,12 +285,30 @@ export function createHeader(
     doneBtn,
   );
 
+  /** The profile button shows the joined character (the draft's, live —
+   *  the same thumbnail the picker uses) instead of the name's initial;
+   *  the initial stays as the fallback for the sheets-not-loaded state. */
   function renderProfileAvatar(): void {
-    profileBtn.style.background = color;
-    profileBtn.querySelector<HTMLElement>(".status-initial")!.textContent =
-      name.trim().charAt(0).toUpperCase();
     profileBtn.querySelector<HTMLElement>(".sdot")!.className = `sdot ${status}`;
     profileBtn.title = STATUSES.find((s) => s.id === status)!.label;
+    const initial = profileBtn.querySelector<HTMLElement>(".status-initial")!;
+    const cell = previewCell(character ?? variantFor(name), color);
+    if (!cell) {
+      initial.classList.remove("hidden");
+      profileBtn.style.background = color;
+      return;
+    }
+    initial.classList.add("hidden");
+    profileBtn.style.background = "#1c1f26";
+    let canvas = profileBtn.querySelector<HTMLCanvasElement>("canvas.character-face");
+    if (!canvas) {
+      canvas = document.createElement("canvas");
+      canvas.className = "character-face";
+      profileBtn.prepend(canvas);
+    }
+    canvas.width = cell.width;
+    canvas.height = cell.height;
+    canvas.getContext("2d")!.drawImage(cell, 0, 0);
   }
 
   function renderStatusRows(): void {

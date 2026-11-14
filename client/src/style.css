@@ -220,6 +220,14 @@ body {
   border-color: var(--accent);
 }
 
+/* the joined character thumbnail fills the round button */
+.character-face {
+  image-rendering: pixelated;
+  height: 100%;
+  width: auto;
+  pointer-events: none;
+}
+
 .status-initial {
   font-size: 0.85rem;
   font-weight: 700;
