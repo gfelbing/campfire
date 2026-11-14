@@ -1,4 +1,4 @@
-//! Phase 6 acceptance test (README §11): proximity bubbles.
+//! Phase 6 acceptance test (docs/dev/testing.md): proximity bubbles.
 //!
 //! > **Done when:** 6-participant call; a mid-call join plus a mid-call
 //! > drop/reconnect; auto voice-only engages at 10 participants.
@@ -10,10 +10,10 @@
 //! reconnect window, drops a member who walks out of the leave radius,
 //! and ends with `call_end(last_left)` — leaving no leaked call state.
 //!
-//! Media is the MoQ SFU's (docs/moq-sfu.md); there is no signaling to
+//! Media is the MoQ SFU's (docs/arch/moq-sfu.md); there is no signaling to
 //! relay. The client-side delivery (the theater, auto voice-only at 9+)
 //! is browser-only: it is implemented in `client/src/call` and checked
-//! manually with six windows, per README §11.
+//! manually with six windows, per docs/dev/testing.md.
 
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -29,7 +29,7 @@ mod common;
 use common::start_server;
 
 const RECV_TIMEOUT: Duration = Duration::from_secs(5);
-/// Spawn of the office map (README §5 tests walk relative to it).
+/// Spawn of the office map (docs/arch/protocol.md tests walk relative to it).
 const SPAWN: (f32, f32) = (20.5, 15.5);
 
 /// A connected WebTransport client with its command stream open.
@@ -59,7 +59,7 @@ impl TestClient {
         self.send.flush().await.unwrap();
     }
 
-    /// Send one movement entry as a datagram (README §5 wire shape).
+    /// Send one movement entry as a datagram (docs/arch/protocol.md wire shape).
     fn move_to(&self, id: &str, x: f32, y: f32, seq: u64) {
         let batch = MovementBatch {
             m: vec![MovementEntry {
@@ -134,7 +134,7 @@ async fn join(addr: SocketAddr, room: &str, name: &str) -> (TestClient, String, 
     (c, you, token)
 }
 
-/// Reconnect with a token (README §5): restores the previous identity
+/// Reconnect with a token (docs/arch/protocol.md): restores the previous identity
 /// within the reconnect window. Returns (client, own id, call roster).
 async fn reconnect(
     addr: SocketAddr,
@@ -231,7 +231,7 @@ async fn bubble_six_members_join_drop_and_walk_away() {
     let (addr, _root) = start_server().await;
 
     // Grace opts out FIRST, before anyone can bubble with her: she stays a
-    // spectator who only ever hears the room-wide badge (README §6.3).
+    // spectator who only ever hears the room-wide badge (docs/arch/protocol.md).
     let (mut g, _g_id, _g_token) = join(addr, "office", "grace").await;
     g.send(&ClientMsg::Bubble { off: true }).await;
 

@@ -25,7 +25,7 @@ client-build:
 	cd client && npm ci
 	cd client && npm run build
 
-# Dev loop (README §8): vite rebuilds the client on change; the server serves
+# Dev loop (docs/arch/client.md): vite rebuilds the client on change; the server serves
 # client/dist from disk via --static-dir, so the server does not recompile.
 # Ctrl-C stops both.
 dev *args: certs
@@ -51,7 +51,7 @@ docker *args:
 # page loads without an interstitial. Note this alone does NOT unlock HTTP/3:
 # Chromium never trusts user-installed CAs for QUIC (built-in roots only),
 # so `just brave` pins the cert's SPKI for the dev loop. Production uses a
-# publicly-trusted certificate (README §15), which needs neither.
+# publicly-trusted certificate (docs/ops/README.md), which needs neither.
 certs:
 	mkdir -p certs
 	test -f certs/ca.pem -a -f certs/ca-key.pem || \
@@ -111,7 +111,7 @@ server *args:
 h3:
 	curl --http3 -sk https://127.0.0.1:8443/healthz
 
-# Load harness (README §11 Phase 9): needs a running server.
+# Load harness (docs/dev/testing.md): needs a running server.
 loadtest *args:
 	cargo run -p campfire-loadtest --release -- \
 	  --url https://127.0.0.1:8443/wt "$@"
@@ -123,12 +123,12 @@ e2e-build:
 	cd client && npm run build:e2e
 	cargo build --workspace --release
 
-# Headless browser E2E (README §11 Phase 9): needs a running server built
+# Headless browser E2E (docs/dev/testing.md): needs a running server built
 # with `just e2e-build` and one-time `npm i` in tools/e2e.
 e2e *args:
 	node tools/e2e/e2e.js --browser "$(command -v brave || command -v chromium || echo chromium)" "$@"
 
-# MoQ uplink E2E (docs/moq-sfu.md §9 Phase 2): two real browser clients
+# MoQ uplink E2E (docs/arch/moq-sfu.md): two real browser clients
 # publish their media to the SFU and subscribe to each other. Needs a
 # running server built with `just e2e-build` and one-time `npm i` in
 # tools/e2e.

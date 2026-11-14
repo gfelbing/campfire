@@ -1,5 +1,5 @@
 // Avatars: our own + everyone else's, with dead-reckoning interpolation of
-// remote positions between 15 Hz datagram snapshots (README §8).
+// remote positions between 15 Hz datagram snapshots (docs/arch/client.md).
 
 import { Container, Graphics, Text } from "pixi.js";
 
@@ -25,7 +25,7 @@ export class AvatarView {
   private body: Graphics;
   private facing: Graphics;
   label: Text;
-  /** 🎧 shown above the label while the user is in a call (README §6.3). */
+  /** 🎧 shown above the label while the user is in a call (docs/arch/protocol.md). */
   private inCallBadge: Text;
   /** 🔇 shown above the label while the user stands in a silentZone. */
   private dndBadge: Text;
@@ -99,7 +99,7 @@ export class AvatarView {
     this.statusDot.position.set(-this.label.width / 2 - 5, -24);
   }
 
-  /** Toggle the headphone badge (call state is room-wide, README §5). */
+  /** Toggle the headphone badge (call state is room-wide, docs/arch/protocol.md). */
   setInCall(on: boolean): void {
     this.inCallBadge.visible = on;
   }
@@ -265,7 +265,7 @@ export class AvatarManager {
     this.lastTiles.delete(id);
   }
 
-  /** Toggle the headphone badge on one remote avatar (README §6.3). */
+  /** Toggle the headphone badge on one remote avatar (docs/arch/protocol.md). */
   setInCall(id: string, on: boolean): void {
     this.remotes.get(id)?.view.setInCall(on);
   }

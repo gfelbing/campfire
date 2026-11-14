@@ -1,4 +1,4 @@
-//! MoQ session admission on `/moq` (docs/moq-sfu.md §5).
+//! MoQ session admission on `/moq` (docs/arch/moq-sfu.md).
 //!
 //! One MoQ session per WebTransport connection (the endpoint allows one
 //! WebTransport session per connection; the realtime `/wt` channel rides a
@@ -13,7 +13,7 @@
 //! Then the session is wired into the call's origin
 //! ([`super::fanout`]) as both publisher and subscriber; moq-net runs the
 //! session from there. Isolation between calls is structural (per-call
-//! origins), so the bubble-state policy (docs/moq-sfu.md §3) needs no
+//! origins), so the bubble-state policy (docs/arch/moq-sfu.md) needs no
 //! per-subscription check.
 //!
 //! Known limitation: a session may announce any namespace on its call's
@@ -39,7 +39,7 @@ use crate::moq::h3wt;
 use crate::moq::tickets::TicketRegistry;
 use crate::world::World;
 
-/// The stats tier label for call media (docs/moq-sfu.md §5, metrics).
+/// The stats tier label for call media (docs/arch/moq-sfu.md).
 const STATS_TIER: &str = "moq";
 
 /// The SFU: moq-net server + per-call origins + the ticket store. Cheap to
@@ -55,7 +55,7 @@ pub struct MoqSfu {
 }
 
 impl MoqSfu {
-    /// Build the SFU next to the world (docs/moq-sfu.md §5: no new socket —
+    /// Build the SFU next to the world (docs/arch/moq-sfu.md: no new socket —
     /// MoQ sessions arrive on the existing quinn endpoint via h3).
     pub fn new(world: World, metrics: Metrics) -> Arc<Self> {
         let sfu = Arc::new(Self {
@@ -134,7 +134,7 @@ pub async fn handle_moq(
     upgrade: h3_axum::WebTransportUpgrade,
 ) -> Response {
     let sfu = &state.moq;
-    // Auth (README §11): no session-cookie check here. The WebTransport
+    // Auth (docs/dev/testing.md): no session-cookie check here. The WebTransport
     // handshake carries no cookies in Chromium (issues.md #4 — the same
     // reason `/wt` mints `?ticket=` auth tickets), so a cookie check
     // would refuse every browser CONNECT with a 401 (surfaced as

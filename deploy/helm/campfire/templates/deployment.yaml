@@ -1,7 +1,7 @@
 {{/*
 Single-instance deployment. Campfire keeps all state in memory (rooms,
 presence), so one replica is the supported shape — see the scaling note
-in README §15.
+in docs/ops/README.md.
 */}}
 apiVersion: apps/v1
 kind: Deployment
@@ -43,7 +43,7 @@ spec:
             - --maps-dir
             - {{ .Values.maps.mountPath | quote }}
             {{- if .Values.auth.openid.enabled }}
-            # OpenID Connect auth (README §11). The client secret arrives via
+            # OpenID Connect auth (docs/ops/README.md). The client secret arrives via
             # the env var below (never as an arg: args leak into logs and
             # `kubectl describe`).
             - --auth-openid-enabled

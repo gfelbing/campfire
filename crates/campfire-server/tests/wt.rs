@@ -1,4 +1,4 @@
-//! Phase 2 + 3 acceptance tests (README §11): WebTransport session layer and
+//! Phase 2 + 3 acceptance tests (docs/dev/testing.md): WebTransport session layer and
 //! world movement.
 //!
 //! Uses `wtransport` — the reference Rust WebTransport implementation — as a
@@ -61,7 +61,7 @@ impl TestClient {
 
     /// Read exactly one NDJSON line and decode it. Skips room-wide
     /// `call_start` broadcasts: users sharing the spawn tile are pulled
-    /// into a proximity bubble by the tick (README §6.3), and that badge
+    /// into a proximity bubble by the tick (docs/arch/protocol.md), and that badge
     /// may interleave anywhere. No wt.rs test asserts on call state.
     async fn recv(&mut self) -> ServerMsg {
         loop {
@@ -102,7 +102,7 @@ async fn join(addr: SocketAddr, room: &str, name: &str) -> (TestClient, String) 
     (c, you)
 }
 
-/// Send one movement entry as a datagram (README §5 wire shape).
+/// Send one movement entry as a datagram (docs/arch/protocol.md wire shape).
 fn move_datagram(id: &str, x: f32, y: f32, seq: u64) -> Bytes {
     let batch = MovementBatch {
         m: vec![MovementEntry {
@@ -217,7 +217,7 @@ async fn join_hello_presence_chat_typing_leave() {
     assert_eq!(id, a_id);
     assert!(on);
 
-    // Alice leaves explicitly (README §5 `leave`): bob sees the leave right
+    // Alice leaves explicitly (docs/arch/protocol.md `leave`): bob sees the leave right
     // away. (A dropped connection no longer leaves immediately — it starts
     // the 30 s reconnect window; that path is covered by the `reconnect` test.)
     a.send(&ClientMsg::Leave).await;
@@ -404,7 +404,7 @@ async fn datagrams_are_drained_without_breaking_the_session() {
     assert_eq!(text, "still here");
 }
 
-/// Phase 3 acceptance test (README §11): two in-process clients join the same
+/// Phase 3 acceptance test (docs/dev/testing.md): two in-process clients join the same
 /// room, move, and each receives the other's deltas; an invalid move is
 /// rejected; chat round-trips with history for a third joiner.
 #[tokio::test]

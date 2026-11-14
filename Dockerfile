@@ -60,7 +60,7 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=build /build/campfire /usr/local/bin/campfire
-# Certs are mounted at runtime (see README §15): never bake keys into an
+# Certs are mounted at runtime (see docs/ops/README.md): never bake keys into an
 # image layer.
 EXPOSE 443/udp
 EXPOSE 443/tcp

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Headless E2E (README §11 Phase 9, §12): two fake-media pages over HTTP/3.
+ * Headless E2E (docs/dev/testing.md): two fake-media pages over HTTP/3.
  *
  * Drives the real client in headless Brave/Chromium:
  *   1. both pages auto-join via `/?room=…&name=…&color=…` (boot.ts);
@@ -8,7 +8,7 @@
  *   3. a chat line from A arrives at B (room-wide broadcast);
  *   4. both avatars stand still on the spawn tile, so the server's bubble
  *      engine pulls them into a call — the assertion is the 🎧 badge
- *      (server-authoritative call membership, README §6.3), held 3 s;
+ *      (server-authoritative call membership, docs/arch/protocol.md), held 3 s;
  *   5. B walks and A sees the movement; B refreshes the tab and walks
  *      again — A still sees B move (a token rejoin restarts the movement
  *      sequence at 0; A's per-user guard must follow the new epoch);
@@ -96,7 +96,7 @@ const userCount = (page) =>
     args: [
       "--no-sandbox",
       "--disable-dev-shm-usage",
-      // README §12: fake media, no permission prompts.
+      // docs/dev/testing.md: fake media, no permission prompts.
       "--use-fake-ui-for-media-stream",
       "--use-fake-device-for-media-stream",
       // Dev cert: headless over TCP must skip the interstitial.
@@ -170,7 +170,7 @@ const userCount = (page) =>
     // The peer connections live inside the client module scope; media is
     // not asserted here (the MoQ suite, tools/e2e/moq.js, covers it). Probe
     // via the presence badge (server-authoritative call membership,
-    // README §6.3) and require it to stay up for 3 s (not a churn blip).
+    // docs/arch/protocol.md) and require it to stay up for 3 s (not a churn blip).
     await sleep(3_000);
     const still = await badgeFor(pageA, NAME_B);
     if (!still) throw new Error("call badge disappeared — bubble did not hold");

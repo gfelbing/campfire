@@ -683,7 +683,7 @@ body {
   cursor: pointer;
 }
 
-/* --- presence roster (README §8 Phase 7) --------------------------------- */
+/* --- presence roster (docs/arch/client.md) --------------------------------- */
 
 /* plain content inside the Users accordion body */
 .presence {
@@ -728,7 +728,7 @@ body {
   margin-left: 0.4em;
 }
 
-/* --- call theater (README §6.3 + roadmap "UI redesign") -------------------- */
+/* --- call theater (docs/arch/protocol.md + roadmap "UI redesign") -------------------- */
 /* In a call: a column of remote video tiles on the right, overlapping the
    map, plus the local PiP and the controls bar. Clicking a tile focuses it
    large in the center overlay; Escape or a second click unfocuses. */

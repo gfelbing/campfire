@@ -1,9 +1,9 @@
-//! Local media capture (README §6.3).
+//! Local media capture (docs/arch/protocol.md).
 //!
 //! Capture is only requested when the user explicitly joins a call (or the
 //! tab refreshes mid-call and the call survived) — the mic prompt never
 //! appears on page load. There is no ICE/TURN: media transits the MoQ SFU
-//! over the same QUIC connection as the rest of the app (docs/moq-sfu.md).
+//! over the same QUIC connection as the rest of the app (docs/arch/moq-sfu.md).
 
 /**
  * Acquire local mic + camera. Audio always on while in a call; video is

@@ -38,7 +38,7 @@ use tracing::debug;
 /// A queued QUIC datagram with its source address.
 type Queued = (Vec<u8>, SocketAddr);
 
-/// The shared UDP socket (README §6.2).
+/// The shared UDP socket (docs/arch/decisions.md).
 #[derive(Debug)]
 pub struct DemuxSocket {
     /// The socket half quinn sends through (same OS socket as the

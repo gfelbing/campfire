@@ -1,6 +1,6 @@
-//! Proximity-call state machine — "bubbles" (README §6.3).
+//! Proximity-call state machine — "bubbles" (docs/arch/protocol.md).
 //!
-//! Media is one MoQ SFU session per call (docs/moq-sfu.md §9): the client
+//! Media is one MoQ SFU session per call (docs/arch/moq-sfu.md): the client
 //! publishes its own `call/<room>/<user-id>.hang` (the uplink) and watches
 //! one downlink per other participant. There is no mesh and no signaling —
 //! the server's bubble engine computes the call, and every participant's
@@ -17,7 +17,7 @@ import type { UserBrief } from "../net/types";
 import { MoqCall, type DownlinkStatus, type DownlinkView } from "./moq";
 import { getLocalMedia, getScreenMedia } from "./media";
 
-/** Participant count at which the call degrades to voice-only (README §6.1:
+/** Participant count at which the call degrades to voice-only (docs/ops/maps.md:
  *  "9+"; the done-when's "engages at 10" is satisfied, the 📷 button
  *  overrides back to video). */
 const VOICE_ONLY_AT = 9;
@@ -28,7 +28,7 @@ export type CallPhase =
   | { p: "joining" }
   | { p: "in-call"; participants: UserBrief[] };
 
-/** A participant's downlink state (README §7: "subscribing…/live"). */
+/** A participant's downlink state (docs/arch/protocol.md: "subscribing…/live"). */
 export type DownlinkState = DownlinkStatus;
 
 /** One remote participant as the UI needs it (grid tile). */
@@ -166,7 +166,7 @@ export class CallManager {
 
   // --- user actions ---------------------------------------------------------
 
-  /** Opt out of proximity bubbles (README §6.3): the server drops us from
+  /** Opt out of proximity bubbles (docs/arch/protocol.md): the server drops us from
    *  the current bubble at once and never pulls us back in. */
   setBubble(off: boolean): void {
     this.send.sendBubble(off);
@@ -272,11 +272,11 @@ export class CallManager {
     this.hooks.onLog("screen share stopped");
   }
 
-  // --- server messages (README §5) ------------------------------------------
+  // --- server messages (docs/arch/protocol.md) ------------------------------------------
 
   /** Room-wide (headphone badge) and, when we are in the roster, our
    *  authoritative bubble state: created or joined (auto-join on approach,
-   *  README §6.3), or a roster re-sync while we are already in. */
+   *  docs/arch/protocol.md), or a roster re-sync while we are already in. */
   onCallStart(participants: UserBrief[], ticket?: string): void {
     const selfIn = participants.some((u) => u.id === this.selfId);
     if (!selfIn) {
@@ -295,13 +295,13 @@ export class CallManager {
     }
     if (this.phase.p !== "idle") return;
     // Auto-join: the server pulled us into a bubble. `getUserMedia` here —
-    // walking close is the user's intent (README §6.3 relaxed prompt).
+    // walking close is the user's intent (docs/arch/protocol.md relaxed prompt).
     this.setPhase({ p: "joining" });
     void (async () => {
       const stream = await this.acquireMedia();
       if (!stream) {
         // No media, no call: leave so the server does not keep our seat
-        // open with a silent ghost (README §6.3).
+        // open with a silent ghost (docs/arch/protocol.md).
         this.send.sendCallLeave();
         this.reset();
         return;
@@ -336,7 +336,7 @@ export class CallManager {
     this.reset(`call ended (${reason})`);
   }
 
-  /** Reconnect-with-token (README §5): the `hello` after a dropped
+  /** Reconnect-with-token (docs/arch/protocol.md): the `hello` after a dropped
    *  connection (or a tab refresh) says the room's call survived and we
    *  are still in it. The MoQ session died with the old connection, so it
    *  is torn down and re-established with the fresh ticket. A refresh
@@ -448,7 +448,7 @@ export class CallManager {
     if (!this.localStream) return;
     const seq = ++this.sessionSeq;
     // The ticket is single-use and rides the path, never a query string
-    // (docs/moq-sfu.md §5).
+    // (docs/arch/moq-sfu.md).
     const url = `${location.origin}/moq/${ticket}`;
     const name = `call/${this.room}/${this.selfId}.hang`;
     void MoqCall.start({
@@ -501,7 +501,7 @@ export class CallManager {
     }
   }
 
-  /** README §6.1: at 9+ participants degrade to voice-only (camera off).
+  /** docs/ops/maps.md: at 9+ participants degrade to voice-only (camera off).
    *  The 📷 button overrides back to video. */
   private maybeAutoVoiceOnly(): void {
     const total = this.roster.length; // includes us
@@ -567,7 +567,7 @@ export class CallManager {
     this.hooks.onPhase(phase);
   }
 
-  /** Tear everything down with zero leftovers (README §11 Phase 6: "no
+  /** Tear everything down with zero leftovers (docs/dev/testing.md: "no
    *  leaked peer connections" — the session closes, every track stopped). */
   private reset(reason?: string): void {
     this.stopSession();

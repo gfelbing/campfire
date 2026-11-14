@@ -1,4 +1,4 @@
-//! Prometheus metrics at `GET /metrics` (README §14/§11 Phase 8).
+//! Prometheus metrics at `GET /metrics` (docs/ops/README.md).
 //!
 //! Hand-rolled text exposition (the 0.0.4 format) instead of a metrics
 //! crate: the counters are a handful of atomics and a dependency (and its
@@ -26,19 +26,19 @@ struct Counters {
     /// WebTransport sessions currently open; `session_total` is all-time.
     sessions: AtomicU64,
     session_total: AtomicU64,
-    /// Inbound movement datagrams / bytes (README §5).
+    /// Inbound movement datagrams / bytes (docs/arch/protocol.md).
     dg_in: AtomicU64,
     dg_in_bytes: AtomicU64,
     /// Outbound tick batches / bytes.
     dg_out: AtomicU64,
     dg_out_bytes: AtomicU64,
-    /// Rejected requests by the rate limiters (README §14).
+    /// Rejected requests by the rate limiters (docs/ops/README.md).
     rate_limit_hits: AtomicU64,
     /// Tick-loop time: total seconds spent inside `World::tick` and how
     /// many ticks ran (scrape → mean; spikes show up in the rate).
     tick_micros: AtomicU64,
     ticks: AtomicU64,
-    /// MoQ SFU media sessions (docs/moq-sfu.md §5): currently open,
+    /// MoQ SFU media sessions (docs/arch/moq-sfu.md): currently open,
     /// all-time admitted, and rejected at CONNECT (missing/bad ticket or
     /// the ticket's call no longer active with the user in it).
     moq_sessions: AtomicU64,
@@ -48,7 +48,7 @@ struct Counters {
 
 /// MoQ SFU gauges that live outside [`Counters`]: the per-call media
 /// origins and the media traffic, read from the SFU's moq-net stats
-/// registry at scrape time (docs/moq-sfu.md §5).
+/// registry at scrape time (docs/arch/moq-sfu.md).
 #[derive(Clone, Copy, Default)]
 pub struct MoqGauges {
     /// Live per-call media origins.
@@ -127,7 +127,7 @@ impl Metrics {
 
     /// Render the exposition format. `world_gauges` is
     /// `(users, rooms, calls)` from the world at scrape time; `moq` carries
-    /// the SFU's gauges (live origins + media traffic, docs/moq-sfu.md §5).
+    /// the SFU's gauges (live origins + media traffic, docs/arch/moq-sfu.md).
     pub fn render(&self, world_gauges: (u64, u64, u64), moq: &MoqGauges) -> String {
         let (users, rooms, calls) = world_gauges;
         let g = |a: &AtomicU64| a.load(Ordering::Relaxed);
@@ -185,7 +185,7 @@ impl Metrics {
             &mut out,
             "gauge",
             "campfire_calls",
-            "Rooms with an active bubble (README §6.3).",
+            "Rooms with an active bubble (docs/arch/protocol.md).",
             calls as f64,
         );
         metric(
@@ -241,7 +241,7 @@ impl Metrics {
             &mut out,
             "gauge",
             "campfire_moq_sessions",
-            "MoQ media sessions currently open (docs/moq-sfu.md §5).",
+            "MoQ media sessions currently open (docs/arch/moq-sfu.md).",
             g(&self.inner.moq_sessions) as f64,
         );
         metric(

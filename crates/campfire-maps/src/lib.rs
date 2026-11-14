@@ -1,6 +1,6 @@
 //! Campfire map handling: Tiled JSON parsing, walkability grid, map bounds.
 //!
-//! The server uses the walkability grid to validate movement (README §5
+//! The server uses the walkability grid to validate movement (docs/arch/protocol.md
 //! "Movement rules"); the client renderer ignores it. Map data is parsed once
 //! at startup and then immutable.
 //!

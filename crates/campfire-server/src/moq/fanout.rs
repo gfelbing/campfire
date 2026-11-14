@@ -1,11 +1,11 @@
-//! Per-call media origins (docs/moq-sfu.md §3/§4).
+//! Per-call media origins (docs/arch/moq-sfu.md).
 //!
 //! Every active call gets its own moq-net origin: the participants' uplinks
 //! are written into it, and every participant's subscriptions are served
 //! from it (fan-out and group caching are moq-net's job). Calls are
 //! isolated by construction — a session wired to call C's origin can only
 //! see, and only publish into, the tracks announced on C — so the
-//! bubble-state authorization policy (docs/moq-sfu.md §3) reduces to the
+//! bubble-state authorization policy (docs/arch/moq-sfu.md) reduces to the
 //! CONNECT-time checks in [`super::session`].
 
 use std::{
@@ -16,7 +16,7 @@ use std::{
 
 use moq_net::origin::Producer;
 
-/// Pool settings for a call origin (docs/moq-sfu.md Phase 0, F7): 10 s of
+/// Pool settings for a call origin (docs/arch/moq-sfu.md): 10 s of
 /// history keeps fast-start cheap for late joiners (the T7 first-frame
 /// budget is 2 s) without holding more media than that, and the byte cap
 /// bounds a bursty publisher.

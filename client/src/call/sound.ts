@@ -1,4 +1,4 @@
-//! Bubble notification sounds (README §11 acceptance, issues.md): a short
+//! Bubble notification sounds (docs/dev/testing.md acceptance, issues.md): a short
 //! "bing" when we enter a bubble and a "bong" when we leave it.
 //!
 //! Synthesized with WebAudio — no asset to ship or load. The AudioContext

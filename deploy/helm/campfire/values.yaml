@@ -90,7 +90,7 @@ resources:
 # Optional extra args passed to the campfire binary verbatim.
 extraArgs: []
 
-# OpenID Connect authentication (README §11, authorization-code flow for a
+# OpenID Connect authentication (docs/ops/README.md, authorization-code flow for a
 # confidential client). When enabled, a visitor must sign in through the
 # configured IdP before joining a room; the display name is forced from the
 # IdP's id_token (a client can no longer choose its own). The redirect URI is

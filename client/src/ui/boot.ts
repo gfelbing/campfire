@@ -1,4 +1,4 @@
-// Boot: resolve the join settings (README §8). The landing page is gone —
+// Boot: resolve the join settings (docs/arch/client.md). The landing page is gone —
 // `/` is redirected to the first map by the server — so this is no longer a
 // UI, just parameter resolution:
 //
@@ -11,7 +11,7 @@
 // The resolved identity is saved back to localStorage, so a reload (the
 // URL carries no name/color anymore) re-joins as the same user.
 //
-// Auth (README §11): when the server has OpenID Connect enabled, the name is
+// Auth (docs/dev/testing.md): when the server has OpenID Connect enabled, the name is
 // forced from the signed-in identity and a visitor without a session is
 // redirected to the IdP.
 
@@ -99,7 +99,7 @@ export function boot(): Promise<BootOptions> {
   return resolveForcedName().then((forcedName) => runBoot(forcedName));
 }
 
-/** Probe `/api/v1/auth` (README §11).
+/** Probe `/api/v1/auth` (docs/dev/testing.md).
  *
  *  - `null` — auth is disabled (or the probe failed), so the name is free.
  *  - a string — the signed-in identity's name, which overrides whatever the

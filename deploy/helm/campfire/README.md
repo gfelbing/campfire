@@ -1,7 +1,7 @@
 # Campfire Helm chart
 
 Deploys Campfire as a **single instance** (state is in-memory — rooms and
-presence are stateful; see README §15) on its one port: 443 **TCP + UDP**.
+presence are stateful; see docs/ops/README.md) on its one port: 443 **TCP + UDP**.
 
 ## What it creates
 
@@ -23,7 +23,7 @@ presence are stateful; see README §15) on its one port: 443 **TCP + UDP**.
   `Certificate`) or an existing `kubernetes.io/tls` secret — e.g. a wildcard
   cert you already requested (set `certificate.create: false` and
   `certificate.secretName`). The cert must be publicly trusted for browser
-  QUIC (Chromium trusts only built-in roots for UDP/QUIC — README §6.2/§15).
+  QUIC (Chromium trusts only built-in roots for UDP/QUIC — docs/arch/decisions.md).
   Note the TCP route is TLS **passthrough**, so Traefik's own
   `certResolver` cannot serve this route: the pod terminates TLS itself.
 
@@ -134,4 +134,4 @@ Traefik must forward the ClientHello untouched (`tls.passthrough`): the
 server shares one port between HTTP/3 (QUIC, TLS 1.3 by definition) and
 the TCP HTTPS bootstrap, and the client binds its WebTransport session to
 the exact certificate chain the server presents. Terminating TLS at
-Traefik would break both (README §6.2).
+Traefik would break both (docs/arch/decisions.md).

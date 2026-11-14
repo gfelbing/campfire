@@ -2,7 +2,7 @@
 //!
 //! Crypto provider: ring (quinn's default). If a future feature prefers
 //! aws-lc-rs as the global default, this file is the single place to
-//! switch (README §10 Q5).
+//! switch (docs/arch/decisions.md).
 
 use std::path::Path;
 use std::sync::Arc;

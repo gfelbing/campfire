@@ -1,6 +1,6 @@
 //! campfire — the single Campfire service binary.
 //!
-//! One binary, one port number (README §2): QUIC/HTTP/3 + WebTransport + MoQ
+//! One binary, one port number (docs/arch/decisions.md): QUIC/HTTP/3 + WebTransport + MoQ
 //! media on UDP/443, the Alt-Svc TLS front on TCP/443. This file only boots
 //! the library; all behaviour lives in `campfire_server` (lib.rs) so tests
 //! and tooling can reuse it.
@@ -12,7 +12,7 @@ use clap::Parser;
 #[tokio::main]
 async fn main() -> Result<()> {
     let cfg = Config::parse();
-    // Structured JSON logs (README §11 Phase 8) or the human default; the
+    // Structured JSON logs (docs/ops/README.md) or the human default; the
     // filter always comes from RUST_LOG (default: info for this crate).
     let subscriber = tracing_subscriber::fmt().with_env_filter(
         tracing_subscriber::EnvFilter::try_from_default_env()

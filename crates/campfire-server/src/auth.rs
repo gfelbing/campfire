@@ -1,4 +1,4 @@
-//! OpenID Connect authentication (README §11, authorization-code flow).
+//! OpenID Connect authentication (docs/dev/testing.md, authorization-code flow).
 //!
 //! When enabled, a visitor must sign in through the configured IdP before
 //! they can join a room. The flow is the standard **authorization code**
@@ -497,7 +497,7 @@ fn display_name(claims: &IdToken) -> Option<String> {
     None
 }
 
-/// Trim and cap a name to the protocol's 24-char limit (README §11).
+/// Trim and cap a name to the protocol's 24-char limit (docs/dev/testing.md).
 fn trim_name(s: &str) -> String {
     s.trim()
         .chars()

@@ -2,7 +2,7 @@
 //!
 //! The `campfire` binary (`src/main.rs`) is a thin wrapper: init tracing,
 //! parse the CLI, call [`run`]. The library split keeps the accept loop and
-//! endpoints reusable by integration tests and the load-test tool (README §12).
+//! endpoints reusable by integration tests and the load-test tool (docs/dev/testing.md).
 
 pub mod api;
 pub mod auth;
@@ -27,7 +27,7 @@ pub async fn run(cfg: &config::Config) -> Result<()> {
     let local = socket.local_addr()?;
     let endpoint = make_endpoint(quinn_conf, socket)?;
     let metrics = metrics::Metrics::new();
-    // The public TCP port is a TLS front (`bootstrap`, README §6.2): it
+    // The public TCP port is a TLS front (`bootstrap`, docs/arch/decisions.md): it
     // serves the Alt-Svc bootstrap browsers need to discover HTTP/3.
     bootstrap::start(cfg)?;
     let state = api::AppState::with_metrics(cfg, metrics.clone())?;
@@ -61,7 +61,7 @@ pub async fn run_endpoint(endpoint: quinn::Endpoint, app: axum::Router) {
 }
 
 /// [`run_endpoint`] with connection metrics and a graceful shutdown
-/// (README §11 Phase 8): on Ctrl-C the endpoint stops accepting, every
+/// (docs/ops/README.md): on Ctrl-C the endpoint stops accepting, every
 /// open connection is closed with a NO_ERROR code (browsers reconnect and
 /// keep their identity via the token), and the loop returns after the
 /// drain window so the tick task dies with the process.
@@ -95,7 +95,7 @@ pub async fn run_endpoint_with_metrics(
             };
             // h3-axum injects no ConnectInfo, so the per-peer remote
             // address rides in as an extension for rate limiting
-            // (README §6.2: the TURN credential endpoint is per-IP), and the
+            // (docs/arch/decisions.md: the TURN credential endpoint is per-IP), and the
             // connection itself rides in so a WebTransport session can close
             // it when the session ends (its reconnect needs a fresh one).
             let app = app
@@ -117,7 +117,7 @@ pub async fn run_endpoint_with_metrics(
 /// Drive one QUIC connection as an HTTP/3 connection.
 ///
 /// WebTransport, extended CONNECT and datagrams are advertised here so the
-/// Phase 2 realtime session works on the same connection family (README §4).
+/// Phase 2 realtime session works on the same connection family (docs/arch/overview.md).
 async fn serve_http3(app: axum::Router, conn: quinn::Connection) -> Result<(), h3_axum::BoxError> {
     let mut builder = h3::server::builder();
     builder

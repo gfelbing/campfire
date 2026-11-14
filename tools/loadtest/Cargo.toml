@@ -1,6 +1,6 @@
 [package]
 name = "campfire-loadtest"
-description = "Campfire load harness (README §11 Phase 9): walking users + call groups over real QUIC."
+description = "Campfire load harness (docs/dev/testing.md): walking users + call groups over real QUIC."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

@@ -1,7 +1,7 @@
-//! Call-state tests (README §6.3) over real HTTP/3 on QUIC.
+//! Call-state tests (docs/arch/protocol.md) over real HTTP/3 on QUIC.
 //!
 //! Since Phase 4 the server carries no call *signaling* (SDP/ICE) and no
-//! STUN/TURN: media rides the MoQ SFU (docs/moq-sfu.md). What remains —
+//! STUN/TURN: media rides the MoQ SFU (docs/arch/moq-sfu.md). What remains —
 //! and what runs here against the real server stack with `wtransport` as
 //! the client — is the call *state machine*: bubble formation, the
 //! room-wide badge, mute/camera presence, and the leave/end transitions.
@@ -97,7 +97,7 @@ async fn assert_err(c: &mut TestClient, code: ErrorCode) {
     }
 }
 
-/// Proximity bubbles (README §6.3): two users in the same room spawn at
+/// Proximity bubbles (docs/arch/protocol.md): two users in the same room spawn at
 /// the same tile, so the server's tick pulls them into one bubble without
 /// any ring/accept. The whole room gets the badge; mute relays as
 /// participant-scoped presence; hang-up ends the bubble.
@@ -157,7 +157,7 @@ async fn bubble_forms_and_carries_presence() {
     }
 }
 
-/// A user not in any call cannot send call messages (README §5/§6.3:
+/// A user not in any call cannot send call messages (docs/arch/protocol.md:
 /// errors go back as `error` messages).
 #[tokio::test]
 async fn call_mute_outside_a_call_is_rejected() {

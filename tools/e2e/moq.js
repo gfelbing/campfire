@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * MoQ call E2E (docs/moq-sfu.md §9 Phases 2–3): real browser ↔ SFU, both
+ * MoQ call E2E (docs/arch/moq-sfu.md): real browser ↔ SFU, both
  * directions.
  *
  * Drives the real client in headless Brave/Chromium with fake media:
@@ -50,7 +50,7 @@ const NAME_B = `moqb-${STAMP}`;
 const BROWSER = arg("browser", "brave");
 const ROOM = arg("room", "island");
 // Latency budget for the downlink playback delay and jitter-buffer depth
-// (a sanity bound, docs/moq-sfu.md §9 Phase 3).
+// (a sanity bound, docs/arch/moq-sfu.md).
 const MAX_LATENCY_MS = 1000;
 // Soak (issues.md issue 8.6): minutes to hold the call before the teardown
 // step; 0 (unset) skips the soak. E2E_SERVER_LOG / E2E_SERVER_PID enable the
@@ -226,7 +226,7 @@ async function assertDownlinkLive(page, label, timeoutMs) {
     args: [
       "--no-sandbox",
       "--disable-dev-shm-usage",
-      // README §12: fake media, no permission prompts.
+      // docs/dev/testing.md: fake media, no permission prompts.
       "--use-fake-ui-for-media-stream",
       "--use-fake-device-for-media-stream",
       // Dev cert: headless over TCP must skip the interstitial.

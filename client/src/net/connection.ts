@@ -15,7 +15,7 @@ import { encodeLine } from "./types";
  *
  * Uses WebTransport when the browser has it (streams + datagrams); otherwise
  * the SSE+POST fallback (`/rt/sse` + `/rt/event`) — same protocol, no
- * datagram movement (README §8).
+ * datagram movement (docs/arch/client.md).
  */
 export interface ConnHandlers {
   onHello: (h: {
@@ -28,7 +28,7 @@ export interface ConnHandlers {
      *  a call. */
     call_chat?: ChatMsg[];
     call: UserBrief[];
-    /** Media ticket for an active call (reconnect catch-up, docs/moq-sfu.md
+    /** Media ticket for an active call (reconnect catch-up, docs/arch/moq-sfu.md
      *  §7). Present only when the user is in a call. */
     ticket?: string;
   }) => void;
@@ -40,7 +40,7 @@ export interface ConnHandlers {
   onUserStatus: (id: string, status: OwnStatus) => void;
   onMovement: (batch: MovementBatch) => void;
   /** A bubble started or grew; `participants` is the full list. `ticket`
-   *  is our media ticket when we are a participant (docs/moq-sfu.md §7). */
+   *  is our media ticket when we are a participant (docs/arch/moq-sfu.md). */
   onCallStart: (
     participants: UserBrief[],
     zone?: string,
@@ -64,7 +64,7 @@ export type ConnStatus = "connected" | "reconnecting" | "disconnected";
 
 const BACKOFF_MS = [1000, 2000, 4000, 8000, 16000, 30000];
 
-/// Keepalive cadence (README §5): the server reaps a command stream idle
+/// Keepalive cadence (docs/arch/protocol.md): the server reaps a command stream idle
 /// for 300 s, so 25 s leaves a wide margin. The ping writes through
 /// whatever transport is current, so a reconnect needs no restart.
 const PING_INTERVAL_MS = 25_000;
@@ -90,13 +90,13 @@ export class Connection {
   /** Our own user id from the last hello ("" until joined). */
   private selfId = "";
   /** Our reconnect token from the last hello ("" until joined). Sent back in
-   *  every join so a dropped connection restores this identity (README §5).
+   *  every join so a dropped connection restores this identity (docs/arch/protocol.md).
    *  Persisted per room in `sessionStorage`: a page reload re-joins with the
    *  same token, so the server replaces the old avatar instead of leaving a
    *  ghost behind for the reconnect window. Session-scoped storage means a
    *  fresh browser session correctly starts as a new user. */
   private token = "";
-  /** Keepalive ping timer (README §5); see `PING_INTERVAL_MS`. */
+  /** Keepalive ping timer (docs/arch/protocol.md); see `PING_INTERVAL_MS`. */
   private pingTimer: number | null = null;
 
   constructor(
@@ -157,7 +157,7 @@ export class Connection {
     this.connectOnce();
   }
 
-  /** Send a keepalive every `PING_INTERVAL_MS` (README §5): a stationary
+  /** Send a keepalive every `PING_INTERVAL_MS` (docs/arch/protocol.md): a stationary
    *  user sends no movement or chat, and the server reaps a command stream
    *  idle for 300 s — without the ping, such a session (and with it the
    *  identity and position) is lost after the 10 s reconnect window. */
@@ -203,10 +203,10 @@ export class Connection {
     t.sendMove(this.selfId, x, y, d, moving, ++this.moveSeq);
   }
 
-  // --- call state + presence (README §5/§6.3): plain stream messages; media
-  // --- never transits the server (docs/moq-sfu.md).
+  // --- call state + presence (docs/arch/protocol.md): plain stream messages; media
+  // --- never transits the server (docs/arch/moq-sfu.md).
 
-  /** Opt out of proximity bubbles (README §6.3) — or back in with false. */
+  /** Opt out of proximity bubbles (docs/arch/protocol.md) — or back in with false. */
   sendBubble(off: boolean): void {
     this.transport?.sendMsg({ t: "bubble", off });
   }
@@ -232,7 +232,7 @@ export class Connection {
     return this.transport?.getRtt() ?? Promise.resolve(null);
   }
 
-  /** Leave the room immediately (README §5): the server tears the session
+  /** Leave the room immediately (docs/arch/protocol.md): the server tears the session
    *  down with no reconnect grace — used right before a room switch. */
   sendLeave(): void {
     this.transport?.sendMsg({ t: "leave" });
@@ -339,7 +339,7 @@ export class Connection {
   /** Inner join payload (`room`, `name`, `avatar`, `token`, `status`) — what
    *  the SSE fallback POSTs, and what `joinMsg` wraps into a tagged stream
    *  message. The token (when we have one) makes a reconnect restore our
-   *  identity instead of creating a fresh user (README §5). */
+   *  identity instead of creating a fresh user (docs/arch/protocol.md). */
   joinPayload(): {
     room: string;
     name: string;

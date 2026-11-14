@@ -1,5 +1,5 @@
 // Campfire client entry point: boot overlay → map load → Pixi world →
-// realtime connection → game loop (README §8).
+// realtime connection → game loop (docs/arch/client.md).
 
 import { CallManager } from "./call/manager";
 import { createCallUI } from "./call/callui";
@@ -22,8 +22,8 @@ declare global {
   }
 }
 
-/// Local position sends: 15 Hz while moving, 2 Hz while idle (README §5).
-const SEND_EVERY_MS = 66; // 15 Hz — the README §5 per-user cap (was 10 Hz)
+/// Local position sends: 15 Hz while moving, 2 Hz while idle (docs/arch/protocol.md).
+const SEND_EVERY_MS = 66; // 15 Hz — the docs/arch/protocol.md per-user cap (was 10 Hz)
 const IDLE_EVERY_MS = 500;
 /// Avatar radius in tiles for local collision checks.
 const AVATAR_R = 0.3;
@@ -223,7 +223,7 @@ async function main(): Promise<void> {
       sidebar.setUserCount(roster.size);
       manager.setSelfId(h.you);
       presence.setUsers(h.users, new Set(h.call.map((u) => u.id)));
-      // Reconnect-with-token (README §5): `hello.call` is the authoritative
+      // Reconnect-with-token (docs/arch/protocol.md): `hello.call` is the authoritative
       // roster of the call we were in (if it survived our drop). Zone
       // catch-up `call_start`s (sent right after) refine the zone key.
       calls.clear();
@@ -236,7 +236,7 @@ async function main(): Promise<void> {
       }
       // A mid-call room joiner may already have received the room-wide
       // `call_start` catch-up before this `hello`; now that the roster is
-      // known, light up the in-call badges (README §6.3).
+      // known, light up the in-call badges (docs/arch/protocol.md).
       refreshCallUi();
     },
     onJoined: (u: UserBrief) => {
@@ -279,7 +279,7 @@ async function main(): Promise<void> {
         presence.setDnd(e.id, dnd);
       }
     },
-    // Bubble state (README §6.3): the manager owns the state machine;
+    // Bubble state (docs/arch/protocol.md): the manager owns the state machine;
     // the room-wide call *state* also drives the headphone badges.
     onCallStart: (ps, zone, ticket) => {
       const key = zone ?? "";
@@ -323,7 +323,7 @@ async function main(): Promise<void> {
     onStatus: () => {
       // A dropped connection must NOT tear down the call locally: the
       // server keeps our call membership through the reconnect window, and
-      // the next `hello.call` roster is the truth (README §5).
+      // the next `hello.call` roster is the truth (docs/arch/protocol.md).
     },
   });
 
@@ -332,7 +332,7 @@ async function main(): Promise<void> {
    *  lives in localStorage (boot.ts) and survives the reload, so a
    *  rejoin-with-new-identity is the same code path. The delay lets the
    *  `left` broadcast land before navigation kills the session
-   *  (README §11 Phase 7). */
+   *  (docs/dev/testing.md). */
   const navigateToRoom = (room: string, delayMs: number): void => {
     conn.sendLeave();
     window.setTimeout(() => {

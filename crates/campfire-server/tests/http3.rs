@@ -1,4 +1,4 @@
-//! Phase 1 acceptance test (README §11):
+//! Phase 1 acceptance test (docs/dev/testing.md):
 //!
 //! > `curl --http3 https://localhost:8443/healthz` returns 200; a browser
 //! > loads the page over HTTP/3.
@@ -96,7 +96,7 @@ async fn http3_healthz_index_and_maps() {
     assert_eq!(status, 404);
 }
 
-/// Phase 4 (README §11): the map and room endpoints serve the client.
+/// Phase 4 (docs/dev/testing.md): the map and room endpoints serve the client.
 #[tokio::test]
 async fn api_maps_by_id_and_rooms() {
     campfire_server::api::mark_start();

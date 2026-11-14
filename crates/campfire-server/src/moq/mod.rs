@@ -1,4 +1,4 @@
-//! The SFU (docs/moq-sfu.md §5): media-over-QUIC, server-transit.
+//! The SFU (docs/arch/moq-sfu.md): media-over-QUIC, server-transit.
 //!
 //! - [`tickets`] — short-lived media tickets, minted by the world on
 //!   `call_start` / reconnect `hello`.

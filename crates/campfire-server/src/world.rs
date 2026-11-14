@@ -3,7 +3,7 @@
 //! A single [`World`] behind `Arc<Mutex<..>>` is plenty for Phase 3: the lock
 //! is held only for short, non-awaiting mutations. A 50 ms tick task
 //! (spawned by [`start_ticking_with`]) batches every dirty member into one
-//! movement datagram per room (README §5); per-room owner tasks from README §7
+//! movement datagram per room (docs/arch/protocol.md); per-room owner tasks from docs/arch/protocol.md
 //! are the next step if the lock ever shows up in a profile.
 
 pub mod call;
@@ -20,20 +20,20 @@ use campfire_protocol::{
 };
 use rand::RngCore;
 
-/// Maximum chat lines kept per room (README §7).
+/// Maximum chat lines kept per room (docs/arch/protocol.md).
 const CHAT_HISTORY: usize = 100;
-/// Users per room (README §14).
+/// Users per room (docs/ops/README.md).
 const ROOM_CAP: usize = 2048;
-/// Server tick: one movement batch per room every 50 ms (README §5).
+/// Server tick: one movement batch per room every 50 ms (docs/arch/protocol.md).
 pub const TICK: Duration = Duration::from_millis(50);
-/// How long a disconnected user keeps their identity (README §5 reconnect):
+/// How long a disconnected user keeps their identity (docs/arch/protocol.md reconnect):
 /// position, call membership and the token all survive a drop for this long.
 /// 30 s, not 10: a browser that loses a WebTransport connection takes
 /// ~10-11 s to re-establish it (measured headless), so a 10 s window expired
 /// before the rejoin landed and the user was re-spawned with a fresh id.
 /// The extra hold on a genuinely closed tab is the accepted trade.
 pub const RECONNECT_WINDOW: Duration = Duration::from_secs(30);
-/// Proximity call (README §6.3): a bubble has a one-tile radius around the
+/// Proximity call (docs/arch/protocol.md): a bubble has a one-tile radius around the
 /// centroid of its participants. Less than [`BUBBLE_RADIUS`] tiles from
 /// another player (or from the bubble's center) pulls you in; at the radius
 /// or beyond drops you immediately.
@@ -42,11 +42,11 @@ const BUBBLE_RADIUS: f32 = 1.0;
 /// check for this long (their restored position is often outside the
 /// radius; walking out while connected still leaves immediately).
 const BUBBLE_RETURN_GRACE: Duration = Duration::from_secs(2);
-/// Largest movement datagram; bigger batches are split in halves (README §5).
+/// Largest movement datagram; bigger batches are split in halves (docs/arch/protocol.md).
 const MAX_DATAGRAM_BYTES: usize = 1200;
-/// Movement entries per user per second (README §5: client sends ≤15 Hz).
+/// Movement entries per user per second (docs/arch/protocol.md: client sends ≤15 Hz).
 const MOVES_PER_SEC: usize = 30;
-/// Maximum avatar speed in tiles per second (README §5).
+/// Maximum avatar speed in tiles per second (docs/arch/protocol.md).
 const MAX_SPEED: f32 = 8.0;
 
 /// Id of a connected user, e.g. `u_1f3a9c02be47d158`.
@@ -75,14 +75,14 @@ struct Member {
     /// Outbound datagram queue for this session (movement batches).
     dtx: tokio::sync::mpsc::UnboundedSender<Vec<u8>>,
     /// The session that currently owns this member (guards against a stale
-    /// session's disconnect clobbering a newer one, README §5 reconnect).
+    /// session's disconnect clobbering a newer one, docs/arch/protocol.md reconnect).
     session: u64,
-    /// Reconnect token (README §5): echoed in `hello`, matched in `join`.
+    /// Reconnect token (docs/arch/protocol.md): echoed in `hello`, matched in `join`.
     token: String,
     /// When the owning session died; swept by the tick into a real leave
-    /// once the reconnect window has elapsed (README §5).
+    /// once the reconnect window has elapsed (docs/arch/protocol.md).
     gone_at: Option<Instant>,
-    /// Proximity-call opt-out (README §6.3, `ClientMsg::Bubble`): a user
+    /// Proximity-call opt-out (docs/arch/protocol.md, `ClientMsg::Bubble`): a user
     /// with this set is never pulled into a bubble and leaves the one they
     /// are in.
     bubble_off: bool,
@@ -97,7 +97,7 @@ struct Member {
     reentered_at: Option<Instant>,
 }
 
-/// A member who left explicitly (tab close / room switch, README §5): the
+/// A member who left explicitly (tab close / room switch, docs/arch/protocol.md): the
 /// avatar is removed at once (no ghost), but the identity is held under the
 /// token for the reconnect window, so a quick page reload re-joins as the
 /// same user instead of getting a fresh id.
@@ -116,7 +116,7 @@ struct Room {
     /// Bubble-local chat history (issues.md #2): messages sent inside
     /// calls, visible only while in a call.
     chat_call: VecDeque<ChatMsg>,
-    /// The room's calls (README §7): at most one proximity bubble
+    /// The room's calls (docs/arch/protocol.md): at most one proximity bubble
     /// (`zone: None`) plus one call per occupied jitsi zone. A user is in
     /// at most one call at a time.
     calls: Vec<call::Call>,
@@ -133,7 +133,7 @@ fn call_containing(entry: &Room, id: &str) -> Option<usize> {
 /// Why a join was refused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JoinError {
-    /// Room is at its user cap (README §14).
+    /// Room is at its user cap (docs/ops/README.md).
     RoomFull,
     /// The room id is not a known map.
     UnknownRoom,
@@ -145,18 +145,18 @@ pub struct World {
     maps: Arc<campfire_maps::Maps>,
     rooms: Arc<Mutex<HashMap<String, Room>>>,
     /// One per connected session; lets a stale session's disconnect lose to
-    /// a newer session that already restored the same token (README §5).
+    /// a newer session that already restored the same token (docs/arch/protocol.md).
     session_counter: Arc<AtomicU64>,
-    /// How long a disconnected user keeps their identity (README §5).
+    /// How long a disconnected user keeps their identity (docs/arch/protocol.md).
     reconnect_window: Duration,
     /// Explicit leaves per (room, token), for the reload re-join (README
     /// §5): [`World::leave`] removes the avatar at once but parks the
     /// identity here until the reconnect window elapses.
     left: Arc<Mutex<HashMap<(String, String), LeftEntry>>>,
-    /// Monotonic call ids (docs/moq-sfu.md §5): name the call's media
+    /// Monotonic call ids (docs/arch/moq-sfu.md): name the call's media
     /// origin and ride in media tickets.
     call_counter: Arc<AtomicU64>,
-    /// Media tickets for `/moq` (docs/moq-sfu.md §5); the SFU shares this
+    /// Media tickets for `/moq` (docs/arch/moq-sfu.md); the SFU shares this
     /// handle.
     tickets: Arc<crate::moq::tickets::TicketRegistry>,
     /// Set by [`Self::on_call_end`]; fired with the call id when a call
@@ -232,7 +232,7 @@ impl World {
         self
     }
 
-    /// Register the SFU's call-end hook (docs/moq-sfu.md §5): called with
+    /// Register the SFU's call-end hook (docs/arch/moq-sfu.md): called with
     /// the call id whenever a call ends, so the SFU drops the call's media
     /// origin. Must be set before the tick loop starts.
     pub fn on_call_end(mut self, hook: Arc<dyn Fn(u64) + Send + Sync>) -> Self {
@@ -240,13 +240,13 @@ impl World {
         self
     }
 
-    /// The ticket store media sessions present on `/moq` (docs/moq-sfu.md
+    /// The ticket store media sessions present on `/moq` (docs/arch/moq-sfu.md
     /// §5): one per process, shared with the SFU.
     pub fn tickets(&self) -> &crate::moq::tickets::TicketRegistry {
         &self.tickets
     }
 
-    /// The SFU's CONNECT check (docs/moq-sfu.md §5): the ticket's call must
+    /// The SFU's CONNECT check (docs/arch/moq-sfu.md): the ticket's call must
     /// still exist in its room with the ticket's user in it.
     pub fn call_active(&self, room: &str, call_id: u64, user: &str) -> bool {
         let rooms = self.rooms.lock().unwrap();
@@ -259,12 +259,12 @@ impl World {
             .any(|c| c.id == call_id && c.participants.contains_key(user))
     }
 
-    /// Next session id (monotonic; guards discard/leave races, README §5).
+    /// Next session id (monotonic; guards discard/leave races, docs/arch/protocol.md).
     pub fn next_session_id(&self) -> u64 {
         self.session_counter.fetch_add(1, Ordering::Relaxed)
     }
 
-    /// Next call id (monotonic per process; docs/moq-sfu.md §5).
+    /// Next call id (monotonic per process; docs/arch/moq-sfu.md).
     fn next_call_id(&self) -> u64 {
         self.call_counter.fetch_add(1, Ordering::Relaxed)
     }
@@ -283,7 +283,7 @@ impl World {
     }
 
     /// Generate a fresh user id (`u_` + 16 random hex digits), unguessable
-    /// per README §14 (logs carry no nicknames or personal data; ids must
+    /// per docs/ops/README.md (logs carry no nicknames or personal data; ids must
     /// not be predictable).
     fn next_user_id(&self) -> String {
         let mut bytes = [0u8; 8];
@@ -294,14 +294,14 @@ impl World {
         )
     }
 
-    /// Generate a fresh reconnect token: 32 random hex chars (README §5).
+    /// Generate a fresh reconnect token: 32 random hex chars (docs/arch/protocol.md).
     fn next_token(&self) -> String {
         let mut bytes = [0u8; 16];
         rand::thread_rng().fill_bytes(&mut bytes);
         bytes.iter().map(|b| format!("{b:02x}")).collect()
     }
 
-    /// Join a room (README §5). Three paths:
+    /// Join a room (docs/arch/protocol.md). Three paths:
     ///
     /// * **Reconnect**: `token` matches an existing member (gone, or still
     ///   alive — the old session may not have been detected as dead yet) →
@@ -337,7 +337,7 @@ impl World {
         let mut rooms = self.rooms.lock().unwrap();
         let room_entry = rooms.entry(room.to_owned()).or_default();
 
-        // Reconnect (README §5): the token names an existing member. The
+        // Reconnect (docs/arch/protocol.md): the token names an existing member. The
         // identity (id, name, position, token, call membership) survives;
         // only the session channels change hands.
         if let Some(tok) = token.filter(|t| !t.is_empty())
@@ -359,7 +359,7 @@ impl World {
             member.seq = 0;
             member.dirty = true;
             // A mid-call reconnect keeps call membership, so the user gets
-            // a fresh media ticket for it (docs/moq-sfu.md §7).
+            // a fresh media ticket for it (docs/arch/moq-sfu.md).
             let (call, ticket) = match room_entry
                 .calls
                 .iter()
@@ -383,7 +383,7 @@ impl World {
             return Ok(joined);
         }
 
-        // Reload re-join (README §5): the tab was hidden/closed, so the
+        // Reload re-join (docs/arch/protocol.md): the tab was hidden/closed, so the
         // member was removed by [`World::leave`] (the room heard `left`),
         // but the token still names them inside the reconnect window.
         // Restore the same id, name and position; the room hears a fresh
@@ -431,7 +431,7 @@ impl World {
             };
             room_entry.users.insert(id.clone(), member);
             let joined = Joined {
-                // The leaver's call ended with the leave (README §6.3); a
+                // The leaver's call ended with the leave (docs/arch/protocol.md); a
                 // restored user re-enters calls through the bubble engine.
                 call: Vec::new(),
                 you: id.clone(),
@@ -514,7 +514,7 @@ impl World {
                 .map(|c| c.participant_list())
                 .unwrap_or_default(),
             // A fresh joiner is never a call participant; a ticket is minted
-            // only when they are pulled into a bubble (docs/moq-sfu.md §7).
+            // only when they are pulled into a bubble (docs/arch/moq-sfu.md).
             ticket: None,
         };
 
@@ -535,7 +535,7 @@ impl World {
                 });
             }
         }
-        // Catch-up (README §6.3): for every running call, the new room
+        // Catch-up (docs/arch/protocol.md): for every running call, the new room
         // member gets its current roster so their avatars' headphone badge
         // is correct from the start.
         for call in &room_entry.calls {
@@ -557,7 +557,7 @@ impl World {
         Ok(joined)
     }
 
-    /// A session died (README §5 reconnect): the member keeps their
+    /// A session died (docs/arch/protocol.md reconnect): the member keeps their
     /// identity — room, position, call membership, token — for the
     /// reconnect window. Nobody is notified; to the room the user is just
     /// still there. The tick turns this into a real [`World::leave`] once
@@ -580,7 +580,7 @@ impl World {
     }
 
     /// Remove a user from their room and tell everyone left inside. A call
-    /// involving the leaver drops (README §6.3): the leaver is not notified,
+    /// involving the leaver drops (docs/arch/protocol.md): the leaver is not notified,
     /// they are gone.
     ///
     /// Guarded by the leaving session: an in-flight `leave` from an old
@@ -588,7 +588,7 @@ impl World {
     /// must not clobber a member a newer session already restored.
     ///
     /// The member's identity is parked in [`World::left`] under their token
-    /// for the reconnect window (README §5): a page reload is an explicit
+    /// for the reconnect window (docs/arch/protocol.md): a page reload is an explicit
     /// leave followed by a re-join within seconds, and must come back as the
     /// same user rather than a fresh id.
     pub fn leave(&self, room: &str, id: &str, session_id: u64) {
@@ -618,7 +618,7 @@ impl World {
         }
     }
 
-    /// Validate and apply one user's movement batch (README §5 "Movement
+    /// Validate and apply one user's movement batch (docs/arch/protocol.md "Movement
     /// rules"). Every entry must come from the caller, carry a strictly
     /// newer sequence number, stay inside the map on a walkable tile, and
     /// respect the 8 tiles/s speed gate. Rejected entries are dropped
@@ -683,7 +683,7 @@ impl World {
         }
     }
 
-    /// One 50 ms tick (README §5): first expire gone members whose
+    /// One 50 ms tick (docs/arch/protocol.md): first expire gone members whose
     /// reconnect window has elapsed (a real leave, with notification), then
     /// for every room batch the dirty members into datagram-sized movement
     /// JSON and fan it out to all members. Calls that end during the tick
@@ -863,13 +863,13 @@ impl World {
     }
 
     // -------------------------------------------------------------------
-    // Call signaling (README §5/§6): the server relays between members of
+    // Call signaling (docs/arch/protocol.md): the server relays between members of
     // the same room/call and tracks who is in which call. It never sees
     // media. `room` is always the sender's room, so cross-room signaling
     // cannot reach another room's state.
     // -------------------------------------------------------------------
 
-    /// Opt in/out of proximity calls (README §6.3, `ClientMsg::Bubble`).
+    /// Opt in/out of proximity calls (docs/arch/protocol.md, `ClientMsg::Bubble`).
     /// `off` also drops the user from the current bubble — the next tick
     /// sweeps them out (immediate removal, no leave delay).
     pub fn set_bubble(&self, room: &str, id: &str, off: bool) -> Result<(), ErrorCode> {
@@ -918,7 +918,7 @@ impl World {
     }
 
     /// The sender's mute/camera state flipped; broadcast to the other call
-    /// participants (presence only, README §6.3 — no renegotiation).
+    /// participants (presence only, docs/arch/protocol.md — no renegotiation).
     pub fn call_mute(
         &self,
         room: &str,
@@ -1003,7 +1003,7 @@ impl World {
         (rooms.values().map(|r| r.users.len()).sum(), rooms.len())
     }
 
-    /// The ids of every call still present in a room (docs/moq-sfu.md §5):
+    /// The ids of every call still present in a room (docs/arch/moq-sfu.md):
     /// the source of truth for the SFU's origin sweeper, which drops any
     /// media origin whose call is no longer here.
     pub fn live_call_ids(&self) -> Vec<u64> {
@@ -1015,7 +1015,7 @@ impl World {
             .collect()
     }
 
-    /// The room with an active bubble in it (README §6.3): one per room at
+    /// The room with an active bubble in it (docs/arch/protocol.md): one per room at
     /// most, so the count is the number of live bubbles.
     pub fn call_count(&self) -> usize {
         self.rooms
@@ -1027,8 +1027,8 @@ impl World {
     }
 }
 
-/// Spawn the 50 ms tick loop (README §5) with tick-duration metrics
-/// (README §11 Phase 8); returns its handle so the caller can stop it.
+/// Spawn the 50 ms tick loop (docs/arch/protocol.md) with tick-duration metrics
+/// (docs/ops/README.md); returns its handle so the caller can stop it.
 pub fn start_ticking_with(
     world: World,
     metrics: crate::metrics::Metrics,
@@ -1045,7 +1045,7 @@ pub fn start_ticking_with(
     })
 }
 
-/// Drop `id` from their call, if any, and tell the room (README §6.3).
+/// Drop `id` from their call, if any, and tell the room (docs/arch/protocol.md).
 /// Used when the leaver toggles out, hangs up, or is gone and cannot be
 /// notified.
 ///
@@ -1078,7 +1078,7 @@ fn leave_call(entry: &mut Room, id: &str) -> Option<u64> {
     Some(call.id)
 }
 
-/// One step of the proximity-call engine (README §6.3), run every tick
+/// One step of the proximity-call engine (docs/arch/protocol.md), run every tick
 /// before the movement batch: the bubble is the one-tile circle around the
 /// centroid of its participants. Walk within [`BUBBLE_RADIUS`] of the
 /// center (or of another player, when no bubble exists yet) and you are
@@ -1086,7 +1086,7 @@ fn leave_call(entry: &mut Room, id: &str) -> Option<u64> {
 /// immediately. At most one join per tick keeps the roster broadcast
 /// ordered and trickle-paced. Returns the ids of the
 /// calls that ended this step, so the caller can fire the SFU's call-end
-/// hook (docs/moq-sfu.md §5).
+/// hook (docs/arch/moq-sfu.md).
 fn update_bubbles(
     world: &World,
     room: &str,
@@ -1364,7 +1364,7 @@ fn center_of_call(entry: &Room, call: &call::Call) -> (f32, f32) {
 
 /// Broadcast the bubble's roster to the whole room: `CallStart` powers the
 /// headphone badge on everyone, and `ticket` mints a media ticket for each
-/// participant (docs/moq-sfu.md §7) — bystanders get the roster but no
+/// participant (docs/arch/moq-sfu.md) — bystanders get the roster but no
 /// ticket.
 fn broadcast_call_start(world: &World, room: &str, entry: &Room, call: &call::Call) {
     let participants = call.participant_list();
@@ -1392,7 +1392,7 @@ fn dist(a: (f32, f32), b: (f32, f32)) -> f32 {
 /// [`leave_call`]) — broadcast `Left` to everyone left, and drop the room
 /// when it becomes empty. The caller owns the `rooms` lock. Returns the
 /// ids of the calls that ended, so the caller can fire the SFU's
-/// call-end hook (docs/moq-sfu.md §5).
+/// call-end hook (docs/arch/moq-sfu.md).
 fn remove_from_room(rooms: &mut HashMap<String, Room>, room: &str, id: &str) -> Vec<u64> {
     let Some(entry) = rooms.get_mut(room) else {
         return Vec::new();
@@ -1447,7 +1447,7 @@ fn status_of(m: &Member) -> Option<Status> {
 
 /// Split a room's dirty entries into datagram-sized JSON batches: encode all
 /// at once, and when the batch would exceed the datagram cap split the entry
-/// list in halves and recurse (README §5 overflow rule).
+/// list in halves and recurse (docs/arch/protocol.md overflow rule).
 fn encode_batches(entries: &[MovementEntry]) -> Vec<Vec<u8>> {
     if entries.is_empty() {
         return Vec::new();
@@ -1470,7 +1470,7 @@ fn encode_batches(entries: &[MovementEntry]) -> Vec<Vec<u8>> {
 pub struct Joined {
     /// The joining user's own id.
     pub you: String,
-    /// The user's reconnect token (README §5), echoed in `hello`.
+    /// The user's reconnect token (docs/arch/protocol.md), echoed in `hello`.
     pub token: String,
     /// Everyone in the room, including the joiner.
     pub users: Vec<UserState>,
@@ -1481,7 +1481,7 @@ pub struct Joined {
     /// The room's current call participants (empty when no call is running).
     pub call: Vec<UserBrief>,
     /// The joiner's media ticket when they are in an active call
-    /// (reconnect catch-up; docs/moq-sfu.md §7). `None` for fresh joiners
+    /// (reconnect catch-up; docs/arch/moq-sfu.md). `None` for fresh joiners
     /// and for users outside any call.
     pub ticket: Option<String>,
 }
@@ -2029,7 +2029,7 @@ mod tests {
         ));
     }
 
-    // -- proximity bubbles (README §6.3) ---------------------------------
+    // -- proximity bubbles (docs/arch/protocol.md) ---------------------------------
 
     /// A joined test user, keeping its outbound stream receiver.
     struct TestUser {
@@ -2295,7 +2295,7 @@ mod tests {
         assert!(matches!(a.rx.try_recv().unwrap(), ServerMsg::Left { .. }));
     }
 
-    // -- reconnect with token (README §5, Phase 7) -----------------------
+    // -- reconnect with token (docs/dev/testing.md) -----------------------
 
     /// Join with an optional reconnect token, keeping the outbound stream
     /// receiver, the token, and the session id this join ran under.

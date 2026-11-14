@@ -1,4 +1,4 @@
-//! Phase 7 acceptance tests (README §11): reconnect-with-token (30 s
+//! Phase 7 acceptance tests (docs/dev/testing.md): reconnect-with-token (30 s
 //! window) and chat/signaling reliability under 5 % simulated packet loss.
 //!
 //! > **Done when:** chat is reliable under 5 % simulated packet loss
@@ -40,7 +40,7 @@ const CONNECT_ATTEMPTS: u32 = 6;
 /// Simulating loss at the link level (rather than inside quinn) means the
 /// QUIC stack on both ends is fully real: retransmissions ride the same
 /// lossy path, which is exactly what "chat is reliable under 5 % packet
-/// loss" means (README §11 Phase 7).
+/// loss" means (docs/dev/testing.md).
 ///
 /// Topology: clients connect to the `front` socket. Forwarder 1 reads
 /// `front` and **sends through `back`**, so the server sees `back` as the
@@ -265,7 +265,7 @@ async fn reconnect_within_window_keeps_identity_no_flicker() {
     tokio::time::sleep(Duration::from_millis(250)).await;
 
     // Alice walked within the bubble radius (0.5 tiles < 1.0): the tick forms
-    // the proximity bubble on its own — no ring, no accept (README §6.3).
+    // the proximity bubble on its own — no ring, no accept (docs/arch/protocol.md).
     // Call state is room-wide: both hear the roster.
     match a.recv().await {
         ServerMsg::CallStart { participants, .. } => {
@@ -281,7 +281,7 @@ async fn reconnect_within_window_keeps_identity_no_flicker() {
     }
 
     // Alice's connection dies. Bob must hear NOTHING: no call_leave, no
-    // left (README §5: the reconnect window keeps her in the room).
+    // left (docs/arch/protocol.md: the reconnect window keeps her in the room).
     a.close();
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert_quiet(

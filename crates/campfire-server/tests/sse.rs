@@ -1,4 +1,4 @@
-//! Phase 4 acceptance test (README §11): the SSE+POST fallback carries the
+//! Phase 4 acceptance test (docs/dev/testing.md): the SSE+POST fallback carries the
 //! same protocol as the WebTransport stream (minus datagram movement).
 //!
 //! Verified over **real QUIC/HTTP/3** on an ephemeral port:

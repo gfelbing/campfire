@@ -4,7 +4,7 @@
 //! (global buttons); the theater itself only keeps the hang-up button.
 //! Every stream is its own tile — a participant can send camera AND screen
 //! at once, so a sharer appears twice. Remote video is a `<canvas>` the MoQ
-//! downlink paints (docs/moq-sfu.md §9 Phase 3); the local PiP stays a
+//! downlink paints (docs/arch/moq-sfu.md); the local PiP stays a
 //! `<video>` on `localStream`. Clicking a stream focuses it large in
 //! the center overlay; clicking again (or Escape) unfocuses. Joining is
 //! automatic (proximity), so there are no ring or accept overlays —
@@ -146,7 +146,7 @@ export function createCallUI(container: HTMLElement, actions: CallUiActions): Ca
   // --- tiles: one per stream slot, created/updated in place ---------------
   // --- (rebuilding <video> elements would restart the streams).
   const tiles = new Map<string, Tile>();
-  /** Shared AudioContext for the per-tile level meters (README §6.3). */
+  /** Shared AudioContext for the per-tile level meters (docs/arch/protocol.md). */
   let audioCtx: AudioContext | null = null;
   let levelTimer: number | null = null;
   /** Key of the tile currently shown large in the center overlay. */
@@ -191,7 +191,7 @@ export function createCallUI(container: HTMLElement, actions: CallUiActions): Ca
     t.analyser = analyser;
     t.data = new Uint8Array(analyser.frequencyBinCount);
     if (levelTimer === null) {
-      // 10 Hz (README §6.3): one pass over all tiles per tick.
+      // 10 Hz (docs/arch/protocol.md): one pass over all tiles per tick.
       levelTimer = window.setInterval(() => {
         for (const tile of tiles.values()) {
           if (!tile.meter || !tile.analyser || !tile.data) {

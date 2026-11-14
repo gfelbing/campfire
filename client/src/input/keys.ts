@@ -63,7 +63,7 @@ export function attachKeys(): void {
   });
 }
 
-/** Desired velocity in tiles/s from the key state (walk 4, run 8 — README §5). */
+/** Desired velocity in tiles/s from the key state (walk 4, run 8 — docs/arch/protocol.md). */
 export function desiredVelocity(dtTiles: number): { vx: number; vy: number; moving: boolean } {
   const vx = (keys.right ? 1 : 0) - (keys.left ? 1 : 0);
   const vy = (keys.down ? 1 : 0) - (keys.up ? 1 : 0);

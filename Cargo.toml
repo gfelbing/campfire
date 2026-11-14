@@ -14,7 +14,7 @@ rust-version = "1.99.1"
 license-file = "LICENSE"
 repository = "https://github.com/campfire/campfire"
 
-# Centralized dependency pins (README §10). Bump here, nowhere else.
+# Centralized dependency pins (docs/dev/README.md). Bump here, nowhere else.
 [workspace.dependencies]
 anyhow = "1"
 axum = "0.8"

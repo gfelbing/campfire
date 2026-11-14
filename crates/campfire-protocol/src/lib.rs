@@ -6,7 +6,7 @@
 //! makes it trivially unit-testable and lets the server, the test clients, and
 //! (later) load-test tools share one definition of the protocol.
 //!
-//! See README §5 (Realtime protocol) for the message catalogue.
+//! See docs/arch/protocol.md (Realtime protocol) for the message catalogue.
 //!
 //! Wire encoding: **newline-delimited JSON** on the reliable stream; one JSON
 //! object per datagram.
@@ -106,7 +106,7 @@ pub struct ChatMsg {
     pub scope: ChatScope,
 }
 
-/// Why the server rejected something (README §5 `error`).
+/// Why the server rejected something (docs/arch/protocol.md `error`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ErrorCode {
@@ -123,7 +123,7 @@ pub enum ErrorCode {
     /// Room id is not a known map.
     UnknownRoom,
     /// Call signaling state violation: not in the room together, sender
-    /// not a participant, or a call is already in progress (README §5/§6).
+    /// not a participant, or a call is already in progress (docs/arch/protocol.md).
     CallNotAllowed,
 }
 
@@ -136,7 +136,7 @@ pub enum ClientMsg {
         name: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         avatar: Option<Avatar>,
-        /// Reconnect token from a previous `hello` (README §5): restores the
+        /// Reconnect token from a previous `hello` (docs/arch/protocol.md): restores the
         /// old identity within the server's reconnect window instead of
         /// creating a new user.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -165,7 +165,7 @@ pub enum ClientMsg {
     /// server tears the session down; the client reconnects elsewhere if it
     /// wants to be somewhere (room switcher).
     Leave,
-    /// Presence toggle for proximity calls (README §6.3): `off` disables
+    /// Presence toggle for proximity calls (docs/arch/protocol.md): `off` disables
     /// auto-joining (and leaves the current call). Bubbles are computed by
     /// the server from positions; this only opts in or out.
     Bubble {
@@ -185,7 +185,7 @@ pub enum ClientMsg {
     },
     /// Leave the current call (1:1 or huddle).
     CallLeave,
-    /// Keepalive (README §5): the server ignores it. The stream activity
+    /// Keepalive (docs/arch/protocol.md): the server ignores it. The stream activity
     /// alone resets the server's idle timeout, so a stationary user (no
     /// movement, no chat) keeps their session — and with it their identity
     /// and position — alive.
@@ -200,7 +200,7 @@ pub enum ServerMsg {
         you: String,
         room: String,
         /// This session's reconnect token: send it back in `join` after a
-        /// dropped connection to restore this identity (README §5).
+        /// dropped connection to restore this identity (docs/arch/protocol.md).
         token: String,
         users: Vec<UserState>,
         chat: Vec<ChatMsg>,
@@ -211,10 +211,10 @@ pub enum ServerMsg {
         call_chat: Vec<ChatMsg>,
         /// The room's current call participants (empty when no call is
         /// running): the authoritative catch-up for badges and mid-call
-        /// rejoin (README §6.3).
+        /// rejoin (docs/arch/protocol.md).
         call: Vec<UserBrief>,
         /// The user's media ticket when they are in an active call
-        /// (reconnect catch-up; docs/moq-sfu.md §7). Present only then.
+        /// (reconnect catch-up; docs/arch/moq-sfu.md). Present only then.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         ticket: Option<String>,
     },
@@ -245,7 +245,7 @@ pub enum ServerMsg {
     },
     /// A call (re)started or someone joined: everyone in the room gets the
     /// full participant list (the authoritative catch-up for badges and
-    /// mid-call rejoin, README §6.3).
+    /// mid-call rejoin, docs/arch/protocol.md).
     CallStart {
         room: String,
         participants: Vec<UserBrief>,
@@ -255,7 +255,7 @@ pub enum ServerMsg {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         zone: Option<String>,
         /// The recipient's media ticket when the recipient is a
-        /// participant of this call (docs/moq-sfu.md §7). Bystanders get
+        /// participant of this call (docs/arch/moq-sfu.md). Bystanders get
         /// the roster for the badge but no ticket. Present only for
         /// participants.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -269,7 +269,7 @@ pub enum ServerMsg {
         zone: Option<String>,
     },
     /// The call is over (no participants left). `reason` is `last_left`
-    /// (README §5). `zone` marks the call (only sent when it is a zone
+    /// (docs/arch/protocol.md). `zone` marks the call (only sent when it is a zone
     /// call); rooms can carry several concurrent calls.
     CallEnd {
         reason: String,
@@ -399,7 +399,7 @@ mod tests {
                 color: None,
                 status: None,
             }],
-            // A minted media ticket (docs/moq-sfu.md §7): 32 random bytes,
+            // A minted media ticket (docs/arch/moq-sfu.md): 32 random bytes,
             // hex-encoded.
             ticket: Some("9f3ab1c2de4708ab".repeat(4)),
         };

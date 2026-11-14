@@ -69,7 +69,7 @@ pub async fn start_server_with_auth(
     ));
     // Wire the MoQ SFU exactly as production does: share the world's ticket
     // store, and let the world's call-end hook reap the SFU's media origins
-    // (docs/moq-sfu.md §5).
+    // (docs/arch/moq-sfu.md).
     let moq = campfire_server::moq::MoqSfu::new(world.clone(), metrics.clone());
     let world = world.on_call_end(moq.call_end_hook());
     let _tick = campfire_server::world::start_ticking_with(world.clone(), metrics.clone());

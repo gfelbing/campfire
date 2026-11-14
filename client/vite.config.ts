@@ -1,6 +1,6 @@
 import { defineConfig } from "vite";
 
-// The client is embedded into the server binary (README §3): base "/" so all
+// The client is embedded into the server binary (docs/arch/overview.md): base "/" so all
 // asset URLs are origin-relative.
 //
 // `CAMPFIRE_DEBUG=1` (the `build:e2e` script) keeps the e2e debug hooks

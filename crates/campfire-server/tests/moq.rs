@@ -1,4 +1,4 @@
-//! Phase 1 acceptance tests (docs/moq-sfu.md §9): the SFU wired into the
+//! Phase 1 acceptance tests (docs/arch/moq-sfu.md): the SFU wired into the
 //! production server. A spike-style client (moq-net over a `wtransport`
 //! WebTransport connection, exactly the Phase 0 tier-1 client) publishes
 //! and subscribes through the real `/moq/{ticket}` route with a minted
@@ -6,7 +6,7 @@
 //!
 //! The realtime `/wt` channel and the MoQ `/moq` channel are separate
 //! WebTransport connections to the same server, mirroring the production
-//! layout (docs/moq-sfu.md §3).
+//! layout (docs/arch/moq-sfu.md).
 
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
@@ -143,7 +143,7 @@ fn endpoint() -> WtEndpoint {
 
 /// Connect a MoQ session to `/moq/{ticket}`, retrying the whole
 /// WebTransport and MoQ handshake on failure (the h3 SETTINGS race,
-/// `docs/moq-sfu.md` / spike `connect_session`). A rejected ticket (403
+/// `docs/arch/moq-sfu.md` / spike `connect_session`). A rejected ticket (403
 /// before the upgrade) also surfaces here as a connect error, so a failed
 /// admission and a flaky connect are both retried — bounded, so a genuine
 /// rejection still fails. Tickets are single-use, so a retry only ever
@@ -246,7 +246,7 @@ async fn publish_and_subscribe_within_a_call() {
 
     // Alice publishes her own namespace (`call/<room>/<user-id>`) and
     // streams fifty audio frames at 20 ms intervals — the spike shape
-    // (docs/moq-sfu.md §9): the publisher streams live while the
+    // (docs/arch/moq-sfu.md): the publisher streams live while the
     // subscriber joins.
     let path = format!("call/office/{a_id}");
     let info = moq_net::track::Info::default().with_timescale(Timescale::MICRO);

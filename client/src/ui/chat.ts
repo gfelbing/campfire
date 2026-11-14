@@ -1,4 +1,4 @@
-// Chat panel: history, live lines, typing indicator, input (README §8).
+// Chat panel: history, live lines, typing indicator, input (docs/arch/client.md).
 // Two instances (issues.md #2): the room-wide chat and the bubble-local
 // chat; each sends with its scope and reports new foreign lines to its
 // unread indicator.

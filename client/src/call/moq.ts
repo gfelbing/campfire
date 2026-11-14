@@ -1,4 +1,4 @@
-//! MoQ call session (docs/moq-sfu.md §9, Phases 2–3): one session per call,
+//! MoQ call session (docs/arch/moq-sfu.md): one session per call,
 //! both directions.
 //!
 //! One `@moq/net` connection on `/moq/{ticket}` carries the uplink (our

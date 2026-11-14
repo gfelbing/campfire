@@ -1,5 +1,5 @@
 # PR / main checks: Rust (fmt, clippy, tests), the client build (tsc + vite),
-# and the headless e2e suite (README §11 Phase 9). The `docker` workflow only
+# and the headless e2e suite (docs/dev/testing.md). The `docker` workflow only
 # builds + pushes on version tags; this catches regressions before a tag.
 
 name: check

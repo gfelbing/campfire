@@ -39,18 +39,18 @@ pub struct Config {
     pub maps_dir: PathBuf,
 
     /// Emit structured JSON logs (one object per line) instead of the
-    /// human-readable default — for log shippers (README §11 Phase 8).
+    /// human-readable default — for log shippers (docs/ops/README.md).
     #[arg(long)]
     pub log_json: bool,
 
     /// Externally visible address of this server, used for the Alt-Svc
-    /// bootstrap (README §2). Defaults to `listen` (correct for
+    /// bootstrap (docs/arch/decisions.md). Defaults to `listen` (correct for
     /// dev; set behind a NAT/firewall). Accepts `ip:port` or a bare `ip`
     /// (the port then falls back to `--listen`'s).
     #[arg(long, value_parser = parse_external)]
     pub external: Option<SocketAddr>,
 
-    /// Enable OpenID Connect authentication (README §11). When enabled, a
+    /// Enable OpenID Connect authentication (docs/dev/testing.md). When enabled, a
     /// visitor must sign in through the IdP before joining, and the display
     /// name is forced from the id_token. Requires the four
     /// `--auth-openid-*` fields below.

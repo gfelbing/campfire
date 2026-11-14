@@ -1,10 +1,10 @@
-//! Per-room call state (README §6/§7): proximity bubbles and zone calls.
+//! Per-room call state (docs/arch/protocol.md): proximity bubbles and zone calls.
 //!
 //! One `Option<Call>` per room, plus one per occupied `jitsiRoom` zone. The
 //! server *computes* the call from avatar positions in the 50 ms tick
 //! ([`crate::world::World::tick`]) — walking within the join radius of a
 //! participant pulls you in; walking (or toggling) out drops you immediately.
-//! The server never touches media (it rides the MoQ SFU, docs/moq-sfu.md); it
+//! The server never touches media (it rides the MoQ SFU, docs/arch/moq-sfu.md); it
 //! only tracks who is in which call and each participant's
 //! mute/camera/screen presence.
 //!
@@ -17,7 +17,7 @@ use campfire_protocol::UserBrief;
 
 use crate::world::UserId;
 
-/// Per-participant presence flags (README §6.3: `call_mute` is presence
+/// Per-participant presence flags (docs/arch/protocol.md: `call_mute` is presence
 /// only — the client flips `track.enabled`, no renegotiation).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct ParticipantFlags {
@@ -33,7 +33,7 @@ pub struct ParticipantFlags {
 #[derive(Debug, Clone, Default)]
 pub struct Call {
     /// Call id: assigned by the world (monotonic per process). Names the
-    /// call's media origin (docs/moq-sfu.md §5) and rides in media tickets.
+    /// call's media origin (docs/arch/moq-sfu.md) and rides in media tickets.
     pub id: u64,
     /// Participants: id → (name, flags).
     pub participants: HashMap<UserId, (String, ParticipantFlags)>,
@@ -46,7 +46,7 @@ pub struct Call {
 impl Call {
     /// A call with its first participants (id → name). They are already in
     /// the call — there is no offer/answer: media rides the MoQ SFU
-    /// (docs/moq-sfu.md), so no peer is ever an "offerer".
+    /// (docs/arch/moq-sfu.md), so no peer is ever an "offerer".
     pub fn new(id: u64, entries: impl Iterator<Item = (UserId, String)>) -> Self {
         let mut call = Call {
             id,

@@ -1,11 +1,11 @@
-//! Realtime sessions over WebTransport (README §5).
+//! Realtime sessions over WebTransport (docs/arch/protocol.md).
 //!
 //! A session is one `CONNECT /wt` upgrade. The client opens exactly one
 //! bidirectional stream — the **command stream** — and speaks newline-delimited
-//! JSON on it (README §5): `join` → `hello`, then `chat`/`typing` events flow
+//! JSON on it (docs/arch/protocol.md): `join` → `hello`, then `chat`/`typing` events flow
 //! both ways. Movement travels on QUIC datagrams in both directions:
 //! inbound `MovementBatch` datagrams are validated into the world, outbound
-//! tick batches (README §5) are pushed through a per-session datagram queue.
+//! tick batches (docs/arch/protocol.md) are pushed through a per-session datagram queue.
 //!
 //! The server is a pure relay here: every outbound message is queued on the
 //! per-user channel owned by [`crate::world::World`], and a writer task drains
@@ -38,27 +38,27 @@ use crate::world::World;
 /// task and the datagram tasks.
 type Who = Arc<Mutex<Option<(String, String)>>>;
 
-/// A JSON line longer than this is refused (README §14: no unbounded reads).
+/// A JSON line longer than this is refused (docs/ops/README.md: no unbounded reads).
 const MAX_LINE_BYTES: usize = 80 * 1024;
 /// Close a session that sends nothing on the command stream for this long
-/// (README §5 lifecycle). Generous by design: the client's 25 s keepalive
+/// (docs/arch/protocol.md lifecycle). Generous by design: the client's 25 s keepalive
 /// ping (`ping`) is the liveness signal — a stationary user sends nothing
 /// but pings, and the ping also resets the QUIC idle timeout, so this
 /// mainly reaps clients whose process vanished without closing.
 const IDLE_TIMEOUT: Duration = Duration::from_secs(300);
 /// First message (join) must arrive within this window.
 const JOIN_TIMEOUT: Duration = Duration::from_secs(10);
-/// Per-session stream message limit (README §14).
+/// Per-session stream message limit (docs/ops/README.md).
 const MSGS_PER_SEC: usize = 50;
-/// Per-session inbound byte limit (README §14).
+/// Per-session inbound byte limit (docs/ops/README.md).
 const BYTES_PER_SEC: usize = 256 * 1024;
-/// Per-session chat limit (README §14).
+/// Per-session chat limit (docs/ops/README.md).
 const CHAT_PER_SEC: usize = 1;
-/// A chat line longer than this is refused (README §14).
+/// A chat line longer than this is refused (docs/ops/README.md).
 pub(crate) const MAX_CHAT_CHARS: usize = 500;
-/// Room id: `1..=64` chars of `[a-z0-9_-]` (README §5).
+/// Room id: `1..=64` chars of `[a-z0-9_-]` (docs/arch/protocol.md).
 pub(crate) const MAX_ROOM_CHARS: usize = 64;
-/// Name: trimmed, `1..=24` chars (README §14).
+/// Name: trimmed, `1..=24` chars (docs/ops/README.md).
 pub(crate) const MAX_NAME_CHARS: usize = 24;
 /// Avatar color string cap.
 pub(crate) const MAX_AVATAR_CHARS: usize = 16;
@@ -74,7 +74,7 @@ pub async fn handle_wt(
     Query(params): Query<HashMap<String, String>>,
     upgrade: h3_axum::WebTransportUpgrade,
 ) -> Response {
-    // Auth (README §11, issues.md #4): when enabled, the IdP name comes
+    // Auth (docs/dev/testing.md, issues.md #4): when enabled, the IdP name comes
     // either from a one-time `?ticket=` (the WebTransport handshake carries
     // no cookies in Chromium) or, failing that, the session cookie. A 401
     // here (before `accept`) rejects the upgrade outright.
@@ -157,7 +157,7 @@ async fn session_task(
     // inbound movement and nobody can move before joining.
     let who: Who = Arc::new(Mutex::new(None));
 
-    // Inbound datagrams: movement batches (README §5).
+    // Inbound datagrams: movement batches (docs/arch/protocol.md).
     let mut datagrams = session.datagram_reader();
     let who_in = who.clone();
     let world_in = world.clone();
@@ -178,7 +178,7 @@ async fn session_task(
     });
 
     // Outbound datagrams: the 50 ms tick pushes movement batches through this
-    // queue (README §5).
+    // queue (docs/arch/protocol.md).
     let (dtx, mut dtx_rx) = mpsc::unbounded_channel::<Vec<u8>>();
     let mut dtx_sender = session.datagram_sender();
     let metrics_out = metrics.clone();
@@ -219,7 +219,7 @@ async fn session_task(
 
     match command {
         Some(stream) => {
-            // One session id per connection (README §5 reconnect): a stale
+            // One session id per connection (docs/arch/protocol.md reconnect): a stale
             // session's disconnect must not clobber a newer session that
             // already restored the same token.
             let session_id = world.next_session_id();
@@ -337,7 +337,7 @@ async fn run_command_stream<S>(
     }
 
     if let Some((room, id, _)) = &session {
-        // The session is gone (README §5 reconnect): the user keeps their
+        // The session is gone (docs/arch/protocol.md reconnect): the user keeps their
         // identity for the reconnect window; the tick turns it into a real
         // leave if no rejoin with the token shows up in time.
         world.discard(room, id, session_id);
@@ -380,7 +380,7 @@ fn dispatch(
             if !valid_room(&room) {
                 return send(tx, ErrorCode::BadMessage);
             }
-            // Auth (README §11): the IdP-forced name overrides the client's
+            // Auth (docs/dev/testing.md): the IdP-forced name overrides the client's
             // (it is already trimmed and capped to MAX_NAME_CHARS).
             let name = match forced_name {
                 Some(forced) => forced.to_owned(),
@@ -475,7 +475,7 @@ fn dispatch(
             };
             call_result(world.set_status(&room, &id, status), tx)
         }
-        // Call state + presence (README §5/§6.3): the world validates
+        // Call state + presence (docs/arch/protocol.md): the world validates
         // (same room, sender involved); errors go back as `error` messages.
         Ok(ClientMsg::Bubble { off }) => {
             let Some((room, id, _)) = session.clone() else {
@@ -502,7 +502,7 @@ fn dispatch(
             call_result(world.call_leave(&room, &id), tx)
         }
         // Keepalive: the read loop's idle timer already reset with the
-        // bytes, so there is nothing to do (README §5).
+        // bytes, so there is nothing to do (docs/arch/protocol.md).
         Ok(ClientMsg::Ping) => true,
         Err(_err) => send(tx, ErrorCode::BadMessage),
     }

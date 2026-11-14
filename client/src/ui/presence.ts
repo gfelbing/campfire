@@ -1,4 +1,4 @@
-// Presence roster, top left (README §8 Phase 7): who is in the room right
+// Presence roster, top left (docs/arch/client.md): who is in the room right
 // now, with the 🎧 badge for users in the room's call. Full rebuild on
 // every `hello` (reconnect/room-switch catch-up), incremental otherwise.
 

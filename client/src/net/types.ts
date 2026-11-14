@@ -1,7 +1,7 @@
 //! Wire protocol types, mirroring `campfire-protocol` on the server.
 //!
 //! Reliable stream: newline-delimited JSON. Datagrams: one MovementBatch
-//! JSON object per datagram (README §5).
+//! JSON object per datagram (docs/arch/protocol.md).
 
 export type Dir = "n" | "s" | "e" | "w";
 
@@ -62,7 +62,7 @@ export type ServerMsg =
       t: "hello";
       you: string;
       room: string;
-      /** Reconnect token (README §5): resend it in `join` to restore this
+      /** Reconnect token (docs/arch/protocol.md): resend it in `join` to restore this
        *  identity after a dropped connection. */
       token: string;
       users: UserState[];
@@ -75,7 +75,7 @@ export type ServerMsg =
        *  call survived the drop. */
       call: UserBrief[];
       /** The user's media ticket when they are in an active call
-       *  (reconnect catch-up, docs/moq-sfu.md §7). Present only then. */
+       *  (reconnect catch-up, docs/arch/moq-sfu.md). Present only then. */
       ticket?: string;
     }
   | { t: "joined"; user: UserBrief }
@@ -92,7 +92,7 @@ export type ServerMsg =
        *  "Map enhancements"); only present for zone calls. */
       zone?: string;
       /** The recipient's media ticket when they are a participant of this
-       *  call (docs/moq-sfu.md §7); bystanders get the roster but no ticket. */
+       *  call (docs/arch/moq-sfu.md); bystanders get the roster but no ticket. */
       ticket?: string;
     }
   | { t: "call_leave"; id: string; zone?: string }
@@ -116,7 +116,7 @@ export type ClientMsg =
       room: string;
       name: string;
       avatar?: { color: string };
-      /** Reconnect token (README §5): restore the previous identity. */
+      /** Reconnect token (docs/arch/protocol.md): restore the previous identity. */
       token?: string;
       /** The joiner's presence status; absent means `online`. */
       status?: OwnStatus;
@@ -126,17 +126,17 @@ export type ClientMsg =
   /** Presence status changed (the profile menu): `dnd` opts out of
    *  proximity calls, `away` auto-joins them muted. */
   | { t: "status"; status: OwnStatus }
-  /** Leave the room immediately (README §5): used for room switching, the
+  /** Leave the room immediately (docs/arch/protocol.md): used for room switching, the
    *  server tears the session down right away. */
   | { t: "leave" }
-  /** Opt out of proximity bubbles (README §6.3): leaves the current bubble
+  /** Opt out of proximity bubbles (docs/arch/protocol.md): leaves the current bubble
    *  at once and prevents joining; `off: false` opts back in. */
   | { t: "bubble"; off: boolean }
   | { t: "call_mute"; audio: boolean; video: boolean }
   /** Presence: we started/stopped screen sharing (camera track replaced). */
   | { t: "call_screen"; on: boolean }
   | { t: "call_leave" }
-  /** Keepalive (README §5): the server ignores it; the stream activity
+  /** Keepalive (docs/arch/protocol.md): the server ignores it; the stream activity
    *  alone resets the server's idle timeout, so a stationary user keeps
    *  their session (and identity + position) alive. */
   | { t: "ping" };

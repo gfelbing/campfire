@@ -1,9 +1,9 @@
 //! HTTP/3 API: embedded web client, maps, rooms, health, WebTransport, and
-//! the SSE+POST realtime fallback (README §4, §8).
+//! the SSE+POST realtime fallback (docs/arch/overview.md).
 //!
 //! Everything is served from the single QUIC socket. The web client is
 //! embedded at compile time from `client/dist` (single deploy artifact,
-//! README §3); `--static-dir` overrides the source at runtime for the dev
+//! docs/arch/overview.md); `--static-dir` overrides the source at runtime for the dev
 //! loop (`just dev`).
 
 use std::collections::HashMap;
@@ -39,7 +39,7 @@ use crate::realtime::{
 };
 use crate::world::{RoomInfo, World};
 
-/// Web client, built by Vite and embedded at compile time (README §3).
+/// Web client, built by Vite and embedded at compile time (docs/arch/overview.md).
 static STATIC: Dir<'static> = include_dir!("$CARGO_MANIFEST_DIR/../../client/dist");
 
 static START: OnceLock<Instant> = OnceLock::new();
@@ -50,12 +50,12 @@ pub struct AppState {
     pub world: World,
     /// Serve static files from this directory instead of the embed (dev).
     pub static_dir: Option<PathBuf>,
-    /// Shared metrics registry (README §11 Phase 8, `/metrics`).
+    /// Shared metrics registry (docs/ops/README.md, `/metrics`).
     pub metrics: crate::metrics::Metrics,
-    /// The MoQ SFU (docs/moq-sfu.md §5): one per process, wired to the
+    /// The MoQ SFU (docs/arch/moq-sfu.md): one per process, wired to the
     /// world's call-end hook so call media origins are reaped.
     pub moq: std::sync::Arc<crate::moq::MoqSfu>,
-    /// OpenID Connect authentication (README §11). `None` when disabled;
+    /// OpenID Connect authentication (docs/dev/testing.md). `None` when disabled;
     /// when set, a join without a valid session cookie is refused and a
     /// valid one forces the display name from the IdP.
     pub auth: Option<std::sync::Arc<crate::auth::Auth>>,
@@ -97,7 +97,7 @@ impl AppState {
     ) -> Self {
         // The SFU is built next to the world and shares its ticket store;
         // the world's call-end hook reaps the SFU's per-call media origins
-        // (docs/moq-sfu.md §5).
+        // (docs/arch/moq-sfu.md).
         let world = World::new(campfire_maps::Maps::load(&cfg.maps_dir));
         let moq = crate::moq::MoqSfu::new(world.clone(), metrics.clone());
         let world = world.on_call_end(moq.call_end_hook());
@@ -136,16 +136,16 @@ struct MapInfo {
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/healthz", get(healthz))
-        // Prometheus scrape endpoint (README §11 Phase 8).
+        // Prometheus scrape endpoint (docs/ops/README.md).
         .route("/metrics", get(metrics_endpoint))
         .route("/api/v1/maps", get(list_maps))
         // The map id may contain slashes (`interiors/conference`), so
         // one wildcard serves both the map JSON and map-owned files (tileset
-        // images relative to the map URL, README §6.1): `office`,
+        // images relative to the map URL, docs/ops/maps.md): `office`,
         // `office/tiles.png`.
         .route("/api/v1/maps/{*rest}", get(map_or_asset))
         .route("/api/v1/rooms", get(list_rooms))
-        // OpenID Connect auth (README §11): status probe, login, callback,
+        // OpenID Connect auth (docs/dev/testing.md): status probe, login, callback,
         // logout. The status endpoint is always 200 (the client uses it to
         // decide whether to redirect to login).
         .route("/api/v1/auth", get(auth_status))
@@ -153,9 +153,9 @@ pub fn router(state: AppState) -> Router {
         .route("/auth/login", get(auth_login))
         .route("/auth/callback", get(auth_callback))
         .route("/auth/logout", get(auth_logout))
-        // WebTransport realtime session (README §5).
+        // WebTransport realtime session (docs/arch/protocol.md).
         .route("/wt", connect(handle_wt))
-        // MoQ SFU media session (docs/moq-sfu.md §5): a second WebTransport
+        // MoQ SFU media session (docs/arch/moq-sfu.md): a second WebTransport
         // connection carrying the call's media, admitted by ticket.
         .route("/moq/{ticket}", connect(handle_moq))
         // The map in the URL path: `/play/office/office.json` picks the
@@ -166,7 +166,7 @@ pub fn router(state: AppState) -> Router {
         // first map (the client then picks a random identity, or the URL
         // params' when present).
         .route("/", get(root_redirect))
-        // Realtime fallback for browsers without WebTransport (README §8).
+        // Realtime fallback for browsers without WebTransport (docs/arch/client.md).
         .route("/rt/sse", get(sse_stream))
         .route("/rt/event", post(fallback_event))
         // Everything else is a static asset (or a 404).
@@ -174,13 +174,13 @@ pub fn router(state: AppState) -> Router {
         .with_state(state)
 }
 
-/// Prometheus text exposition (README §14); the world's gauges are read
+/// Prometheus text exposition (docs/ops/README.md); the world's gauges are read
 /// here so they are consistent with the moment of the scrape.
 async fn metrics_endpoint(State(state): State<AppState>) -> impl axum::response::IntoResponse {
     let (users, rooms) = state.world.stats();
     let calls = state.world.call_count();
     // SFU gauges: live origins + the media traffic through the moq-net
-    // stats registry (docs/moq-sfu.md §5).
+    // stats registry (docs/arch/moq-sfu.md).
     let (objects_in, bytes_in, objects_out, bytes_out) = state.moq.traffic();
     let moq = crate::metrics::MoqGauges {
         origins: state.moq.live_origins(),
@@ -270,7 +270,7 @@ async fn list_rooms(State(state): State<AppState>) -> Json<Vec<RoomInfo>> {
 }
 
 // ---------------------------------------------------------------------------
-// OpenID Connect auth (README §11, authorization-code flow). When enabled, a
+// OpenID Connect auth (docs/dev/testing.md, authorization-code flow). When enabled, a
 // visitor signs in through the IdP; a session cookie maps to a verified name
 // that is forced onto every join. See `crate::auth` for the protocol.
 // ---------------------------------------------------------------------------
@@ -290,7 +290,7 @@ pub(crate) fn auth_cookie(headers: &HeaderMap) -> Option<String> {
     None
 }
 
-/// The join gate (README §11). Returns the IdP-forced name when auth is
+/// The join gate (docs/dev/testing.md). Returns the IdP-forced name when auth is
 /// enabled, or `None` when auth is off (the caller uses the client's name).
 /// A 401 when auth is on but the session cookie is missing or invalid.
 pub(crate) fn enforce_auth(
@@ -460,7 +460,7 @@ async fn auth_logout(State(state): State<AppState>, headers: HeaderMap) -> Respo
 }
 
 // ---------------------------------------------------------------------------
-// Realtime fallback: SSE down, POST up (README §8). Same message protocol as
+// Realtime fallback: SSE down, POST up (docs/arch/client.md). Same message protocol as
 // the WebTransport stream; movement (datagrams) is the one thing it cannot
 // do, so fallback clients see presence, chat and calls but not movement.
 // ---------------------------------------------------------------------------
@@ -474,7 +474,7 @@ enum FallbackReq {
         name: String,
         #[serde(default)]
         avatar: Option<Avatar>,
-        /// Reconnect token from a previous `hello` (README §5).
+        /// Reconnect token from a previous `hello` (docs/arch/protocol.md).
         #[serde(default)]
         token: Option<String>,
     },
@@ -491,7 +491,7 @@ pub struct FallbackSession {
     name: String,
     user_id: String,
     /// The world session this fallback session restored (guards against a
-    /// stale timeout clobbering a newer session, README §5 reconnect).
+    /// stale timeout clobbering a newer session, docs/arch/protocol.md reconnect).
     session_id: u64,
     /// 1 chat/s, like the WebTransport path.
     chat: Mutex<RateLimit>,
@@ -532,7 +532,7 @@ async fn fallback_event(
             if !valid_room(&room) {
                 return Err(err(ErrorCode::BadMessage));
             }
-            // Auth (README §11): when enabled, the name is forced from the
+            // Auth (docs/dev/testing.md): when enabled, the name is forced from the
             // verified session cookie; a missing/invalid cookie is refused.
             let name = match enforce_auth(&state, &headers) {
                 Ok(Some(forced)) => forced,
@@ -698,7 +698,7 @@ async fn fallback_event(
                     let _ = state.world.set_status(&room, &user_id, status);
                 }
                 // Bubble opt-out and call mute/screen: same world methods
-                // as the WebTransport path (README §5); fallback clients
+                // as the WebTransport path (docs/arch/protocol.md); fallback clients
                 // get presence, chat and calls.
                 ClientMsg::Bubble { off } => {
                     let _ = state.world.set_bubble(&room, &user_id, off);
@@ -719,7 +719,7 @@ async fn fallback_event(
                     state.world.leave(&room, &user_id, session_id);
                     state.fallback.lock().unwrap().remove(&token);
                 }
-                // Keepalive (README §5): the session lives with the open SSE
+                // Keepalive (docs/arch/protocol.md): the session lives with the open SSE
                 // stream, not a command-stream idle timer — nothing to do.
                 ClientMsg::Ping => {}
                 ClientMsg::Join { .. } => return Err(err(ErrorCode::BadMessage)),

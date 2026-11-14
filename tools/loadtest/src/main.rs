@@ -1,4 +1,4 @@
-//! Campfire load harness (README §11 Phase 9, targets in §13).
+//! Campfire load harness (docs/dev/testing.md).
 //!
 //! Ramps `--users` bot connections over real QUIC/WebTransport against a
 //! running campfire server. Each bot:
@@ -9,14 +9,14 @@
 //!   changes, so the server validates and rebroadcasts real movement,
 //! * a fraction of the bots are clustered into `--groups` meeting points of
 //!   `--group-size`, which the server's bubble engine turns into calls
-//!   (README §6.3); group members then toggle mute to
+//!   (docs/arch/protocol.md); group members then toggle mute to
 //!   exercise the call-state path without real media,
 //! * occasionally chats (within the 1 msg/s room limit).
 //!
 //! It reports its own view — connect latency, inbound messages/s, errors —
 //! every `--report-secs` and a final summary. Server-side truth (tick
 //! latency, datagram totals) comes from `GET /metrics` over HTTP/3,
-//! scraped by whatever drives the run (see README §15).
+//! scraped by whatever drives the run (see docs/ops/README.md).
 //!
 //! Turn OFF cert validation like the test suite: load runs target a dev
 //! server with the local CA.
@@ -97,8 +97,8 @@ async fn main() -> Result<()> {
 
     // One QUIC config for the whole run; each bot owns its endpoint.
     // Real room ids: the server only accepts joins into map rooms
-    // (README §5); `--rooms` caps how many of them the bots spread over.
-    // Maps load from disk (README §6): same default dir as the server.
+    // (docs/arch/protocol.md); `--rooms` caps how many of them the bots spread over.
+    // Maps load from disk (docs/ops/maps.md): same default dir as the server.
     let maps = campfire_maps::Maps::load(Path::new("maps"));
     let rooms: Vec<String> = {
         let mut ids: Vec<String> = maps.all().iter().map(|m| m.id.clone()).collect();
@@ -303,7 +303,7 @@ async fn bot(
         }
     }
 
-    // Inbound datagrams: the 50 ms tick batches (README §5). They must be
+    // Inbound datagrams: the 50 ms tick batches (docs/arch/protocol.md). They must be
     // drained or the server's datagram queue would eventually stall.
     let stats_dg = stats.clone();
     let dg_conn = conn.clone();

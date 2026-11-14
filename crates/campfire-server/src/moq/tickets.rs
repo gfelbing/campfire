@@ -1,4 +1,4 @@
-//! Media tickets (docs/moq-sfu.md §5): short-lived single-use bearer
+//! Media tickets (docs/arch/moq-sfu.md): short-lived single-use bearer
 //! tokens that authorize one MoQ session on the SFU.
 //!
 //! The world mints a ticket when a user becomes a call participant
