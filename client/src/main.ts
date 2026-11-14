@@ -275,13 +275,11 @@ async function main(): Promise<void> {
       world.manager.movement(batch.m);
       refreshUsersHook();
       // `sz` (README roadmap "Map enhancements"): a peer inside a silentZone
-      // is muted locally.
+      // is muted locally. The 🔇 map badge is gone — silent zones set
+      // presence to dnd, so the red status dot marks them.
       for (const e of batch.m) {
         manager.setSilent(e.id, e.sz === true);
-        const dnd = e.sz === true;
-        world.manager.setDnd(e.id, dnd);
-        if (e.id === myId) world.local.setDnd(dnd);
-        presence.setDnd(e.id, dnd);
+        presence.setDnd(e.id, e.sz === true);
       }
     },
     // Bubble state (docs/arch/protocol.md): the manager owns the state machine;
