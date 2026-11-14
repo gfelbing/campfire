@@ -29,10 +29,10 @@ const EXTRAPOLATE_MS = 250;
 /** Snapshot history depth: ~10 ≈ 1 s at the 15 Hz send rate. */
 const SNAP_HISTORY = 10;
 
-/** The sprites render at 2× (a 20×32 cell becomes 40×64 px — the
- *  WorkAdventure-like two-tiles-tall presence on the 32 px map); the
- *  nearest-scaled pixels stay crisp. */
-const SPRITE_SCALE = 2;
+/** The sprites render at 1.5× (a 20×32 cell becomes 30×48 px — between
+ *  one tile and the full WorkAdventure two-tile presence on the 32 px
+ *  map); the nearest-scaled pixels stay crisp. */
+const SPRITE_SCALE = 1.5;
 
 export class AvatarView {
   readonly container = new Container();
