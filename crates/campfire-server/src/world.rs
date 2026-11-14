@@ -437,6 +437,7 @@ impl World {
                 id: id.clone(),
                 name: member.name.clone(),
                 color: member.avatar.as_ref().map(|a| a.color.clone()),
+                character: member.avatar.as_ref().and_then(|a| a.character),
                 status: status_of(&member),
             };
             room_entry.users.insert(id.clone(), member);
@@ -536,6 +537,11 @@ impl World {
                 .get(&id)
                 .and_then(|m| m.avatar.as_ref())
                 .map(|a| a.color.clone()),
+            character: room_entry
+                .users
+                .get(&id)
+                .and_then(|m| m.avatar.as_ref())
+                .and_then(|a| a.character),
             status: room_entry.users.get(&id).map(status_of).unwrap_or_default(),
         };
         for (uid, m) in &room_entry.users {
@@ -1467,6 +1473,7 @@ fn user_snapshot(entry: &Room, map: Option<&campfire_maps::MapData>) -> Vec<User
                     .any(|z| z.silent && z.contains(m.pos.0, m.pos.1))
             }),
             color: m.avatar.as_ref().map(|a| a.color.clone()),
+            character: m.avatar.as_ref().and_then(|a| a.character),
             status: status_of(m),
         })
         .collect()

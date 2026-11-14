@@ -21,6 +21,9 @@ export interface BootOptions {
   room: string;
   name: string;
   color: string;
+  /** The chosen pixel-art character (a sheet index); `null` = derived
+   *  from the name (the stable hash). */
+  character: number | null;
 }
 
 interface MapInfo {
@@ -37,6 +40,7 @@ const COLOR_RE = /^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/;
  *  here, so a reload (no URL params anymore) re-joins as the same user. */
 const NAME_KEY = "campfire.name";
 const COLOR_KEY = "campfire.color";
+const CHARACTER_KEY = "campfire.character";
 
 /** Presence-status persistence (the profile menu). */
 const STATUS_KEY = "campfire.status";
@@ -52,21 +56,26 @@ export function loadStatus(): OwnStatus {
   return "online";
 }
 
-function loadIdentity(): { name?: string; color?: string } {
+function loadIdentity(): { name?: string; color?: string; character?: number | null } {
   try {
     return {
       name: localStorage.getItem(NAME_KEY) ?? undefined,
       color: localStorage.getItem(COLOR_KEY) ?? undefined,
+      character: localStorage.getItem(CHARACTER_KEY) !== null
+        ? Number(localStorage.getItem(CHARACTER_KEY))
+        : undefined,
     };
   } catch {
     return {};
   }
 }
 
-export function saveIdentity(name: string, color: string): void {
+export function saveIdentity(name: string, color: string, character: number | null): void {
   try {
     localStorage.setItem(NAME_KEY, name);
     localStorage.setItem(COLOR_KEY, color);
+    if (character === null) localStorage.removeItem(CHARACTER_KEY);
+    else localStorage.setItem(CHARACTER_KEY, String(character));
   } catch {
     // ignore storage failures
   }
@@ -192,7 +201,13 @@ async function runBoot(forcedName: string | null): Promise<BootOptions> {
       : rawColor !== null && COLOR_RE.test(rawColor)
         ? rawColor
         : randomColor();
-  saveIdentity(name, color);
+  // The chosen character (the profile menu); `null` = derive from the
+  // name. A URL-provided name (e2e drivers) resets it: a fresh identity
+  // should not inherit the previous one's character.
+  const character = named === stored.name && stored.character !== undefined
+    ? stored.character
+    : null;
+  saveIdentity(name, color, character);
 
-  return { room, name, color };
+  return { room, name, color, character };
 }

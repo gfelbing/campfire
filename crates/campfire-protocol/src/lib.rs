@@ -43,6 +43,11 @@ pub enum Status {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Avatar {
     pub color: String,
+    /// The chosen pixel-art character (a `client/public/characters/`
+    /// sheet index); `None` means "derived from the name" (older clients
+    /// and users who never opened the profile menu).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub character: Option<u8>,
 }
 
 /// Another user, by id, name and (optional) chosen color (presence events).
@@ -53,6 +58,10 @@ pub struct UserBrief {
     /// The user's chosen avatar color (`#rrggbb`); present when they set one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub color: Option<String>,
+    /// The user's chosen pixel-art character; `None` means "derived from
+    /// the name" (the client's stable hash).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub character: Option<u8>,
     /// The user's presence status; `None` means `online` (the default).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status: Option<Status>,
@@ -73,6 +82,10 @@ pub struct UserState {
     /// The user's chosen avatar color (`#rrggbb`); present when they set one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub color: Option<String>,
+    /// The user's chosen pixel-art character; `None` means "derived from
+    /// the name" (the client's stable hash).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub character: Option<u8>,
     /// The user's presence status; `None` means `online` (the default).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status: Option<Status>,
@@ -348,6 +361,7 @@ mod tests {
             name: "georg".into(),
             avatar: Some(Avatar {
                 color: "#e05f38".into(),
+                character: None,
             }),
             token: None,
             status: None,
@@ -372,6 +386,7 @@ mod tests {
                 d: Dir::South,
                 sz: false,
                 color: Some("#e05f38".into()),
+                character: Some(3),
                 status: Some(Status::Away),
             }],
             chat: vec![ChatMsg {
@@ -392,6 +407,7 @@ mod tests {
                 id: "u_77ab".into(),
                 name: "jules".into(),
                 color: None,
+                character: None,
                 status: None,
             }],
             // A minted media ticket (docs/arch/moq-sfu.md): 32 random bytes,

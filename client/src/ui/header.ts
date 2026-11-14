@@ -14,6 +14,7 @@
 import { COLORS, saveIdentity } from "./boot";
 import type { OwnStatus } from "../net/types";
 import type { SidebarUI } from "./sidebar";
+import { CHARACTER_COUNT, previewCell } from "../world/characters";
 
 interface MapInfo {
   id: string;
@@ -29,6 +30,8 @@ const STATUSES: Array<{ id: OwnStatus; label: string }> = [
 export interface HeaderOptions {
   name: string;
   color: string;
+  /** The chosen pixel-art character; `null` = derived from the name. */
+  character: number | null;
   /** The joined presence status. */
   status: OwnStatus;
   onSwitchMap: (map: string) => void;
@@ -132,8 +135,12 @@ export function createHeader(
   // on "Done". Status applies immediately via `setStatus`.
   let name = opts.name;
   let color = opts.color;
+  /** The character draft: `null` = derived from the name (the stable
+   *  hash). Committed on "Done" like the name and color. */
+  let character = opts.character;
   const committedName = opts.name;
   const committedColor = opts.color;
+  const committedCharacter = opts.character;
   let status = opts.status;
 
   // Build the profile popover once; it is shown/hidden, not rebuilt, so the
@@ -146,6 +153,8 @@ export function createHeader(
   nameInput.value = name;
   const swatches = document.createElement("div");
   swatches.className = "profile-swatches";
+  const characters = document.createElement("div");
+  characters.className = "profile-characters";
   const nameError = document.createElement("div");
   nameError.className = "profile-error hidden";
   const doneBtn = document.createElement("button");
@@ -169,8 +178,54 @@ export function createHeader(
       color = c;
       syncSwatchSelection();
       renderProfileAvatar();
+      renderCharacterGrid();
     });
     swatches.appendChild(b);
+  }
+
+  // Character picker: a canvas thumbnail per sheet (the idle south frame,
+  // recolored to the draft color), plus an "auto" entry that derives the
+  // character from the name hash (the pre-picker behavior).
+  function renderCharacterGrid(): void {
+    characters.replaceChildren();
+    const auto = document.createElement("button");
+    auto.type = "button";
+    auto.className = "swatch character";
+    auto.textContent = "∅";
+    auto.title = "derive the character from your name";
+    auto.addEventListener("click", () => {
+      character = null;
+      syncCharacterSelection();
+    });
+    characters.appendChild(auto);
+    for (let i = 0; i < CHARACTER_COUNT; i++) {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.className = "swatch character";
+      b.title = `character ${i + 1}`;
+      const cell = previewCell(i, color);
+      if (cell) {
+        cell.className = "character-cell";
+        b.appendChild(cell);
+      }
+      b.addEventListener("click", () => {
+        character = i;
+        syncCharacterSelection();
+      });
+      characters.appendChild(b);
+    }
+    syncCharacterSelection();
+  }
+
+  function syncCharacterSelection(): void {
+    for (const el of characters.children) {
+      const b = el as HTMLElement;
+      const sel =
+        b.textContent === "∅"
+          ? character === null
+          : Number(b.dataset.character) === character;
+      b.classList.toggle("selected", sel);
+    }
   }
 
   // Status rows live in their own topbar popover (issues.md #1), not in
@@ -199,9 +254,13 @@ export function createHeader(
       return;
     }
     name = trimmed;
-    saveIdentity(name, color);
+    saveIdentity(name, color, character);
     closeAll();
-    if (name !== committedName || color !== committedColor) {
+    if (
+      name !== committedName ||
+      color !== committedColor ||
+      character !== committedCharacter
+    ) {
       opts.onIdentityChange(name, color);
     }
   });
@@ -219,6 +278,8 @@ export function createHeader(
     nameError,
     label("Color"),
     swatches,
+    label("Character"),
+    characters,
     doneBtn,
   );
 
@@ -262,6 +323,7 @@ export function createHeader(
   function discardDraft(): void {
     name = committedName;
     color = committedColor;
+    character = committedCharacter;
     nameInput.value = name;
     syncSwatchSelection();
     renderProfileAvatar();
@@ -282,6 +344,7 @@ export function createHeader(
     if (willOpen) {
       renderProfileAvatar();
       syncSwatchSelection();
+      renderCharacterGrid();
       profileMenu.classList.remove("hidden");
     }
   });

@@ -245,6 +245,13 @@ function parseColor(color: string): number | null {
   return parseInt(hex, 16);
 }
 
+/** The avatar's character: the user's chosen one (rosters carry it) when
+ *  present, else a stable hash of their name (the id is random per
+ *  session). */
+function characterOf(user: { name: string; character?: number }): number {
+  return user.character ?? variantFor(user.name);
+}
+
 /** The avatar's color: the user's chosen one (sent in the rosters) when
  *  present and valid, else a stable hash of their id. */
 function colorOf(user: { id: string; color?: string }): number {
@@ -276,9 +283,11 @@ export class AvatarManager {
         existing.view.setName(u.name);
         existing.dir = u.d;
         existing.view.setDir(u.d);
-        // The roster is the color authority: re-apply it on reconnect.
+        // The roster is the color/character authority: re-apply both on
+        // reconnect (and after an identity change).
         existing.color = colorOf(u);
         existing.view.setColor(existing.color);
+        existing.view.setVariant(characterOf(u));
         existing.view.setStatus(u.status ?? "online");
         // The hello snapshot is authoritative: reset the history to it.
         existing.snap = [{ x: u.x, y: u.y, t: now }];
@@ -287,7 +296,7 @@ export class AvatarManager {
         const view = new AvatarView(u.name, color);
         view.setDir(u.d);
         view.setStatus(u.status ?? "online");
-        view.setVariant(variantFor(u.name));
+        view.setVariant(characterOf(u));
         this.layer.addChild(view.container);
         this.remotes.set(u.id, {
           id: u.id,
@@ -308,7 +317,7 @@ export class AvatarManager {
     const color = colorOf(user);
     const view = new AvatarView(user.name, color);
     view.setStatus(user.status ?? "online");
-    view.setVariant(variantFor(user.name));
+    view.setVariant(characterOf(user));
     this.layer.addChild(view.container);
     this.remotes.set(user.id, {
       id: user.id,

@@ -103,6 +103,7 @@ export class Connection {
     private room: string,
     private name: string,
     private avatarColor: string,
+    private avatarCharacter: number | null,
     private status: OwnStatus,
     private handlers: ConnHandlers,
   ) {
@@ -343,14 +344,17 @@ export class Connection {
   joinPayload(): {
     room: string;
     name: string;
-    avatar?: { color: string };
+    avatar?: { color: string; character?: number };
     token?: string;
     status?: OwnStatus;
   } {
     return {
       room: this.room,
       name: this.name,
-      avatar: { color: this.avatarColor },
+      avatar: {
+        color: this.avatarColor,
+        ...(this.avatarCharacter !== null ? { character: this.avatarCharacter } : {}),
+      },
       ...(this.token ? { token: this.token } : {}),
       ...(this.status !== "online" ? { status: this.status } : {}),
     };

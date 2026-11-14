@@ -317,6 +317,37 @@ body {
   border-color: #fff;
 }
 
+/* Character picker: canvas thumbnails of each character's idle frame
+ * (south), tinted with the draft color. Grid of ~8 per row. */
+.profile-characters {
+  display: grid;
+  grid-template-columns: repeat(8, 26px);
+  gap: 0.3rem;
+  max-height: 9.5rem;
+  overflow-y: auto;
+}
+
+.profile-characters .swatch.character {
+  width: 26px;
+  height: 38px;
+  border-radius: 5px;
+  border: 2px solid transparent;
+  cursor: pointer;
+  padding: 0;
+  background: #1c1f26;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.profile-characters .swatch.character.selected {
+  border-color: #fff;
+}
+
+.profile-characters .character-cell {
+  image-rendering: pixelated;
+}
+
 .profile-status-rows {
   display: grid;
   gap: 0.15rem;

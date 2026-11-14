@@ -29,6 +29,7 @@ export async function createWorld(
   map: MapData,
   localName: string,
   localColor: string,
+  localCharacter: number | null,
 ): Promise<World> {
   const app = new Application();
   await app.init({
@@ -155,7 +156,7 @@ export async function createWorld(
   await loadCharacters();
 
   const local = new AvatarView(localName, parseHex(localColor));
-  local.setVariant(variantFor(localName));
+  local.setVariant(localCharacter ?? variantFor(localName));
   avatars.addChild(local.container);
 
   // Zoom: the wheel scales the world container (1.0 = 1:1 tiles, 0.5–3).

@@ -20,6 +20,9 @@ export interface UserState {
   sz?: boolean;
   /** The user's chosen avatar color (`#rrggbb`); present when they set one. */
   color?: string;
+  /** The user's chosen pixel-art character; absent means "derived from
+   *  the name" (the client's stable hash). */
+  character?: number;
   /** The user's presence status; absent means `online`. */
   status?: OwnStatus;
 }
@@ -29,6 +32,9 @@ export interface UserBrief {
   name: string;
   /** The user's chosen avatar color (`#rrggbb`); present when they set one. */
   color?: string;
+  /** The user's chosen pixel-art character; absent means "derived from
+   *  the name" (the client's stable hash). */
+  character?: number;
   /** The user's presence status; absent means `online`. */
   status?: OwnStatus;
 }
@@ -115,7 +121,7 @@ export type ClientMsg =
       t: "join";
       room: string;
       name: string;
-      avatar?: { color: string };
+      avatar?: { color: string; character?: number };
       /** Reconnect token (docs/arch/protocol.md): restore the previous identity. */
       token?: string;
       /** The joiner's presence status; absent means `online`. */

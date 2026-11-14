@@ -38,6 +38,35 @@ const tinted = new Map<string, Texture[][]>();
 const TINT_TOP = 15;
 const TINT_BOTTOM = 25;
 
+/** Overlay-blend `color` into the RGBA `data`'s pixel band `y0..y1`,
+ *  columns `x0..x1`: shifts the outfit's hue toward the color while
+ *  keeping the shading (a multiply vanishes on the pack's dark clothes;
+ *  a light color lightens, a dark one darkens). */
+function recolorBand(
+  d: Uint8ClampedArray,
+  width: number,
+  y0: number,
+  y1: number,
+  x0: number,
+  x1: number,
+  color: number,
+): void {
+  const tint = [(color >> 16) & 255, (color >> 8) & 255, color & 255];
+  for (let y = y0; y < y1; y++) {
+    for (let x = x0; x < x1; x++) {
+      const i = (y * width + x) * 4;
+      if (d[i + 3] === 0) continue;
+      for (let ch = 0; ch < 3; ch++) {
+        const b = d[i + ch]! / 255;
+        const t = tint[ch]! / 255;
+        d[i + ch] = Math.round(
+          255 * (b < 0.5 ? 2 * b * t : 1 - 2 * (1 - b) * (1 - t)),
+        );
+      }
+    }
+  }
+}
+
 /** Preload every character sheet (nearest sampling: the pixels stay
  *  crisp at any zoom). A missing sheet simply leaves its slot empty. */
 export async function loadCharacters(): Promise<void> {
@@ -72,6 +101,39 @@ export function dirRow(dir: Dir): number {
   return DIR_ROW[dir];
 }
 
+/** The `#rgb`/`#rrggbb` hex `color` as a number; `null` when malformed. */
+export function parseColor(color: string): number | null {
+  const m = /^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/.exec(color.trim());
+  if (!m) return null;
+  let hex = m[1]!;
+  if (hex.length === 3) hex = hex.split("").map((c) => c + c).join("");
+  return parseInt(hex, 16);
+}
+
+/** A standalone preview canvas of one character's idle south frame with
+ *  the outfit recolored to the `#rrggbb` color — the profile menu's
+ *  character picker thumbnails. `null` when the sheet is missing. */
+export function previewCell(variant: number, color: string): HTMLCanvasElement | null {
+  const sheet = sheets[variant];
+  const tint = parseColor(color) ?? 0xffffff;
+  if (!sheet) return null;
+  const img = sheet.source.resource as HTMLImageElement | HTMLCanvasElement;
+  const canvas = document.createElement("canvas");
+  canvas.width = CELL_W;
+  canvas.height = CELL_H;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return null;
+  ctx.drawImage(
+    img,
+    IDLE_COL * CELL_W, 0, CELL_W, CELL_H,
+    0, 0, CELL_W, CELL_H,
+  );
+  const image = ctx.getImageData(0, 0, CELL_W, CELL_H);
+  recolorBand(image.data, CELL_W, TINT_TOP, TINT_BOTTOM, 0, CELL_W, tint);
+  ctx.putImageData(image, 0, 0);
+  return canvas;
+}
+
 /**
  * The sheet's frames with the outfit recolored to `color`: the torso band
  * of every cell passes through an overlay blend toward the color, which
@@ -94,26 +156,7 @@ export function tintedFrames(variant: number, color: number): Texture[][] {
   if (!ctx) return [];
   ctx.drawImage(img, 0, 0);
   const image = ctx.getImageData(0, 0, canvas.width, canvas.height);
-  const d = image.data;
-  const tint = [(color >> 16) & 255, (color >> 8) & 255, color & 255];
-  for (let row = 0; row < 4; row++) {
-    const y0 = row * CELL_H + TINT_TOP;
-    const y1 = row * CELL_H + TINT_BOTTOM;
-    for (let y = y0; y < y1; y++) {
-      // The three cell columns sit side by side, 20 px each.
-      for (let x = 0; x < CELL_W * COLS; x++) {
-        const i = (y * canvas.width + x) * 4;
-        if (d[i + 3] === 0) continue;
-        for (let ch = 0; ch < 3; ch++) {
-          const b = d[i + ch]! / 255;
-          const t = tint[ch]! / 255;
-          d[i + ch] = Math.round(
-            255 * (b < 0.5 ? 2 * b * t : 1 - 2 * (1 - b) * (1 - t)),
-          );
-        }
-      }
-    }
-  }
+  recolorBand(image.data, canvas.width, TINT_TOP, TINT_BOTTOM, 0, CELL_W * COLS, color);
   ctx.putImageData(image, 0, 0);
   const tex = Texture.from(canvas);
   tex.source.scaleMode = "nearest";

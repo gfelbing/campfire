@@ -84,6 +84,7 @@ impl Call {
                 // The call tracks only presence, not the avatar: map avatars
                 // are colored from the hello/Joined rosters, not here.
                 color: None,
+                character: None,
                 status: None,
             })
             .collect();
@@ -117,12 +118,14 @@ mod tests {
                     id: "u_aaa".into(),
                     name: "alice".into(),
                     color: None,
+                    character: None,
                     status: None,
                 },
                 UserBrief {
                     id: "u_bbb".into(),
                     name: "bob".into(),
                     color: None,
+                    character: None,
                     status: None,
                 },
             ]

@@ -125,7 +125,7 @@ async function main(): Promise<void> {
   const res = await fetch(`/api/v1/maps/${encodeURIComponent(opts.room)}`);
   if (!res.ok) throw new Error(`map fetch failed: ${res.status}`);
   const map = parseMap(opts.room, await res.json());
-  const world = await createWorld(map, opts.name, opts.color);
+  const world = await createWorld(map, opts.name, opts.color, opts.character);
   // Click-to-walk (README roadmap "Map enhancements"): a click on the canvas
   // pathfinds to the clicked tile (unreachable → ignored).
   world.onClick.cb = (tx, ty) => {
@@ -202,7 +202,7 @@ async function main(): Promise<void> {
     presence.setInCall(inCall);
   };
 
-  const conn = new Connection(opts.room, opts.name, opts.color, loadStatus(), {
+  const conn = new Connection(opts.room, opts.name, opts.color, opts.character, loadStatus(), {
     onHello: (h) => {
       myId = h.you;
       const me = h.users.find((u) => u.id === h.you);
@@ -214,9 +214,10 @@ async function main(): Promise<void> {
       roster.clear();
       for (const u of h.users) roster.set(u.id, u);
       world.local.setDir(dir);
-      // Our own pixel-art variant keys off our room-visible name, like
-      // everyone else's (the id is random per session).
-      world.local.setVariant(variantFor(me?.name ?? opts.name));
+      // Our own pixel-art variant: the chosen character (the profile
+      // menu), else the stable hash of our room-visible name (the id is
+      // random per session).
+      world.local.setVariant(me?.character ?? variantFor(me?.name ?? opts.name));
       world.manager.hello(h.users, h.you);
       // Presence dots on the map: every rostered avatar (ours included).
       for (const u of h.users) world.manager.setStatus(u.id, u.status ?? "online");
@@ -403,6 +404,7 @@ async function main(): Promise<void> {
   const header = createHeader(sidebar, opts.room, {
     name: opts.name,
     color: opts.color,
+    character: opts.character,
     status: loadStatus(),
     onSwitchMap: (map) => navigateToRoom(map, 150),
     onIdentityChange: () => navigateToRoom(opts.room, 150),
