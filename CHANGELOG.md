@@ -4,6 +4,43 @@ All notable releases of campfire. Versions follow calendar-agnostic
 semver; releases are cut by tagging `vX.Y.Z` (the Docker image is built
 and pushed to GHCR on each tag).
 
+## [0.0.12] — 2026-11-14
+
+The avatar release: real top-down pixel-art characters replace the
+plain circles, and identity becomes something you pick.
+
+### Added
+
+- Pixel-art avatars: 40 top-down characters (Jephed, Game Between
+  The Lines — free pack, credits in the README and next to the
+  sheets), 4 directions × 3-frame walk cycle, rendered at 1.5×
+  (30×48 px) with nearest sampling; the user's profile color is baked
+  into the outfit band of their frames. Each user gets a stable
+  variant — a hash of their room-visible name — and overlapping
+  avatars sort by depth.
+- Character picker: the profile settings are now a full-page layer
+  (shown over the app while it loads when the identity is not fully
+  picked yet, and over the running game from the profile button)
+  with name, color and a 2×-thumbnail character grid. The pick rides
+  the existing identity flow (`Avatar.character` on the wire) and
+  persists in localStorage; other clients render the chosen
+  character from the roster.
+- The profile button shows the joined character instead of the
+  name's initial.
+
+### Changed
+
+- Silent zones no longer draw the 🔇 badge above the avatar — their
+  occupants are dnd since 0.0.11, so the red status dot marks them
+  (the Users-list 🔇 and the local mute stay).
+
+### Fixed
+
+- The status dot and the 🎧 badge hung off the name label's baseline
+  and read as detached; both anchor to the label's center now.
+- The character picker's grid overflowed the popover horizontally;
+  it fits and scrolls vertically only.
+
 ## [0.0.11] — 2026-11-14
 
 The process release: silent zones hush presence, the dev loop gets
