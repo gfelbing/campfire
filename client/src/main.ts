@@ -10,11 +10,12 @@ import type { ChatMsg, Dir, MovementBatch, OwnStatus, UserBrief } from "./net/ty
 import { boot, loadStatus } from "./ui/boot";
 import { createChat, type ChatUI } from "./ui/chat";
 import { createHeader } from "./ui/header";
+import { openProfileLayer, type Identity } from "./ui/profile";
+import { parseColor, variantFor } from "./world/characters";
 import { createPresence } from "./ui/presence";
 import { createSidebar } from "./ui/sidebar";
 import { isWalkablePoint, parseMap, tileAt, zoneContains, type MapData, type Zone } from "./world/mapdata";
 import { createWorld, drawBubble, followCamera } from "./world/render";
-import { variantFor } from "./world/characters";
 
 declare global {
   interface Window {
@@ -122,10 +123,32 @@ async function main(): Promise<void> {
   const opts = await boot();
   attachKeys();
 
+  // Identity setup (first visit, or a stale one): the full-page layer
+  // shows while the map loads behind it; the join waits for the confirm.
+  // Drivers (URL name+color) and returning players skip straight in.
+  let identity: Identity = {
+    name: opts.name,
+    color: opts.color,
+    character: opts.character,
+  };
+  const setupLayer = opts.identityComplete
+    ? null
+    : openProfileLayer(document.body, identity, {
+        mode: "setup",
+        confirmLabel: "Join",
+      });
+
   const res = await fetch(`/api/v1/maps/${encodeURIComponent(opts.room)}`);
   if (!res.ok) throw new Error(`map fetch failed: ${res.status}`);
   const map = parseMap(opts.room, await res.json());
   const world = await createWorld(map, opts.name, opts.color, opts.character);
+  if (setupLayer) {
+    identity = (await setupLayer)!;
+    // The world was built with the pre-setup identity: apply the picked one.
+    world.local.setName(identity.name);
+    world.local.setColor(parseColor(identity.color) ?? 0xffffff);
+    world.local.setVariant(identity.character ?? variantFor(identity.name));
+  }
   // Click-to-walk (README roadmap "Map enhancements"): a click on the canvas
   // pathfinds to the clicked tile (unreachable → ignored).
   world.onClick.cb = (tx, ty) => {
@@ -202,7 +225,7 @@ async function main(): Promise<void> {
     presence.setInCall(inCall);
   };
 
-  const conn = new Connection(opts.room, opts.name, opts.color, opts.character, loadStatus(), {
+  const conn = new Connection(opts.room, identity.name, identity.color, identity.character, loadStatus(), {
     onHello: (h) => {
       myId = h.you;
       const me = h.users.find((u) => u.id === h.you);
@@ -217,7 +240,7 @@ async function main(): Promise<void> {
       // Our own pixel-art variant: the chosen character (the profile
       // menu), else the stable hash of our room-visible name (the id is
       // random per session).
-      world.local.setVariant(me?.character ?? variantFor(me?.name ?? opts.name));
+      world.local.setVariant(me?.character ?? variantFor(me?.name ?? identity.name));
       world.manager.hello(h.users, h.you);
       // Presence dots on the map: every rostered avatar (ours included).
       for (const u of h.users) world.manager.setStatus(u.id, u.status ?? "online");
@@ -396,16 +419,32 @@ async function main(): Promise<void> {
     onCallSound: (s) => playCallSound(s),
   }, opts.room);
   // Top bar: the burger toggles the sidebar; the map switcher navigates the
-  // same way room switching does; name/color edits rejoin with the new
-  // identity; the global 🎤/📷/🖥 buttons wire to the manager and transport;
-  // status changes are announced to the room and re-shape call behavior.
+  // same way room switching does; the profile button opens the full-page
+  // identity layer (a changed identity rejoins); the global 🎤/📷/🖥
+  // buttons wire to the manager and transport; status changes are
+  // announced to the room and re-shape call behavior.
   const header = createHeader(sidebar, opts.room, {
-    name: opts.name,
-    color: opts.color,
-    character: opts.character,
+    name: identity.name,
+    color: identity.color,
+    character: identity.character,
     status: loadStatus(),
     onSwitchMap: (map) => navigateToRoom(map, 150),
-    onIdentityChange: () => navigateToRoom(opts.room, 150),
+    onOpenProfile: () => {
+      void openProfileLayer(document.body, identity, {
+        mode: "edit",
+        confirmLabel: "Done",
+      }).then((next) => {
+        if (!next) return;
+        if (
+          next.name !== identity.name ||
+          next.color !== identity.color ||
+          next.character !== identity.character
+        ) {
+          identity = next;
+          navigateToRoom(opts.room, 150);
+        }
+      });
+    },
     onStatusChange: (s) => {
       conn.sendStatus(s);
       manager.setStatus(s);

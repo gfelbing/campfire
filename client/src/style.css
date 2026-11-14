@@ -261,8 +261,42 @@ body {
   border: 2px solid var(--bg);
 }
 
-/* profile popover: name, avatar color, status */
-.profile-menu {
+/* The full-page identity layer (ui/profile.ts): setup during load, and
+   the profile button's edit screen over the running game. */
+.identity-layer {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  background: rgba(10, 12, 16, 0.82);
+  display: grid;
+  place-items: center;
+}
+
+.identity-card {
+  width: 340px;
+  max-width: calc(100vw - 2rem);
+  max-height: calc(100vh - 2rem);
+  overflow-y: auto;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  padding: 1.1rem;
+  display: grid;
+  gap: 0.45rem;
+}
+
+.identity-title {
+  font-size: 1.05rem;
+  font-weight: 700;
+}
+
+.identity-hint {
+  font-size: 0.75rem;
+  color: #9aa0ad;
+  margin-bottom: 0.2rem;
+}
+
+/* profile popover: name, avatar color, status */.profile-menu {
   position: absolute;
   top: calc(100% + 6px);
   right: 0;

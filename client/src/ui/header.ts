@@ -4,17 +4,17 @@
 // leave-and-reload as room switching). Right: the global 🎤/📷 buttons
 // (mute and camera work in and out of a call; the preference is applied
 // when a call starts), the 🖥 screen-share button (in-call only) and the
-// profile button — a popover to change your name, avatar color and status
-// (online / away / do not disturb).
+// profile button — it opens the full-page identity layer
+// (`ui/profile.ts`); the presence status lives in its own menu here.
 //
-// Name and color changes rejoin the room (the identity is fixed at join, so
+// Identity changes rejoin the room (the identity is fixed at join, so
 // a change navigates away and back with the new values); status applies
 // immediately and also governs call behavior (see call/manager.ts).
 
-import { COLORS, saveIdentity } from "./boot";
 import type { OwnStatus } from "../net/types";
 import type { SidebarUI } from "./sidebar";
-import { CHARACTER_COUNT, previewCell, variantFor } from "../world/characters";
+import { previewCell, variantFor } from "../world/characters";
+import type { Identity } from "./profile";
 
 interface MapInfo {
   id: string;
@@ -35,8 +35,8 @@ export interface HeaderOptions {
   /** The joined presence status. */
   status: OwnStatus;
   onSwitchMap: (map: string) => void;
-  /** Rejoin the room with a new identity (name and/or color changed). */
-  onIdentityChange: (name: string, color: string) => void;
+  /** Open the full-page identity layer (`ui/profile.ts`). */
+  onOpenProfile: () => void;
   /** Presence status changed (persisted + announced by `setStatus`). */
   onStatusChange: (status: OwnStatus) => void;
   /** Global mic toggle (works in and out of a call). */
@@ -58,6 +58,9 @@ export interface HeaderUI {
   setScreen(on: boolean): void;
   /** Show/hide the 🖥 screen-share button (offered only in a call). */
   setInCall(inCall: boolean): void;
+  /** The confirmed identity (after a setup/edit layer): refreshes the
+   *  profile button's character preview. */
+  setIdentity(identity: Identity): void;
 }
 
 export function createHeader(
@@ -73,7 +76,6 @@ export function createHeader(
   const camBtn = topbar.querySelector<HTMLButtonElement>("#cam-btn")!;
   const screenBtn = topbar.querySelector<HTMLButtonElement>("#screen-btn")!;
   const profileBtn = topbar.querySelector<HTMLButtonElement>("#profile-btn")!;
-  const profileMenu = topbar.querySelector<HTMLElement>("#profile-menu")!;
   const statusBtn = topbar.querySelector<HTMLButtonElement>("#status-btn")!;
   const statusMenu = topbar.querySelector<HTMLElement>("#status-menu")!;
 
@@ -131,107 +133,14 @@ export function createHeader(
 
   // --- right: profile ---------------------------------------------------------
 
-  // Identity drafts: they start at the joined values and only commit (rejoin)
-  // on "Done". Status applies immediately via `setStatus`.
-  let name = opts.name;
-  let color = opts.color;
-  /** The character draft: `null` = derived from the name (the stable
-   *  hash). Committed on "Done" like the name and color. */
-  let character = opts.character;
-  const committedName = opts.name;
-  const committedColor = opts.color;
-  const committedCharacter = opts.character;
+  // The committed identity: the profile button renders its character
+  // thumbnail; the draft editing happens in the full-page layer
+  // (`ui/profile.ts`), opened by the button.
+  const identity = { name: opts.name, color: opts.color, character: opts.character };
   let status = opts.status;
 
-  // Build the profile popover once; it is shown/hidden, not rebuilt, so the
-  // name input keeps focus while editing.
-  const nameInput = document.createElement("input");
-  nameInput.className = "profile-name-input";
-  nameInput.maxLength = 24;
-  nameInput.placeholder = "your name";
-  nameInput.autocomplete = "off";
-  nameInput.value = name;
-  const swatches = document.createElement("div");
-  swatches.className = "profile-swatches";
-  const characters = document.createElement("div");
-  characters.className = "profile-characters";
-  const nameError = document.createElement("div");
-  nameError.className = "profile-error hidden";
-  const doneBtn = document.createElement("button");
-  doneBtn.className = "profile-done";
-  doneBtn.textContent = "Done";
-
-  nameInput.addEventListener("input", () => {
-    name = nameInput.value;
-    nameError.classList.add("hidden");
-    renderProfileAvatar();
-  });
-
-  for (const c of COLORS) {
-    const b = document.createElement("button");
-    b.type = "button";
-    b.className = "swatch";
-    b.dataset.color = c;
-    b.style.background = c;
-    b.setAttribute("aria-label", `color ${c}`);
-    b.addEventListener("click", () => {
-      color = c;
-      syncSwatchSelection();
-      renderProfileAvatar();
-      renderCharacterGrid();
-    });
-    swatches.appendChild(b);
-  }
-
-  // Character picker: a canvas thumbnail per sheet (the idle south frame,
-  // recolored to the draft color), plus an "auto" entry that derives the
-  // character from the name hash (the pre-picker behavior).
-  function renderCharacterGrid(): void {
-    characters.replaceChildren();
-    const auto = document.createElement("button");
-    auto.type = "button";
-    auto.className = "swatch character";
-    auto.textContent = "∅";
-    auto.title = "derive the character from your name";
-    auto.addEventListener("click", () => {
-      character = null;
-      syncCharacterSelection();
-      renderProfileAvatar();
-    });
-    characters.appendChild(auto);
-    for (let i = 0; i < CHARACTER_COUNT; i++) {
-      const b = document.createElement("button");
-      b.type = "button";
-      b.className = "swatch character";
-      b.title = `character ${i + 1}`;
-      const cell = previewCell(i, color);
-      if (cell) {
-        cell.className = "character-cell";
-        b.appendChild(cell);
-      }
-      b.addEventListener("click", () => {
-        character = i;
-        syncCharacterSelection();
-        renderProfileAvatar();
-      });
-      characters.appendChild(b);
-    }
-    syncCharacterSelection();
-  }
-
-  function syncCharacterSelection(): void {
-    for (const el of characters.children) {
-      const b = el as HTMLElement;
-      const sel =
-        b.textContent === "∅"
-          ? character === null
-          : Number(b.dataset.character) === character;
-      b.classList.toggle("selected", sel);
-    }
-  }
-
-  // Status rows live in their own topbar popover (issues.md #1), not in
-  // the profile menu.
+  // Status rows live in their own topbar popover (issues.md #1); the
+  // identity drafts live in the full-page layer (`ui/profile.ts`).
   for (const s of STATUSES) {
     const b = document.createElement("button");
     b.type = "button";
@@ -248,54 +157,17 @@ export function createHeader(
     statusMenu.appendChild(b);
   }
 
-  doneBtn.addEventListener("click", () => {
-    const trimmed = name.trim();
-    if (trimmed.length < 1 || trimmed.length > 24) {
-      nameError.textContent = "Name must be 1–24 characters.";
-      nameError.classList.remove("hidden");
-      return;
-    }
-    name = trimmed;
-    saveIdentity(name, color, character);
-    closeAll();
-    if (
-      name !== committedName ||
-      color !== committedColor ||
-      character !== committedCharacter
-    ) {
-      opts.onIdentityChange(name, color);
-    }
-  });
-
-  // Assemble the popover (labels built as text nodes to stay XSS-safe).
-  const label = (t: string): HTMLDivElement => {
-    const d = document.createElement("div");
-    d.className = "profile-label";
-    d.textContent = t;
-    return d;
-  };
-  profileMenu.append(
-    label("Name"),
-    nameInput,
-    nameError,
-    label("Color"),
-    swatches,
-    label("Character"),
-    characters,
-    doneBtn,
-  );
-
-  /** The profile button shows the joined character (the draft's, live —
-   *  the same thumbnail the picker uses) instead of the name's initial;
-   *  the initial stays as the fallback for the sheets-not-loaded state. */
+  /** The profile button shows the joined character (the same thumbnail
+   *  the picker uses) instead of the name's initial; the initial stays
+   *  as the fallback for the sheets-not-loaded state. */
   function renderProfileAvatar(): void {
     profileBtn.querySelector<HTMLElement>(".sdot")!.className = `sdot ${status}`;
     profileBtn.title = STATUSES.find((s) => s.id === status)!.label;
     const initial = profileBtn.querySelector<HTMLElement>(".status-initial")!;
-    const cell = previewCell(character ?? variantFor(name), color);
+    const cell = previewCell(identity.character ?? variantFor(identity.name), identity.color);
     if (!cell) {
       initial.classList.remove("hidden");
-      profileBtn.style.background = color;
+      profileBtn.style.background = identity.color;
       return;
     }
     initial.classList.add("hidden");
@@ -318,12 +190,6 @@ export function createHeader(
     statusBtn.querySelector<HTMLElement>(".sdot")!.className = `sdot ${status}`;
   }
 
-  function syncSwatchSelection(): void {
-    for (const s of swatches.children) {
-      (s as HTMLElement).classList.toggle("selected", (s as HTMLElement).dataset.color === color);
-    }
-  }
-
   /** Shared status-change path (popover clicks and `ui.setStatus`). */
   function applyStatus(s: OwnStatus): void {
     status = s;
@@ -336,17 +202,7 @@ export function createHeader(
 
   function closeAll(): void {
     mapList.classList.add("hidden");
-    profileMenu.classList.add("hidden");
     statusMenu.classList.add("hidden");
-  }
-
-  function discardDraft(): void {
-    name = committedName;
-    color = committedColor;
-    character = committedCharacter;
-    nameInput.value = name;
-    syncSwatchSelection();
-    renderProfileAvatar();
   }
 
   mapBtn.addEventListener("click", () => {
@@ -359,14 +215,8 @@ export function createHeader(
   });
 
   profileBtn.addEventListener("click", () => {
-    const willOpen = profileMenu.classList.contains("hidden");
     closeAll();
-    if (willOpen) {
-      renderProfileAvatar();
-      syncSwatchSelection();
-      renderCharacterGrid();
-      profileMenu.classList.remove("hidden");
-    }
+    opts.onOpenProfile();
   });
 
   statusBtn.addEventListener("click", () => {
@@ -378,19 +228,13 @@ export function createHeader(
     }
   });
 
-  // A click outside the top bar, or Escape, closes the popovers; closing the
-  // profile without "Done" discards the unapplied name/color draft.
+  // A click outside the top bar, or Escape, closes the top bar's popovers
+  // (the map and status menus); the identity layer manages itself.
   document.addEventListener("click", (e) => {
-    if (!topbar.contains(e.target as Node)) {
-      if (!profileMenu.classList.contains("hidden")) discardDraft();
-      closeAll();
-    }
+    if (!topbar.contains(e.target as Node)) closeAll();
   });
   document.addEventListener("keydown", (e) => {
-    if (e.key === "Escape") {
-      if (!profileMenu.classList.contains("hidden")) discardDraft();
-      closeAll();
-    }
+    if (e.key === "Escape") closeAll();
   });
 
   renderMapBtn();
@@ -400,6 +244,10 @@ export function createHeader(
   return {
     status: () => status,
     setStatus: (s) => applyStatus(s),
+    setIdentity: (next) => {
+      Object.assign(identity, next);
+      renderProfileAvatar();
+    },
     setMute: (audio, video) => {
       micBtn.classList.toggle("off", !audio);
       micBtn.title = audio ? "mute the microphone (🎤)" : "unmute the microphone (🎤)";

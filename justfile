@@ -61,6 +61,12 @@ ci-e2e: certs
 	  --cert certs/cert.pem --key certs/key.pem > server.log 2>&1 &
 	SERVER_PID=$!
 	trap 'kill "$SERVER_PID" 2>/dev/null' EXIT
+	sleep 0.2
+	if ! kill -0 "$SERVER_PID" 2>/dev/null; then
+	  echo "the e2e server did not start (is something else on 8443? e.g. just dev):"
+	  cat server.log
+	  exit 1
+	fi
 	for i in $(seq 1 30); do
 	  if curl -sk -o /dev/null https://localhost:8443/healthz; then break; fi
 	  if [ "$i" -eq 30 ]; then

@@ -24,6 +24,12 @@ export interface BootOptions {
   /** The chosen pixel-art character (a sheet index); `null` = derived
    *  from the name (the stable hash). */
   character: number | null;
+  /** Whether the visitor picked the whole identity (name, color and
+   *  character — persisted, or auth/URL-provided). `false` opens the
+   *  full-page setup layer before the join; the URL-provided name+color
+   *  pair marks it complete too, so the e2e drivers (which never touch
+   *  the profile UI) pass straight through. */
+  identityComplete: boolean;
 }
 
 interface MapInfo {
@@ -195,19 +201,27 @@ async function runBoot(forcedName: string | null): Promise<BootOptions> {
   const stored = loadIdentity();
   const named = [forcedName, stored.name, urlName].find((n) => n && n.length > 0);
   const name = named ?? randomName();
-  const color =
-    stored.color && COLOR_RE.test(stored.color)
-      ? stored.color
-      : rawColor !== null && COLOR_RE.test(rawColor)
-        ? rawColor
-        : randomColor();
-  // The chosen character (the profile menu); `null` = derive from the
+  const storedColor =
+    stored.color && COLOR_RE.test(stored.color) ? stored.color : undefined;
+  const urlColor = rawColor !== null && COLOR_RE.test(rawColor) ? rawColor : undefined;
+  const color = storedColor ?? urlColor ?? randomColor();
+  // The chosen character (the profile layer); `null` = derive from the
   // name. A URL-provided name (e2e drivers) resets it: a fresh identity
   // should not inherit the previous one's character.
   const character = named === stored.name && stored.character !== undefined
     ? stored.character
     : null;
   saveIdentity(name, color, character);
+  // "Fully picked": the name and color were not randomly generated and
+  // the character is persisted — or the URL provided name and color
+  // (driver intent; the drivers never open the profile layer). Anyone
+  // else gets the full-page setup layer before the join.
+  const identityComplete =
+    (named !== undefined &&
+      (storedColor !== undefined || urlColor !== undefined) &&
+      named === stored.name &&
+      stored.character !== undefined) ||
+    (urlName !== undefined && urlColor !== undefined);
 
-  return { room, name, color, character };
+  return { room, name, color, character, identityComplete };
 }
