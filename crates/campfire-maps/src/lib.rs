@@ -639,35 +639,51 @@ mod tests {
 
     #[test]
     fn exit_urls_resolve_to_loaded_maps() {
-        let maps = Maps::load(Path::new(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../maps"
-        )));
+        // A temp-dir fixture: resolution is exercised against real loaded
+        // maps, but must not depend on the vendored `maps/map-starter-kit`
+        // (not committed — CI checkouts don't have it).
+        let dir = std::env::temp_dir().join("campfire-exit-urls-test");
+        std::fs::create_dir_all(dir.join("starter")).unwrap();
+        std::fs::create_dir_all(dir.join("island")).unwrap();
+        let raw = serde_json::json!({
+            "type": "map", "width": 2, "height": 2, "tilewidth": 32,
+            "layers": [{"type": "tilelayer", "name": "collision",
+                        "width": 2, "height": 2, "data": [0, 0, 0, 0]}]
+        });
+        for name in [
+            "starter/office.tmj",
+            "starter/conference.tmj",
+            "island/island.json",
+        ] {
+            std::fs::write(dir.join(name), serde_json::to_vec(&raw).unwrap()).unwrap();
+        }
+        let maps = Maps::load(&dir);
+
         // Relative to the current map's directory; the fragment is dropped.
         assert_eq!(
-            maps.resolve_exit_url("map-starter-kit/office", "conference.tmj"),
-            Some("map-starter-kit/conference".into())
+            maps.resolve_exit_url("starter/office", "conference.tmj"),
+            Some("starter/conference".into())
         );
         assert_eq!(
-            maps.resolve_exit_url("map-starter-kit/office", "conference.tmj#from-office"),
-            Some("map-starter-kit/conference".into())
+            maps.resolve_exit_url("starter/office", "conference.tmj#from-office"),
+            Some("starter/conference".into())
         );
         // `..` and the maps root.
         assert_eq!(
-            maps.resolve_exit_url("map-starter-kit/office", "../island/island.json"),
+            maps.resolve_exit_url("starter/office", "../island/island.json"),
             Some("island".into())
         );
         assert_eq!(
-            maps.resolve_exit_url("office", "/island/island.json"),
+            maps.resolve_exit_url("starter/office", "/island/island.json"),
             Some("island".into())
         );
         // A self-link collapses to the map's own id (`map_id` rule).
         assert_eq!(
-            maps.resolve_exit_url("office", "../office/office.json"),
-            Some("office".into())
+            maps.resolve_exit_url("island", "../island/island.json"),
+            Some("island".into())
         );
         // Unloaded targets resolve to nothing.
-        assert_eq!(maps.resolve_exit_url("office", "nowhere.json"), None);
+        assert_eq!(maps.resolve_exit_url("island", "nowhere.json"), None);
     }
 
     /// Nested map ids: a map in a subdirectory is keyed by its relative
