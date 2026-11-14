@@ -70,7 +70,8 @@ export class AvatarView {
     });
     this.label.anchor.set(0.5, 1);
     // Above the sprite's head (its top sits at −CELL_H/2·SPRITE_SCALE),
-    // with the call and dnd badges stacked over it.
+    // with the call and dnd badges stacked over it in even steps. All the
+    // overlays hang off the label's line (see `layoutStatusDot`).
     this.label.y = -24 * SPRITE_SCALE;
     this.inCallBadge = new Text({
       text: "🎧",
@@ -79,7 +80,7 @@ export class AvatarView {
       },
     });
     this.inCallBadge.anchor.set(0.5, 1);
-    this.inCallBadge.y = -38 * SPRITE_SCALE;
+    this.inCallBadge.y = this.label.y - 15;
     this.inCallBadge.visible = false;
     this.dndBadge = new Text({
       text: "🔇",
@@ -88,7 +89,7 @@ export class AvatarView {
       },
     });
     this.dndBadge.anchor.set(0.5, 1);
-    this.dndBadge.y = -52 * SPRITE_SCALE;
+    this.dndBadge.y = this.label.y - 29;
     this.dndBadge.visible = false;
     this.statusDot = new Graphics();
     this.container.addChild(
@@ -143,9 +144,13 @@ export class AvatarView {
   }
 
   /** The dot sits just left of the (name-width-dependent) label, on the
-   *  label's line. */
+   *  label's vertical center (the label is anchored at its bottom, so its
+   *  center is half a text height above the anchor line). */
   private layoutStatusDot(): void {
-    this.statusDot.position.set(-this.label.width / 2 - 5, -24 * SPRITE_SCALE);
+    this.statusDot.position.set(
+      -this.label.width / 2 - 5,
+      this.label.y - this.label.height / 2,
+    );
   }
 
   /** Toggle the headphone badge (call state is room-wide, docs/arch/protocol.md). */
