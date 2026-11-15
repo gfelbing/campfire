@@ -51,6 +51,9 @@ export interface MoqCallOpts {
   stream: MediaStream;
   /** Log lines for the call UI. */
   onLog: (text: string) => void;
+  /** A participant's audio level (0-255 average of the frequency bins,
+   *  10 Hz; the call UI's "speaking" pulse). */
+  onLevel?: (id: string, level: number) => void;
   /** A participant's downlink changed state (the manager re-pushes the
    *  roster so the UI tile flips "subscribing…" → "live"). */
   onDownlinkChange?: (id: string, status: DownlinkStatus) => void;
@@ -66,9 +69,6 @@ export interface DownlinkView {
   canvas: HTMLCanvasElement;
   /** Canvas the screen rendition paints into (blank until the peer shares). */
   screenCanvas: HTMLCanvasElement;
-  /** The downlink's audio as a MediaStream (level meter), once the audio
-   *  pipeline is up. */
-  stream: MediaStream | null;
   /** Decoded frames, camera and screen (debug/e2e). */
   frames: number;
   screenFrames: number;
@@ -196,7 +196,9 @@ interface Downlink {
   /** Audio graph nodes owned by this downlink (recreated on rewiring). */
   nodes: AudioNode[];
   gain: GainNode | null;
-  meterStream: MediaStream | null;
+  /** Level meter tap (the decoder's own audio context; see wireAudio). */
+  analyser: AnalyserNode | null;
+  levelData: Uint8Array<ArrayBuffer> | null;
   /** Silent zone: output muted (the meter keeps showing). */
   muted: boolean;
   /** Last status reported to `onDownlinkChange` (transition guard). */
@@ -256,17 +258,25 @@ export class MoqCall {
   private downlinks = new Map<string, Downlink>();
   private room: string;
   private onDownlinkChange?: (id: string, status: DownlinkStatus) => void;
+  private onLevel?: (id: string, level: number) => void;
+  /** 10 Hz level-meter poll (see wireAudio); null when the session is down. */
+  private levelTimer: number | null = null;
   private hookTimer: number | null = null;
 
-  private constructor(room: string, onDownlinkChange?: (id: string, status: DownlinkStatus) => void) {
+  private constructor(
+    room: string,
+    onDownlinkChange?: (id: string, status: DownlinkStatus) => void,
+    onLevel?: (id: string, level: number) => void,
+  ) {
     this.room = room;
     this.onDownlinkChange = onDownlinkChange;
+    this.onLevel = onLevel;
   }
 
   /** Open the session and start the uplink. Rejects if the session cannot
    *  be established or the stream has no usable track. */
   static async start(opts: MoqCallOpts): Promise<MoqCall> {
-    const call = new MoqCall(opts.room, opts.onDownlinkChange);
+    const call = new MoqCall(opts.room, opts.onDownlinkChange, opts.onLevel);
     setHook({ url: opts.url, name: opts.name, version: null, state: "starting", error: null });
     try {
       const origin = new Net.Origin.Producer();
@@ -371,6 +381,8 @@ export class MoqCall {
       // Uplink scaling: sample the transport's send-rate estimate at
       // ~1 Hz into the allocator the video encoders reserve against.
       call.startStatsPoll(session);
+      // 10 Hz audio-level poll (the call UI's speaking pulse).
+      call.startLevelPoll();
       // 1 Hz timer: refreshes the e2e downlink hook only (C14). The UI's
       // status transitions are signal-driven (see addParticipant), so
       // there is nothing to poll in the production bundle.
@@ -574,7 +586,8 @@ export class MoqCall {
       screenCanvas,
       nodes: [],
       gain: null,
-      meterStream: null,
+      analyser: null,
+      levelData: null,
       muted: false,
       lastStatus: "subscribing",
       camEnabled,
@@ -771,6 +784,10 @@ export class MoqCall {
       window.clearInterval(this.statTimer);
       this.statTimer = null;
     }
+    if (this.levelTimer !== null) {
+      window.clearInterval(this.levelTimer);
+      this.levelTimer = null;
+    }
     this.allocator?.close();
     this.allocator = null;
     this.estimate.set(undefined);
@@ -780,7 +797,10 @@ export class MoqCall {
     setHook({ state: "stopped" });
   }
 
-  /** (Re)wire the downlink's audio graph to the current decoder context.
+  /** (Re)wire the downlink's audio graph to the current decoder context:
+   *  speakers (through the silent-zone gain) plus an analyser tap for the
+   *  level meter. The tap sits before the gain, so a silent zone mutes
+   *  the output while the meter keeps showing.
    *  Note: the library creates one `AudioContext` per audio decoder (the
    *  same is true for `<moq-watch>`); past the browser's context limit
    *  new ones start suspended — the `resume` below reactivates them,
@@ -797,7 +817,8 @@ export class MoqCall {
     }
     d.nodes = [];
     d.gain = null;
-    d.meterStream = null;
+    d.analyser = null;
+    d.levelData = null;
     if (!ctx || !root) return;
     // Browsers suspend AudioContexts until a user gesture has occurred;
     // the call was entered by walking (a gesture), but ask anyway.
@@ -805,12 +826,32 @@ export class MoqCall {
     const gain = ctx.createGain();
     gain.gain.value = d.muted ? 0 : 1;
     gain.connect(ctx.destination);
-    const meter = ctx.createMediaStreamDestination();
+    const analyser = ctx.createAnalyser();
+    analyser.fftSize = 512;
     root.connect(gain);
-    root.connect(meter);
-    d.nodes = [gain, meter];
+    root.connect(analyser);
+    d.nodes = [gain, analyser];
     d.gain = gain;
-    d.meterStream = meter.stream;
+    d.analyser = analyser;
+    d.levelData = new Uint8Array(analyser.frequencyBinCount);
+  }
+
+  /** Push each participant's audio level (0-255, the average of the
+   *  analyser's frequency bins) to the UI at 10 Hz. Runs while the
+   *  session is up; downlinks without a wired audio graph are skipped. */
+  private startLevelPoll(): void {
+    if (this.levelTimer !== null) return;
+    this.levelTimer = window.setInterval(() => {
+      for (const [id, d] of this.downlinks) {
+        const a = d.analyser;
+        const data = d.levelData;
+        if (!a || !data) continue;
+        a.getByteFrequencyData(data);
+        let sum = 0;
+        for (let i = 0; i < data.length; i++) sum += data[i];
+        this.onLevel?.(id, sum / data.length);
+      }
+    }, 100);
   }
 
   /** Debounce the re-announce pulse: a re-route surfaces as several
@@ -874,6 +915,8 @@ export class MoqCall {
       }
     }
     d.nodes = [];
+    d.analyser = null;
+    d.levelData = null;
     d.sync.close();
     d.broadcast.close();
     d.scrBroadcast.close();
@@ -907,7 +950,6 @@ export class MoqCall {
       status: this.statusOf(d),
       canvas: d.canvas,
       screenCanvas: d.screenCanvas,
-      stream: d.meterStream,
       frames: d.camDecoder.out.stats.peek()?.frameCount ?? 0,
       screenFrames: d.scrDecoder.out.stats.peek()?.frameCount ?? 0,
       audioBytes: d.audDecoder.out.stats.peek()?.bytesReceived ?? 0,

@@ -37,8 +37,6 @@ export interface PeerView {
   name: string;
   /** The camera downlink's paint target (the SFU renders into it). */
   camera: HTMLCanvasElement | null;
-  /** The camera downlink's audio as a MediaStream (the level meter). */
-  cameraStream: MediaStream | null;
   /** The screen-share downlink's paint target (only while they share). */
   screen: HTMLCanvasElement | null;
   state: DownlinkState;
@@ -68,6 +66,8 @@ export interface CallUiHooks {
   onLocalStream: (stream: MediaStream | null) => void;
   /** Full roster of remote participants (grid rebuild/update). */
   onPeers: (peers: PeerView[]) => void;
+  /** A peer's audio level (0-255 average, 10 Hz; the "speaking" pulse). */
+  onPeerLevel: (id: string, level: number) => void;
   /** Our own mute/camera state changed (button styling). */
   onLocalMute: (audio: boolean, video: boolean) => void;
   /** Our screen share started/stopped (button styling). */
@@ -457,6 +457,7 @@ export class CallManager {
       room: this.room,
       stream: this.localStream,
       onLog: (t) => this.hooks.onLog(t),
+      onLevel: (id, level) => this.hooks.onPeerLevel(id, level),
       onDownlinkChange: () => this.pushPeers(),
     })
       .then((c) => {
@@ -529,7 +530,6 @@ export class CallManager {
           id: u.id,
           name: u.name,
           camera: dl?.canvas ?? null,
-          cameraStream: dl?.stream ?? null,
           screen: pres.screen ? (dl?.screenCanvas ?? null) : null,
           state: dl?.status ?? "subscribing",
           delay: dl?.delay ?? 0,
@@ -551,14 +551,23 @@ export class CallManager {
     // the downlink delay/jitter move on their own, not with roster or
     // presence events, so a periodic re-push keeps them current.
     if (phase.p === "in-call" && this.statsTimer === null) {
+      // One getStats in flight at a time: a slow WebTransport.getStats()
+      // must not stack calls that each end in a roster push.
+      let rttPending = false;
       this.statsTimer = window.setInterval(() => {
         // Refresh the transport RTT, then push the roster with the fresh
         // value. `getRtt()` resolves immediately on the SSE fallback
         // (null) and rejects-to-null when `getStats()` is unavailable.
-        void this.send.getRtt().then((v) => {
-          this.rtt = v;
-          this.pushPeers();
-        });
+        if (rttPending) return;
+        rttPending = true;
+        void this.send
+          .getRtt()
+          .catch(() => null)
+          .then((v) => {
+            rttPending = false;
+            this.rtt = v;
+            this.pushPeers();
+          });
       }, 1000);
     } else if (phase.p !== "in-call" && this.statsTimer !== null) {
       window.clearInterval(this.statsTimer);

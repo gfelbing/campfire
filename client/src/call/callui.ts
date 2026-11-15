@@ -21,6 +21,9 @@ export interface CallUI {
   setLocalStream(stream: MediaStream | null): void;
   /** Update the column from the manager's roster (create/update/remove). */
   setPeers(peers: PeerView[]): void;
+  /** A camera tile's audio level (0-255 average, 10 Hz): toggles the
+   *  tile's "speaking" highlight. */
+  setPeerLevel(id: string, level: number): void;
 }
 
 interface Tile {
@@ -40,13 +43,6 @@ interface Tile {
   muteEl: HTMLElement;
   camEl: HTMLElement;
   screenEl: HTMLElement;
-  /** The downlink's audio MediaStream (level meter), once wired. */
-  stream: MediaStream | null;
-  /** Only camera tiles get a level meter (the screen stream has no audio). */
-  meter: boolean;
-  source: MediaStreamAudioSourceNode | null;
-  analyser: AnalyserNode | null;
-  data: Uint8Array<ArrayBuffer> | null;
 }
 
 /** Aggregate the per-peer states into one column-level label. */
@@ -146,66 +142,8 @@ export function createCallUI(container: HTMLElement, actions: CallUiActions): Ca
   // --- tiles: one per stream slot, created/updated in place ---------------
   // --- (rebuilding <video> elements would restart the streams).
   const tiles = new Map<string, Tile>();
-  /** Shared AudioContext for the per-tile level meters (docs/arch/protocol.md). */
-  let audioCtx: AudioContext | null = null;
-  let levelTimer: number | null = null;
   /** Key of the tile currently shown large in the center overlay. */
   let focused: string | null = null;
-
-  function ensureCtx(): AudioContext | null {
-    if (typeof AudioContext === "undefined") return null;
-    if (!audioCtx) {
-      audioCtx = new AudioContext();
-      void audioCtx.resume().catch(() => {});
-    }
-    return audioCtx;
-  }
-
-  /** Detach the tile's level meter (audio source + analyser). */
-  function stopMeter(t: Tile): void {
-    t.source?.disconnect();
-    t.source = null;
-    t.analyser?.disconnect();
-    t.analyser = null;
-    t.data = null;
-    t.media?.classList.remove("speaking");
-    if (levelTimer !== null && ![...tiles.values()].some((x) => x.analyser)) {
-      window.clearInterval(levelTimer);
-      levelTimer = null;
-      void audioCtx?.close().catch(() => {});
-      audioCtx = null;
-    }
-  }
-
-  /** Attach (or re-attach) the tile's level meter to its stream. */
-  function startMeter(t: Tile, stream: MediaStream): void {
-    stopMeter(t);
-    const ctx = ensureCtx();
-    const audio = stream.getAudioTracks()[0];
-    if (!ctx || !audio) return;
-    const source = ctx.createMediaStreamSource(new MediaStream([audio]));
-    const analyser = ctx.createAnalyser();
-    analyser.fftSize = 512;
-    source.connect(analyser);
-    t.source = source;
-    t.analyser = analyser;
-    t.data = new Uint8Array(analyser.frequencyBinCount);
-    if (levelTimer === null) {
-      // 10 Hz (docs/arch/protocol.md): one pass over all tiles per tick.
-      levelTimer = window.setInterval(() => {
-        for (const tile of tiles.values()) {
-          if (!tile.meter || !tile.analyser || !tile.data) {
-            tile.media?.classList.remove("speaking");
-            continue;
-          }
-          tile.analyser.getByteFrequencyData(tile.data);
-          let sum = 0;
-          for (let i = 0; i < tile.data.length; i++) sum += tile.data[i];
-          tile.media?.classList.toggle("speaking", sum / tile.data.length > 24);
-        }
-      }, 100);
-    }
-  }
 
   function makeTile(key: string, name: string, screen: boolean): Tile {
     const el = document.createElement("div");
@@ -227,11 +165,6 @@ export function createCallUI(container: HTMLElement, actions: CallUiActions): Ca
       muteEl: el.querySelector<HTMLElement>(".tile-mute")!,
       camEl: el.querySelector<HTMLElement>(".tile-cam")!,
       screenEl: el.querySelector<HTMLElement>(".tile-screen")!,
-      stream: null,
-      meter: !screen,
-      source: null,
-      analyser: null,
-      data: null,
     };
     tile.nameEl.textContent = screen ? `${name} · screen` : name;
     tile.screenEl.classList.toggle("hidden", !screen);
@@ -246,7 +179,7 @@ export function createCallUI(container: HTMLElement, actions: CallUiActions): Ca
     return tile;
   }
 
-  function updateTile(t: Tile, name: string, state: DownlinkState, canvas: HTMLCanvasElement | null, stream: MediaStream | null, audioOn: boolean, videoOn: boolean, delay: number, rtt: number | null, width = 0, height = 0): void {
+  function updateTile(t: Tile, name: string, state: DownlinkState, canvas: HTMLCanvasElement | null, audioOn: boolean, videoOn: boolean, delay: number, rtt: number | null, width = 0, height = 0): void {
     t.nameEl.textContent = t.key.endsWith(":scr") ? `${name} · screen` : name;
     t.stateEl.textContent = stateText(state);
     // Latency: e2e playback delay (how far the canvas trails the live
@@ -280,11 +213,6 @@ export function createCallUI(container: HTMLElement, actions: CallUiActions): Ca
       t.media?.remove();
       t.media = canvas;
       if (canvas) t.el.prepend(canvas);
-    }
-    if (stream !== t.stream) {
-      t.stream = stream;
-      if (stream && t.meter) startMeter(t, stream);
-      else stopMeter(t);
     }
   }
 
@@ -371,7 +299,6 @@ export function createCallUI(container: HTMLElement, actions: CallUiActions): Ca
         name: string;
         screen: boolean;
         canvas: HTMLCanvasElement | null;
-        stream: MediaStream | null;
         state: DownlinkState;
         delay: number;
         rtt: number | null;
@@ -388,7 +315,6 @@ export function createCallUI(container: HTMLElement, actions: CallUiActions): Ca
           name: p.name,
           screen: false,
           canvas: p.camera,
-          stream: p.cameraStream,
           state: p.state,
           delay: p.delay,
           rtt: p.rtt,
@@ -403,7 +329,6 @@ export function createCallUI(container: HTMLElement, actions: CallUiActions): Ca
             name: p.name,
             screen: true,
             canvas: p.screen,
-            stream: null, // the screen share carries no audio
             state: p.state,
             delay: p.delay,
             rtt: p.rtt,
@@ -422,13 +347,12 @@ export function createCallUI(container: HTMLElement, actions: CallUiActions): Ca
           t = makeTile(v.key, v.name, v.screen);
           tiles.set(v.key, t);
         }
-        updateTile(t, v.name, v.state, v.canvas, v.stream, v.audioOn, v.videoOn, v.delay, v.rtt, v.width, v.height);
+        updateTile(t, v.name, v.state, v.canvas, v.audioOn, v.videoOn, v.delay, v.rtt, v.width, v.height);
       }
       for (const [key, t] of tiles) {
         if (!seen.has(key)) {
           if (focused === key) unfocus();
           tiles.delete(key);
-          stopMeter(t);
           t.el.remove();
         }
       }
@@ -438,6 +362,12 @@ export function createCallUI(container: HTMLElement, actions: CallUiActions): Ca
       col.dataset.state =
         agg.state === "live" ? "connected" : agg.state === "offline" ? "failed" : "connecting";
       tilesEl.dataset.empty = peers.length === 0 ? "1" : "0";
+    },
+    setPeerLevel(id, level) {
+      // Camera tiles only (the screen share carries no audio). The level
+      // comes from the downlink's analyser (moq.ts), 10 Hz.
+      const t = tiles.get(`${id}:cam`);
+      t?.media?.classList.toggle("speaking", level > 24);
     },
   };
 }
