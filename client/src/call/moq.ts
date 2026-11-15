@@ -704,7 +704,11 @@ export class MoqCall {
       // allocator, max-min fair split between the two video tracks).
       bandwidth: this.allocator ?? undefined,
       config: {
-        keyframeInterval: Net.Time.Milli(1000),
+        // Screen content compresses well and its join is not the
+        // camera's fast-start path (issues.md §10 T7 budget rides the
+        // 1 s camera keyframe): 2 s keyframes halve the per-second
+        // full-frame cost of what is usually a large, quiet surface.
+        keyframeInterval: Net.Time.Milli(2000),
         // Screen capture targets 15 fps (media.ts); bound it so the
         // auto-sizing and the bandwidth grant have a ceiling.
         frameRate: 15,
