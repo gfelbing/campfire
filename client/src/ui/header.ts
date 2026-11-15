@@ -13,6 +13,7 @@
 
 import type { OwnStatus } from "../net/types";
 import type { SidebarUI } from "./sidebar";
+import { iconNode } from "./pixicons";
 import { previewCell, variantFor } from "../world/characters";
 import type { Identity } from "./profile";
 
@@ -75,6 +76,12 @@ export function createHeader(
   const micBtn = topbar.querySelector<HTMLButtonElement>("#mic-btn")!;
   const camBtn = topbar.querySelector<HTMLButtonElement>("#cam-btn")!;
   const screenBtn = topbar.querySelector<HTMLButtonElement>("#screen-btn")!;
+  // Pixel icons (ui/pixicons.ts) replace the old emoji: one svg per
+  // toggle, currentColor picks up the button's text color — the on/off
+  // styling stays CSS on the button.
+  micBtn.replaceChildren(iconNode("mic", 20));
+  camBtn.replaceChildren(iconNode("camera", 20));
+  screenBtn.replaceChildren(iconNode("screen", 20));
   const profileBtn = topbar.querySelector<HTMLButtonElement>("#profile-btn")!;
   const statusBtn = topbar.querySelector<HTMLButtonElement>("#status-btn")!;
   const statusMenu = topbar.querySelector<HTMLElement>("#status-menu")!;
@@ -250,13 +257,13 @@ export function createHeader(
     },
     setMute: (audio, video) => {
       micBtn.classList.toggle("off", !audio);
-      micBtn.title = audio ? "mute the microphone (🎤)" : "unmute the microphone (🎤)";
+      micBtn.title = audio ? "mute the microphone" : "unmute the microphone";
       camBtn.classList.toggle("off", !video);
-      camBtn.title = video ? "turn the camera off (📷)" : "turn the camera on (📷)";
+      camBtn.title = video ? "turn the camera off" : "turn the camera on";
     },
     setScreen: (on) => {
       screenBtn.classList.toggle("on", on);
-      screenBtn.title = on ? "stop sharing the screen (🖥)" : "share the screen (🖥)";
+      screenBtn.title = on ? "stop sharing the screen" : "share the screen";
     },
     setInCall: (inCall) => {
       screenBtn.classList.toggle("hidden", !inCall);

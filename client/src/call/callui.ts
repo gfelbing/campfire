@@ -11,6 +11,7 @@
 //! walking away is how you leave.
 
 import type { CallPhase, DownlinkState, PeerView } from "./manager";
+import { iconNode } from "../ui/pixicons";
 
 export interface CallUiActions {
   onHangup(): void;
@@ -116,7 +117,7 @@ export function createCallUI(container: HTMLElement, actions: CallUiActions): Ca
       <div class="theater-header">
         <span class="theater-name"></span>
         <span class="theater-state">connecting…</span>
-        <button class="call-btn call-hangup" title="leave the call">📞</button>
+        <button class="call-btn call-hangup" title="leave the call"></button>
       </div>
       <div class="theater-tiles">
         <div class="theater-tile local"><video class="theater-pip" autoplay playsinline muted></video>
@@ -138,6 +139,9 @@ export function createCallUI(container: HTMLElement, actions: CallUiActions): Ca
   const focus = root.querySelector<HTMLElement>(".theater-focus")!;
   const focusSlot = root.querySelector<HTMLElement>(".theater-focus-slot")!;
 
+  root.querySelector<HTMLButtonElement>(".call-hangup")!.replaceChildren(
+    iconNode("hangup", 16),
+  );
   root.querySelector<HTMLButtonElement>(".call-hangup")!.addEventListener("click", () => {
     actions.onHangup();
   });
@@ -153,9 +157,9 @@ export function createCallUI(container: HTMLElement, actions: CallUiActions): Ca
     el.className = `theater-tile${screen ? " screen" : ""}`;
     el.innerHTML = `
       <div class="theater-tile-info"><span class="tile-name"></span><span class="tile-state"></span><canvas class="tile-spark" width="${SPARK_W}" height="${SPARK_H}"></canvas><span class="tile-latency hidden"></span></div>
-      <span class="call-badge tile-mute hidden">🔇</span>
-      <span class="call-badge tile-cam hidden">📷 off</span>
-      <span class="call-badge tile-screen hidden">🖥</span>`;
+      <span class="call-badge tile-mute hidden" title="microphone muted"></span>
+      <span class="call-badge tile-cam hidden" title="camera off"></span>
+      <span class="call-badge tile-screen hidden" title="sharing their screen"></span>`;
     const tile: Tile = {
       key,
       el,
@@ -171,6 +175,10 @@ export function createCallUI(container: HTMLElement, actions: CallUiActions): Ca
     };
     tile.nameEl.textContent = screen ? `${name} · screen` : name;
     tile.screenEl.classList.toggle("hidden", !screen);
+    // Pixel badges (the old emoji): drawn once per tile.
+    tile.muteEl.replaceChildren(iconNode("mic-off", 14));
+    tile.camEl.replaceChildren(iconNode("camera", 14));
+    tile.screenEl.replaceChildren(iconNode("screen", 14));
     // Focus toggle: click a tile to show it large in the center; click the
     // focused one again (or Escape) to unfocus.
     el.addEventListener("click", () => {

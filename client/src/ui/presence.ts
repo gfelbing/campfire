@@ -3,6 +3,7 @@
 // every `hello` (reconnect/room-switch catch-up), incremental otherwise.
 
 import type { OwnStatus, UserBrief, UserState } from "../net/types";
+import { iconNode } from "./pixicons";
 
 export interface PresenceUI {
   /** Full roster + in-call set (hello / re-hello). */
@@ -43,13 +44,15 @@ export function createPresence(container: HTMLElement): PresenceUI {
     if (badge(id)) {
       const b = document.createElement("span");
       b.className = "presence-call";
-      b.textContent = "🎧";
+      b.title = "in the call";
+      b.replaceChildren(iconNode("headphones", 14));
       li.appendChild(b);
     }
     if (dnd.has(id)) {
       const b = document.createElement("span");
       b.className = "presence-dnd";
-      b.textContent = "🔇";
+      b.title = "do not disturb";
+      b.replaceChildren(iconNode("mic-off", 14));
       li.appendChild(b);
     }
   }

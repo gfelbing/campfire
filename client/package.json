@@ -16,6 +16,7 @@
     "@moq/publish": "^0.5.6",
     "@moq/signals": "^0.2.6",
     "@moq/watch": "^0.6.6",
+    "pixelarticons": "^2.4.2",
     "pixi.js": "^8.6.6"
   },
   "devDependencies": {

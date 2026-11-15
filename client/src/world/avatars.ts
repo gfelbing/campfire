@@ -1,9 +1,10 @@
 // Avatars: our own + everyone else's, with dead-reckoning interpolation of
 // remote positions between 15 Hz datagram snapshots (docs/arch/client.md).
 
-import { Container, Graphics, Sprite, Text } from "pixi.js";
+import { Container, Graphics, Sprite, Text, Texture } from "pixi.js";
 
 import type { Dir, OwnStatus, UserBrief, UserState } from "../net/types";
+import { iconCanvas } from "../ui/pixicons";
 import {
   CELL_H,
   IDLE_COL,
@@ -46,8 +47,12 @@ export class AvatarView {
   private dir: Dir = "s";
   private moving = false;
   label: Text;
-  /** 🎧 shown above the label while the user is in a call (docs/arch/protocol.md). */
-  private inCallBadge: Text;
+  /** The pixel in-call badge above the label (docs/arch/protocol.md);
+   *  rasterized from the pixel icon svg on demand (headless tests have
+   *  no DOM to rasterize on). */
+  private inCallBadge: Sprite | null = null;
+  /** The requested badge state while the raster is in flight. */
+  private inCallOn = false;
   /** Presence dot right of the name (same palette as the Users list). */
   private statusDot: Graphics;
   private baseX = 0;
@@ -71,22 +76,12 @@ export class AvatarView {
     // with the call and dnd badges stacked over it in even steps. All the
     // overlays hang off the label's line (see `layoutStatusDot`).
     this.label.y = -24 * SPRITE_SCALE;
-    this.inCallBadge = new Text({
-      text: "🎧",
-      style: {
-        fontSize: 11,
-      },
-    });
-    this.inCallBadge.anchor.set(0.5, 1);
-    this.inCallBadge.y = this.label.y - 15;
-    this.inCallBadge.visible = false;
     this.statusDot = new Graphics();
     this.container.addChild(
       this.body,
       this.facing,
       this.label,
       this.statusDot,
-      this.inCallBadge,
     );
     this.setName(name);
     this.setColor(color);
@@ -143,7 +138,24 @@ export class AvatarView {
 
   /** Toggle the headphone badge (call state is room-wide, docs/arch/protocol.md). */
   setInCall(on: boolean): void {
-    this.inCallBadge.visible = on;
+    this.inCallOn = on;
+    if (
+      on &&
+      !this.inCallBadge &&
+      typeof document !== "undefined"
+    ) {
+      // Rasterize the pixel icon once, on first use.
+      void iconCanvas("headphones", 16).then((canvas) => {
+        if (!this.inCallOn) return; // toggled off while rasterizing
+        const badge = new Sprite(Texture.from(canvas));
+        badge.anchor.set(0.5, 1);
+        badge.y = this.label.y - 15;
+        badge.visible = true;
+        this.inCallBadge = badge;
+        this.container.addChild(badge);
+      });
+    }
+    if (this.inCallBadge) this.inCallBadge.visible = on;
   }
 
   setColor(color: number): void {

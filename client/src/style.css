@@ -189,6 +189,16 @@ body {
   border-color: var(--accent);
 }
 
+/* The pixel icon svgs sit inline (currentColor); crisp pixels. */
+.topbar-toggle svg,
+.call-btn svg,
+.call-badge svg,
+.presence-call svg,
+.presence-dnd svg {
+  display: block;
+  image-rendering: pixelated;
+}
+
 .topbar-toggle.off {
   background: #3a2020;
   border-color: #8a3b3b;
@@ -806,6 +816,12 @@ body {
   margin-left: 0.4em;
 }
 
+.presence-call,
+.presence-dnd {
+  display: inline-flex;
+  vertical-align: middle;
+}
+
 /* --- call theater (docs/arch/protocol.md + roadmap "UI redesign") -------------------- */
 /* In a call: a column of remote video tiles on the right, overlapping the
    map, plus the local PiP and the controls bar. Clicking a tile focuses it
@@ -1149,6 +1165,8 @@ body {
   border-radius: 8px;
   cursor: pointer;
   padding: 0;
+  display: grid;
+  place-items: center;
 }
 
 .theater-header .call-hangup:hover {
