@@ -4,6 +4,25 @@ All notable releases of campfire. Versions follow calendar-agnostic
 semver; releases are cut by tagging `vX.Y.Z` (the Docker image is built
 and pushed to GHCR on each tag).
 
+## [0.0.15] — 2026-11-15
+
+The icon release: the functional UI emoji move out, replaced by a
+proper pixel icon set.
+
+### Changed
+
+- All functional icons now come from the `pixelarticons` package
+  (MIT, halfmage) — the same pixel language as the character
+  avatars, drawn properly instead of OS-vendor emoji. Only the ten
+  icons the UI needs are imported (Vite `?raw`), so they bundle as
+  small svg strings; `currentColor` keeps the on/off button styling
+  in CSS. Wired across the app: the top bar's mic/camera/screen
+  toggles and the sidebar burger, the theater's hang-up button and
+  tile badges, the presence list's in-call/do-not-disturb badges,
+  the avatar's in-call badge, and the sidebar's collapsed rail plus
+  accordion labels (users / chat / bubble chat). The 🔥 wordmark and
+  the accordion carets stay text.
+
 ## [0.0.14] — 2026-11-15
 
 The friction release: the call stack sheds its busywork, and remote
