@@ -504,6 +504,8 @@ async function main(): Promise<void> {
   // Game loop: integrate local movement, draw, send at ≤15 Hz (2 Hz idle).
   let lastSend = 0;
   let prev = performance.now();
+  /** Whether the previous tick rendered us moving (the stop edge). */
+  let wasMovingPrev = false;
   const tick = (now: number): void => {
     // Schedule the next frame FIRST: a throw anywhere below (transport,
     // rendering) must never kill the loop — that once froze the whole game.
@@ -596,10 +598,19 @@ async function main(): Promise<void> {
       drawBubble(world, [], []);
     }
 
-    if (now - lastSend >= (moving ? SEND_EVERY_MS : IDLE_EVERY_MS)) {
+    // The stop is edge-triggered: behind the 2 Hz idle gate the final
+    // mv=0 batch would take up to IDLE_EVERY_MS to leave, during which
+    // other clients dead-reckon along the last velocity (EXTRAPOLATE_MS)
+    // and then freeze mid-walk — the avatar visibly jumps when the stop
+    // lands. Walk sends stay on the 15 Hz gate.
+    if (
+      (wasMovingPrev && !moving) ||
+      now - lastSend >= (moving ? SEND_EVERY_MS : IDLE_EVERY_MS)
+    ) {
       lastSend = now;
       conn.sendMove(x, y, dir, moving);
     }
+    wasMovingPrev = moving;
 
     // Silent-zone presence (see `silentDnd` above): edge-triggered on
     // entering/leaving a `silentZone`.
