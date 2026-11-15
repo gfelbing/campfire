@@ -26,6 +26,10 @@ mod client_wt;
 const RECV_TIMEOUT: Duration = Duration::from_secs(5);
 /// How long to let the 50 ms tick settle the bubble state before asserting.
 const SETTLE: Duration = Duration::from_millis(400);
+/// The leaver's re-entry grace (the world's `BUBBLE_RETURN_GRACE`): a user
+/// who just hung up is exempt from the bubble engine until it expires, so a
+/// re-formed call only appears after it.
+const REENTRY_GRACE: Duration = Duration::from_secs(2);
 
 type WtEndpoint = wtransport::Endpoint<wtransport::endpoint::endpoint_side::Client>;
 
@@ -367,9 +371,11 @@ async fn stale_ticket_after_call_end_is_rejected() {
         "the live ticket",
     );
 
-    // Alice hangs up: the two-person call ends (bob is left alone).
+    // Alice hangs up: the two-person call ends (bob is left alone). Her
+    // re-entry grace keeps the bubble engine from pulling her straight
+    // back, so the re-form below only happens once the grace expires.
     a.send(&ClientMsg::CallLeave).await;
-    tokio::time::sleep(SETTLE).await;
+    tokio::time::sleep(REENTRY_GRACE + SETTLE).await;
 
     // The old ticket is now dead: the call it named no longer exists.
     moq_rejected(
