@@ -371,10 +371,13 @@ export class MoqCall {
       // Uplink scaling: sample the transport's send-rate estimate at
       // ~1 Hz into the allocator the video encoders reserve against.
       call.startStatsPoll(session);
-      // 1 Hz timer: refreshes the e2e downlink hook (gated by the debug
-      // flag) and polls downlink status for the UI tile's state label.
-      call.refreshDownlinks();
-      call.hookTimer = window.setInterval(() => call.refreshDownlinks(), 1000);
+      // 1 Hz timer: refreshes the e2e downlink hook only (C14). The UI's
+      // status transitions are signal-driven (see addParticipant), so
+      // there is nothing to poll in the production bundle.
+      if (__CAMPFIRE_DEBUG__) {
+        call.refreshDownlinks();
+        call.hookTimer = window.setInterval(() => call.refreshDownlinks(), 1000);
+      }
       return call;
     } catch (err) {
       call.stop();
@@ -595,6 +598,17 @@ export class MoqCall {
     );
     camEnabled.set(camSource.out.track.peek() === "v");
     scrEnabled.set(scrSource.out.track.peek() === "s");
+    // Status transitions drive the UI tile's state label directly from
+    // the broadcast's status signal (instant, no polling; the 1 Hz
+    // hookTimer below is the e2e client only).
+    d.unsubs.push(
+      d.broadcast.out.status.subscribe((s) => {
+        const next = s === "live" ? "live" : s === "offline" ? "offline" : "subscribing";
+        if (next === d.lastStatus) return;
+        d.lastStatus = next;
+        this.onDownlinkChange?.(id, next);
+      }),
+    );
     // Re-announce guard (plan 3): the main hang can be re-announced while
     // the peer stays in the call (their session reloads, or the SFU
     // re-routes it), which re-routes the hang server-side and kills the
@@ -915,16 +929,15 @@ export class MoqCall {
     }
   }
 
-  /** Poll downlink state once: notify the manager on a status transition
-   *  (it re-pushes the roster so the UI tile's state label updates) and,
-   *  in the e2e client only, refresh the `__campfire_moq_down` hook
-   *  (C14). */
+  /** Refresh the e2e downlink hook (the `build:e2e` client only, C14).
+   *  Production is signal-driven (see addParticipant) and never calls
+   *  this. */
   private refreshDownlinks(): void {
+    if (!__CAMPFIRE_DEBUG__) return;
     const down: Record<string, MoqDownHook> = {};
     for (const [id, d] of this.downlinks) {
       const v = this.viewOf(d);
-      if (__CAMPFIRE_DEBUG__) {
-        down[id] = {
+      down[id] = {
           status: v.status,
           frames: v.frames,
           screenFrames: v.screenFrames,
@@ -944,16 +957,9 @@ export class MoqCall {
           syncMaxAge: d.audDecoder.sync.out.maxAge.peek() ?? null,
           mainStatus: d.broadcast.out.status.peek(),
           scrStatus: d.scrBroadcast.out.status.peek(),
-        };
-      }
-      // Notify the manager on a status transition (it re-pushes the
-      // roster so the UI tile's state label updates).
-      if (v.status !== d.lastStatus) {
-        d.lastStatus = v.status;
-        this.onDownlinkChange?.(id, v.status);
-      }
+      };
     }
-    if (__CAMPFIRE_DEBUG__) window.__campfire_moq_down = down;
+    window.__campfire_moq_down = down;
   }
 
   /** The audio ring's backlog in ms: the total span of buffered media.
