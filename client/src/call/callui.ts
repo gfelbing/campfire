@@ -180,8 +180,11 @@ export function createCallUI(container: HTMLElement, actions: CallUiActions): Ca
   }
 
   function updateTile(t: Tile, name: string, state: DownlinkState, canvas: HTMLCanvasElement | null, audioOn: boolean, videoOn: boolean, delay: number, rtt: number | null, width = 0, height = 0): void {
-    t.nameEl.textContent = t.key.endsWith(":scr") ? `${name} · screen` : name;
-    t.stateEl.textContent = stateText(state);
+    const label = t.key.endsWith(":scr") ? `${name} · screen` : name;
+    // 1 Hz roster pushes: only touch the DOM when the text changed.
+    if (t.nameEl.textContent !== label) t.nameEl.textContent = label;
+    const stateLabel = stateText(state);
+    if (t.stateEl.textContent !== stateLabel) t.stateEl.textContent = stateLabel;
     // Latency: e2e playback delay (how far the canvas trails the live
     // edge) plus the transport RTT of our signaling connection — a proxy
     // for the path to the SFU. The RTT part is omitted when the transport
