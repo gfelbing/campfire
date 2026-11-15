@@ -27,24 +27,16 @@ import * as Watch from "@moq/watch";
 import { Catalog } from "@moq/hang";
 import { Signal } from "@moq/signals";
 
-/** Catch-up (issues.md "skipping when falling behind"): playback enters a
- *  call 1 s behind the live edge, so the initial burst of frames lands in
- *  the jitter buffer instead of re-anchoring the clock mid-burst. After
- *  the stability window the delay shrinks to the steady value;
- *  `Sync.wait` wakes on the change (the bundle watches
- *  `in.delay.changed`), so the shrink takes effect live and the ring
- *  resize on shrink keeps the newest samples. */
-const ENTRY_DELAY_MS = 300;
-const STEADY_DELAY_MS = 300;
-/** How long the entry delay is held: long enough for a slow start to
- *  settle, short enough to be unnoticeable. */
-const ENTRY_WINDOW_MS = 5000;
-/** Backlog budget as a multiple of the delay: `Sync.in.buffer` = 2 ×
- *  delay, which switches the audio ring into buffered mode (no read skip,
- *  capacity 2 × delay) and grows the transport `maxAge` so a backlog
- *  reaches the ring instead of being dropped. The invariant
- *  `buffer ≤ 2 × delay` keeps the backlog inside the ring capacity, so
- *  the writer never has to drop either. */
+/** Playback delay behind the live edge (issues.md "skipping when falling
+ *  behind"): a fixed offset lets a burst of frames land in the jitter
+ *  buffer instead of re-anchoring the clock mid-burst.
+ *  `Sync.in.buffer` = 2 × delay, which switches the audio ring into
+ *  buffered mode (no read skip, capacity 2 × delay) and grows the
+ *  transport `maxAge` so a backlog reaches the ring instead of being
+ *  dropped. The invariant `buffer ≤ 2 × delay` keeps the backlog inside
+ *  the ring capacity, so the writer never has to drop either. */
+const DELAY_MS = 300;
+/** Backlog budget as a multiple of the delay (see DELAY_MS). */
 const BACKLOG_FACTOR = 2;
 
 /** Options for one call session. */
@@ -209,15 +201,6 @@ interface Downlink {
   muted: boolean;
   /** Last status reported to `onDownlinkChange` (transition guard). */
   lastStatus: DownlinkStatus;
-  /** Entry-delay ramp (see ENTRY_DELAY_MS): the signals driving
-   *  `sync.in.delay` / `sync.in.buffer`, and whether the shrink to the
-   *  steady value already happened. */
-  delaySig: Signal<Net.Time.Milli>;
-  bufferSig: Signal<Net.Time.Milli>;
-  /** When the downlink was created (the entry window's start). */
-  bornMs: number;
-  /** True once the entry delay shrank to STEADY_DELAY_MS (one-shot). */
-  steady: boolean;
   /** Decoder `enabled` gates, owned here so the re-announce guard can
    *  pulse them off→on to force a re-subscribe (plan 3). */
   camEnabled: Signal<boolean>;
@@ -502,13 +485,11 @@ export class MoqCall {
       enabled: true,
       announced: true,
     });
-    // The playback delay is driven, not fixed: a 1 s entry delay (see
-    // ENTRY_DELAY_MS) shrinks to the steady value after the stability
-    // window in `refreshDownlinks`. `buffer` = 2 × delay keeps the
-    // backlog budget inside the ring capacity (see BACKLOG_FACTOR).
-    const delaySig = new Signal<Net.Time.Milli>(Net.Time.Milli(ENTRY_DELAY_MS));
+    // The playback delay is fixed (see DELAY_MS); `buffer` = 2 × delay
+    // keeps the backlog budget inside the ring capacity (BACKLOG_FACTOR).
+    const delaySig = new Signal<Net.Time.Milli>(Net.Time.Milli(DELAY_MS));
     const bufferSig = new Signal<Net.Time.Milli>(
-      Net.Time.Milli(ENTRY_DELAY_MS * BACKLOG_FACTOR),
+      Net.Time.Milli(DELAY_MS * BACKLOG_FACTOR),
     );
     const sync = new Watch.Sync({
       delay: delaySig,
@@ -593,10 +574,6 @@ export class MoqCall {
       meterStream: null,
       muted: false,
       lastStatus: "subscribing",
-      delaySig,
-      bufferSig,
-      bornMs: performance.now(),
-      steady: false,
       camEnabled,
       scrEnabled,
       audEnabled,
@@ -944,22 +921,7 @@ export class MoqCall {
    *  (C14). */
   private refreshDownlinks(): void {
     const down: Record<string, MoqDownHook> = {};
-    const now = performance.now();
     for (const [id, d] of this.downlinks) {
-      // Entry-delay ramp (one-shot): once the stability window has passed
-      // and the downlink is actually live, shrink the delay — and its 2×
-      // backlog budget — to the steady value. `Sync.wait` wakes on the
-      // delay change, so the shrink applies to the running playback clock
-      // immediately (no re-subscribe).
-      if (
-        !d.steady &&
-        now - d.bornMs >= ENTRY_WINDOW_MS &&
-        d.broadcast.out.status.peek() === "live"
-      ) {
-        d.steady = true;
-        d.delaySig.update(() => Net.Time.Milli(STEADY_DELAY_MS));
-        d.bufferSig.update(() => Net.Time.Milli(STEADY_DELAY_MS * BACKLOG_FACTOR));
-      }
       const v = this.viewOf(d);
       if (__CAMPFIRE_DEBUG__) {
         down[id] = {
