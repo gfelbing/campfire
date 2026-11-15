@@ -4,6 +4,26 @@ All notable releases of campfire. Versions follow calendar-agnostic
 semver; releases are cut by tagging `vX.Y.Z` (the Docker image is built
 and pushed to GHCR on each tag).
 
+## [0.0.13] — 2026-11-15
+
+The rehearsal release: no behavior change, just CI keeping its own
+promises — and the repo gains the release checklist as a skill.
+
+### Changed
+
+- The release checklist (verify CI, bump every version file, write the
+  changelog entry, tag) now lives in the repo as an agent skill
+  instead of tribal memory.
+
+### Fixed
+
+- The MoQ SFU acceptance suite flaked in CI: the stale-ticket test hung
+  up a call and expected the bubble to re-form within a 500 ms receive
+  window, but the world's 2 s re-entry grace for a leaver
+  (`BUBBLE_RETURN_GRACE`) keeps the bubble engine from re-forming until
+  it expires. The test now waits out the grace before expecting the
+  fresh ticket.
+
 ## [0.0.12] — 2026-11-14
 
 The avatar release: real top-down pixel-art characters replace the
