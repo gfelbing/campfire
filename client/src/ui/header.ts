@@ -82,6 +82,7 @@ export function createHeader(
   micBtn.replaceChildren(iconNode("mic", 20));
   camBtn.replaceChildren(iconNode("camera", 20));
   screenBtn.replaceChildren(iconNode("screen", 20));
+  burger.replaceChildren(iconNode("menu", 20));
   const profileBtn = topbar.querySelector<HTMLButtonElement>("#profile-btn")!;
   const statusBtn = topbar.querySelector<HTMLButtonElement>("#status-btn")!;
   const statusMenu = topbar.querySelector<HTMLElement>("#status-menu")!;

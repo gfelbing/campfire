@@ -16,6 +16,7 @@ import phoneRaw from "pixelarticons/svg/phone.svg?raw";
 import usersRaw from "pixelarticons/svg/users.svg?raw";
 import messageTextRaw from "pixelarticons/svg/message-text.svg?raw";
 import messageReplyRaw from "pixelarticons/svg/message-reply.svg?raw";
+import menuRaw from "pixelarticons/svg/menu.svg?raw";
 
 export type IconName =
   | "mic"
@@ -26,7 +27,8 @@ export type IconName =
   | "headphones"
   | "users"
   | "message-text"
-  | "message-reply";
+  | "message-reply"
+  | "menu";
 
 const RAW: Record<IconName, string> = {
   mic: micRaw,
@@ -38,6 +40,7 @@ const RAW: Record<IconName, string> = {
   users: usersRaw,
   "message-text": messageTextRaw,
   "message-reply": messageReplyRaw,
+  menu: menuRaw,
 };
 
 /** The icon as a fresh `<svg>` element (DOM buttons and badges). */

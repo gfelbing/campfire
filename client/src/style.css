@@ -84,6 +84,9 @@ body {
   border: none;
   border-radius: 8px;
   cursor: pointer;
+  display: grid;
+  place-items: center;
+  padding: 0;
 }
 
 #burger:hover {
@@ -196,7 +199,8 @@ body {
 .presence-call svg,
 .presence-dnd svg,
 .sidebar-rail button svg,
-.acc-label svg {
+.acc-label svg,
+#burger svg {
   display: block;
   image-rendering: pixelated;
 }
