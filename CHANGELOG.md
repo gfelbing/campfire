@@ -4,6 +4,35 @@ All notable releases of campfire. Versions follow calendar-agnostic
 semver; releases are cut by tagging `vX.Y.Z` (the Docker image is built
 and pushed to GHCR on each tag).
 
+## [0.0.14] — 2026-11-15
+
+The friction release: the call stack sheds its busywork, and remote
+avatars stop walking when you actually stop.
+
+### Changed
+
+- Call-stack lean-up (a review pass over the video path): downlink
+  status transitions ("subscribing…" → "live") fire straight from the
+  broadcast's status signal instead of a 1 Hz poll; the audio level
+  meter taps the decoder's own AudioContext instead of a second one
+  per participant (the meterStream hop is gone, silent zones keep
+  their meters); the entry-delay ramp — whose entry and steady values
+  had drifted to the same 300 ms — is deleted; screen shares keyframe
+  every 2 s instead of every second (the camera keeps its 1 s
+  fast-start interval); the theater's 1 Hz roster push only touches
+  the DOM when a tile's text actually changed; the local PiP hides
+  while the camera is off, like the remote tiles do; and the 1 Hz RTT
+  poll can no longer stack overlapping `getStats()` calls into
+  back-to-back roster pushes.
+
+### Fixed
+
+- Releasing the walk key now sends the final `mv=0` datagram
+  immediately instead of waiting out the 2 Hz idle send gate. Before,
+  the stop could take 500 ms to leave, during which other clients
+  dead-reckoned along the last velocity and then froze mid-walk — the
+  avatar visibly jumped on halt when the stop landed.
+
 ## [0.0.13] — 2026-11-15
 
 The rehearsal release: no behavior change, just CI keeping its own
