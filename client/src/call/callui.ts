@@ -19,6 +19,9 @@ export interface CallUiActions {
 export interface CallUI {
   setPhase(phase: CallPhase): void;
   setLocalStream(stream: MediaStream | null): void;
+  /** Our camera toggled: the local PiP hides while off (a frozen last
+   *  frame, like the remote tiles hide theirs). */
+  setLocalVideo(on: boolean): void;
   /** Update the column from the manager's roster (create/update/remove). */
   setPeers(peers: PeerView[]): void;
   /** A camera tile's audio level (0-255 average, 10 Hz): toggles the
@@ -294,6 +297,9 @@ export function createCallUI(container: HTMLElement, actions: CallUiActions): Ca
     },
     setLocalStream(stream) {
       pip.srcObject = stream;
+    },
+    setLocalVideo(on) {
+      pip.classList.toggle("hidden", !on);
     },
     setPeers(peers) {
       // One view per stream slot: camera always, screen when present.

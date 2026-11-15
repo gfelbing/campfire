@@ -414,7 +414,10 @@ async function main(): Promise<void> {
     onLocalStream: (s) => callUI.setLocalStream(s),
     onPeers: (ps) => callUI.setPeers(ps),
     onPeerLevel: (id, level) => callUI.setPeerLevel(id, level),
-    onLocalMute: (a, v) => header.setMute(a, v),
+    onLocalMute: (a, v) => {
+      header.setMute(a, v);
+      callUI.setLocalVideo(v);
+    },
     onLocalScreen: (on) => header.setScreen(on),
     onLog: (t) => toast(t),
     onCallSound: (s) => playCallSound(s),
