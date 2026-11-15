@@ -3,6 +3,8 @@
 //! collapsing (the header's burger) folds it to a narrow icon rail, and a
 //! section header collapses just that section.
 
+import { iconNode, type IconName } from "./pixicons";
+
 export interface SidebarUI {
   /** The body element of a section (to mount a panel into). */
   pane(id: "players" | "chat" | "bubble"): HTMLElement;
@@ -39,6 +41,27 @@ export function createSidebar(): SidebarUI {
   // Always start collapsed (the header's burger or a rail icon expands it);
   // the state is per-session, so a stale "open" can never stick around.
   sidebar.classList.add("collapsed");
+
+  // Pixel icons (ui/pixicons.ts) replace the old emoji, in the rail
+  // buttons and the accordion labels alike. currentColor picks up the
+  // button text color; the unread dots stay elements.
+  const RAIL_ICON: Record<string, IconName> = {
+    players: "users",
+    chat: "message-text",
+    bubble: "message-reply",
+  };
+  for (const b of sidebar.querySelectorAll<HTMLButtonElement>(".sidebar-rail [data-open]")) {
+    b.prepend(iconNode(RAIL_ICON[b.dataset.open!]!, 20));
+  }
+  const LABEL_ICON: Record<string, IconName> = {
+    players: "users",
+    chat: "message-text",
+    bubble: "message-reply",
+  };
+  for (const b of sidebar.querySelectorAll<HTMLButtonElement>(".accordion-header[data-toggle]")) {
+    const label = b.querySelector<HTMLElement>(".acc-label");
+    if (label) label.prepend(iconNode(LABEL_ICON[b.dataset.toggle!]!, 14));
+  }
 
   function section(id: string): HTMLElement {
     return sidebar.querySelector<HTMLElement>(`.accordion[data-acc="${id}"]`)!;

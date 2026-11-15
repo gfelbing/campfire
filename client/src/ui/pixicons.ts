@@ -13,6 +13,9 @@ import videoRaw from "pixelarticons/svg/video.svg?raw";
 import monitorRaw from "pixelarticons/svg/monitor.svg?raw";
 import headphoneRaw from "pixelarticons/svg/headphone.svg?raw";
 import phoneRaw from "pixelarticons/svg/phone.svg?raw";
+import usersRaw from "pixelarticons/svg/users.svg?raw";
+import messageTextRaw from "pixelarticons/svg/message-text.svg?raw";
+import messageReplyRaw from "pixelarticons/svg/message-reply.svg?raw";
 
 export type IconName =
   | "mic"
@@ -20,7 +23,10 @@ export type IconName =
   | "camera"
   | "screen"
   | "hangup"
-  | "headphones";
+  | "headphones"
+  | "users"
+  | "message-text"
+  | "message-reply";
 
 const RAW: Record<IconName, string> = {
   mic: micRaw,
@@ -29,6 +35,9 @@ const RAW: Record<IconName, string> = {
   screen: monitorRaw,
   hangup: phoneRaw,
   headphones: headphoneRaw,
+  users: usersRaw,
+  "message-text": messageTextRaw,
+  "message-reply": messageReplyRaw,
 };
 
 /** The icon as a fresh `<svg>` element (DOM buttons and badges). */
