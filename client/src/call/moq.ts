@@ -28,7 +28,7 @@ import { Catalog } from "@moq/hang";
 import { Signal } from "@moq/signals";
 
 /** Playback delay behind the live edge, per medium (docs/dev/
- *  latency-optimization.md §6–§8). A fixed offset lets a burst of
+ *  latency-optimization.md §6–§9). A fixed offset lets a burst of
  *  frames land in the jitter buffer instead of re-anchoring the clock
  *  mid-burst.
  *
@@ -41,19 +41,23 @@ import { Signal } from "@moq/signals";
  *  has 4× its depth (§8 finding 1) to absorb longer bursts before the
  *  drain recovers at up to 2.5×.
  *
- *  Video trails further (400 ms) — a/v sync is explicitly secondary
+ *  Video trails further (200 ms) — a/v sync is explicitly secondary
  *  (docs/dev/latency-optimization.md), and separate `Sync` clocks mean a
- *  video buffer burst can never hold audio playback back.
+ *  video buffer burst can never hold audio playback back. The tighter
+ *  budget is the point (§9.1): backlog beyond it is skipped (the Sync
+ *  reference re-anchors), so the video playhead jumps to near the live
+ *  edge instead of parking up to 2 s behind it.
  *
- *  Each medium's `Sync.in.buffer` = 4 × its delay: the backlog budget
- *  (how far ahead of the live edge buffered media may sit), matching
- *  the ring's 4× capacity (§8 finding 1) so the writer never has to
- *  drop either. */
+ *  Each medium's `Sync.in.buffer` = its backlog factor × its delay.
+ *  Audio: 4×, matching the ring's 4× capacity (§8 finding 1) so the
+ *  writer never has to drop either. Video: 2×. */
 const AUDIO_DELAY_MS = 40;
-const VIDEO_DELAY_MS = 400;
-/** Backlog budget as a multiple of the delay (see AUDIO_DELAY_MS): 4×
- *  matches the ring's 4× capacity (§8 finding 1). */
-const BACKLOG_FACTOR = 4;
+const VIDEO_DELAY_MS = 200;
+/** Backlog budget as a multiple of the delay: audio 4× (matches the
+ *  ring's 4× capacity, §8 finding 1); video 2× (skip-stale budget,
+ *  §9.1). */
+const AUDIO_BACKLOG_FACTOR = 4;
+const VIDEO_BACKLOG_FACTOR = 2;
 
 /** Options for one call session. */
 export interface MoqCallOpts {
@@ -627,9 +631,9 @@ export class MoqCall {
       announced: true,
     });
     // The playback delay is per medium (see AUDIO_DELAY_MS / VIDEO_DELAY_MS);
-    // each medium's `buffer` = BACKLOG_FACTOR × its delay keeps the backlog
-    // budget inside the ring capacity. Two clocks: video (camera + screen)
-    // and audio, free to drift apart. The e2e audio-quality harness
+    // each medium's `buffer` = its backlog factor × its delay. Two clocks:
+    // video (camera + screen) and audio, free to drift apart. The e2e
+    // audio-quality harness
     // overrides the audio budget (build:e2e only): its environment
     // delivers audio with ~150–200 ms of transport lag — beyond the
     // production 40 ms target, live playback correctly drops frames older
@@ -641,7 +645,7 @@ export class MoqCall {
       (__CAMPFIRE_DEBUG__ && window.__campfire_audio_ms) || AUDIO_DELAY_MS;
     const delaySig = new Signal<Net.Time.Milli>(Net.Time.Milli(VIDEO_DELAY_MS));
     const bufferSig = new Signal<Net.Time.Milli>(
-      Net.Time.Milli(VIDEO_DELAY_MS * BACKLOG_FACTOR),
+      Net.Time.Milli(VIDEO_DELAY_MS * VIDEO_BACKLOG_FACTOR),
     );
     const sync = new Watch.Sync({
       delay: delaySig,
@@ -652,7 +656,7 @@ export class MoqCall {
       Net.Time.Milli(audioDelayTarget),
     );
     const audBufferSig = new Signal<Net.Time.Milli>(
-      Net.Time.Milli(audioDelayTarget * BACKLOG_FACTOR),
+      Net.Time.Milli(audioDelayTarget * AUDIO_BACKLOG_FACTOR),
     );
     const audSync = new Watch.Sync({
       delay: audDelaySig,
