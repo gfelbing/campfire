@@ -15,7 +15,8 @@ give one, ask — never guess or derive it.
 
 The flow, in order:
 
-1. Verify the tree is releasable (on `main`, up to date, CI green).
+1. Verify the tree is releasable (on `main`, up to date, CI green,
+   e2e suite green).
 2. Bump the version in every file that carries it.
 3. Write the `CHANGELOG.md` entry for the new version.
 4. Commit as `release: <version>`, tag `v<version>`, push both.
@@ -32,10 +33,19 @@ GHCR OCI). Do not push until the user has seen the changelog entry.
 - Run the local gate exactly as CI runs it: `just ci`. This is the
   same target `.github/workflows/check.yml` runs on main, so a local
   pass means main's check run is consistent with the tree.
+- Run the e2e suite: `just ci-e2e`. This is the headless browser gate
+  (`tools/e2e`): builds the client with its e2e debug hooks
+  (`build:e2e`), builds the release server, mints dev certs, starts
+  the server on 8443 and drives it with a headless Chrome/Chromium.
+  It is not part of the `check` workflow, so this local run is the
+  only e2e verification before the tag. It needs port 8443 free
+  (`just dev` running blocks it) and may install Chrome if no
+  browser is found.
 - If `gh` is installed, additionally confirm the latest `check` run on
   `main` succeeded (`gh run list --workflow=check --limit 1`); if it
   failed after the last push, stop and report.
-- If `just ci` fails: fix or report — do not release from a red tree.
+- If `just ci` or `just ci-e2e` fails: fix or report — do not release
+  from a red tree.
 
 ## 2. Bump versions
 
