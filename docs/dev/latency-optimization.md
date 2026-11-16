@@ -434,3 +434,93 @@ exposure extended from ~40 ms to ~160 ms of arrival jitter. The 10 ms-frame
 instant configuration remains documented above if speed is ever again worth
 more than continuity.
 
+## 9. A/v sync + video CPU (step 10)
+
+Observation after step 8/9: audio is good, but video visibly trails 1–2 s
+behind the sound, while the tile shows "video 400 ms / audio 100 ms". And
+CPU spikes accompany video. Two separate root causes.
+
+### 9.1 Why video trails: the indicator measures the wrong clock
+
+`delayOf` computes the per-medium delay from `sync.out.timestamp` — the
+**newest received frame's** timestamp (arrival lag + the delay target).
+For audio that is ≈ the playout position, because the audio ring's
+playback sits only the 40 ms floor behind arrivals. For video it is not:
+the video playhead presents frames when the Sync clock passes their
+timestamps, and the Sync reference is allowed to trail arrivals by up to
+`maxAge` = delay + buffer = 400 + 1600 = **2000 ms** (the 4× backlog
+budget from §8). A burst of backlog is *held* (not skipped), played out
+gradually — so video playout sits arrival+400 to arrival+2000 behind
+live, while the tile's video number (arrival+400) barely moves. The
+1–2 s perceived offset is the buffer, invisible in the UI.
+
+Fixes, in order:
+
+1. **Honest indicator**: the video decoder exposes its own playout
+   timestamp (`camDecoder.out.timestamp` — the frame being presented,
+   the video equivalent of the audio ring's playhead). Compute the
+   video delay from it (same wall-clock math as `delayOf`), so the tile
+   shows the true playout lag. This alone makes the problem visible.
+2. **Tighten the video clock** (the "skipping images" the product wants):
+   `VIDEO_DELAY_MS` 400 → 200, and give the video medium its own backlog
+   factor: video `Sync.in.buffer` = 2 × delay (maxAge ≈ 600 ms) instead
+   of the shared 4×. Beyond ~600 ms of backlog the Sync reference
+   re-anchors — stale frames are skipped and the playhead jumps to near
+   the live edge. Visible as occasional frame jumps; audio untouched
+   (its 4× depth stays, it is the priority).
+3. **Test**: extend the e2e step 5b with an a/v-offset assertion — both
+   media's playout lags (audio ring playhead, video decoder playout
+   timestamp) must agree within 500 ms. The environment's transport lag
+   hits both media equally, so their *difference* is the sync metric
+   that matters.
+
+### 9.2 CPU spikes: bitrate is the wrong lever
+
+The spikes come from the video pipeline, and reducing the bitrate does
+not cut them:
+
+- OpenH264 (the software encoder) ignores bitrate without frame-skip —
+  its own warning runs on every configure
+  ("bitrate can't be controlled for RC_QUALITY_MODE/RC_BITRATE_MODE
+  without enabling skip frame"). A lower `maxBitrate` shrinks the
+  transport bursts, not the CPU cost.
+- The CPU is driven by pixels × fps on **both ends** (software encode
+  AND software decode: 800×600 × 30 fps each way, two tabs), by the
+  **keyframe frequency** (1 s GOP: a full-frame burst every second),
+  and by the **OpenH264 reinit storm** — dozens of
+  `CWelsH264SVCEncoder::Initialize(), reinitialize` warnings per run,
+  each a full encoder rebuild. That storm is churn: something mutates
+  the catalog or the resolved encoder config repeatedly (auto-sizing
+  oscillation against the bandwidth grant, or the periodic catalog
+  estimate write — `this.#m.flush()` → `catalog.set(...)` in the
+  publish encoder), and every catalog change re-announces the hang,
+  re-routes it, and rebuilds the subscriber's encoder.
+
+Fixes, in order:
+
+1. **Shrink the pixel budget** (config, cheap): camera `maxPixels`
+   800×600 → 480×360 (−65% pixel work on encode and decode), keep
+   30 fps (chat needs lip sync; 24 fps is the fallback lever).
+2. **Diagnose the churn** (the real fix): run with the existing
+   `E2E_DIAG=1` encoder wrap (logs every `VideoEncoder.configure` with a
+   stack) and identify the mutation source. Then patch the vendored
+   `@moq/publish`: hysteresis the auto-sizing (only re-resolve when the
+   resolved dimensions change by ≥ 25%) and/or debounce the catalog
+   estimate write (once per second at most). Both are one-site patches
+   in the same file as the existing `stalled` pin.
+3. **Keyframe interval** (optional, product trade-off): camera GOP 1 s →
+   2 s halves the per-second full-frame burst; costs late-joiner
+   fast-start (T7 budget rides the 1 s keyframe). Only if spikes remain
+   visible after 1+2.
+
+Explicitly rejected: reducing the *original* stream's bitrate (the
+proposal) — see above, it moves bytes around without touching CPU;
+the burst pressure is already capped (`maxBitrate` 1.5 M/800 k) and
+BBR paces it.
+
+### 9.3 Order
+
+1 (indicator) → 2 (video clock) → e2e a/v-offset assertion → 9.2.1
+(pixels) → 9.2.2 (churn diagnosis → patch). Measure each with the e2e
+suite + a manual two-tab run.
+
