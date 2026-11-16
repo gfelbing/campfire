@@ -37,11 +37,28 @@ const PATCHED_STALLED = "stalled: !1 // [campfire publish patch]";
 // (docs/dev/latency-optimization.md §7 finding 1).
 const STOCK_HINT = 'latencyHint: "interactive"';
 const PATCHED_HINT = "latencyHint: 0 /* [campfire latency] minimum output buffer */";
+// [campfire publish patch] The media-estimate module (jitter/delay of the
+// encoded frames, shared by the audio and video encoders) writes its
+// estimate into the catalog on ANY monotonic bump — one late frame during
+// a CPU spike bumps it, the catalog change re-announces the hang, the SFU
+// re-routes it, and every subscriber's encoder (and our own) rebuilds:
+// the OpenH264 reinit storm. Rate-limit the writes to 1/s and require the
+// estimate to grow by >= 25% before touching the catalog
+// (docs/dev/latency-optimization.md §9.2.2).
+const STOCK_FLUSH =
+	"flush(e, t, n = performance.now() * 1e3) {\n\t\tlet r = n - e, i = t.observe(r, n), a = this.#e.observe(r, n), o = Math.ceil((r - a) / 1e3), s = Math.ceil((a - i) / 1e3);\n\t\treturn o <= this.#t && s <= this.#n ? !1 : (this.#t = Math.max(this.#t, o), this.#n = Math.max(this.#n, s), !0);\n\t}";
+const PATCHED_FLUSH =
+	"flush(e, t, n = performance.now() * 1e3) {\n\t\t// [campfire publish patch] Rate-limited + hysteretic estimate writes:\n\t\t// see the class comment. `this.#r` = last accepted write (µs).\n\t\tlet r = n - e, i = t.observe(r, n), a = this.#e.observe(r, n), o = Math.ceil((r - a) / 1e3), s = Math.ceil((a - i) / 1e3);\n\t\tif (o <= this.#t && s <= this.#n) return !1;\n\t\tif (n - this.#r < 1e6) return !1;\n\t\tif (o < this.#t * 1.25 && s < this.#n * 1.25) return !1;\n\t\tthis.#t = Math.max(this.#t, o), this.#n = Math.max(this.#n, s), this.#r = n;\n\t\treturn !0;\n\t}";
+const STOCK_FIELDS = "#e = new ae();\n\t#t = 0;\n\t#n = 0;";
+const PATCHED_FIELDS =
+	"#e = new ae();\n\t#t = 0;\n\t#n = 0;\n\t// [campfire publish patch] last accepted estimate write, µs\n\t#r = 0;";
 
 // (name, stock, patched, expected stock sites).
 const R = [
   ["stalled catalog pin", STOCK_STALLED, PATCHED_STALLED, 2],
   ["capture latencyHint", STOCK_HINT, PATCHED_HINT, 1],
+  ["estimate flush rate-limit", STOCK_FLUSH, PATCHED_FLUSH, 1],
+  ["estimate fields", STOCK_FIELDS, PATCHED_FIELDS, 1],
 ];
 
 let file = readFileSync(target, "utf8");
