@@ -176,8 +176,33 @@ export interface MoqDownHook {
 
 declare global {
   interface Window {
+    /** E2e diagnostics: how often wireAudio/attachRecorder ran. */
+    __campfire_wire_count?: number;
+    /** E2e diagnostics: how often wireAudio/attachRecorder ran. */
+    __campfire_attach_count?: number;
+    /** E2e video-budget override (maxPixels for the camera encoder). */
+    __campfire_video_maxpx?: number;
+    /** E2e recorder: per-downlink fill-complete flags (see attachRecorder). */
+    __campfire_record_done?: Record<string, boolean>;
     __campfire_moq?: MoqDebugInfo;
     __campfire_moq_down?: Record<string, MoqDownHook>;
+    /** E2e audio-quality recorder (build:e2e only): set true before the
+     *  call to record every wired downlink's decoded audio (moq.ts
+     *  attachRecorder); `__campfire_record_ms` caps the sample budget and
+     *  `__campfire_audio_ms` overrides the audio playback-delay target
+     *  (the e2e environment's transport lag exceeds the production
+     *  budget). */
+    __campfire_record?: boolean;
+    __campfire_record_ms?: number;
+    __campfire_audio_ms?: number;
+    __campfire_audio_data?: Record<
+      string,
+      { rate: number; chunks: Float32Array[] }
+    >;
+    /** The harness's read-out: base64 Float32 samples for one downlink. */
+    __campfire_audio_capture?: (
+      id: string,
+    ) => Promise<{ rate: number; base64: string } | null>;
   }
 }
 
@@ -194,6 +219,19 @@ function setHook(patch: Partial<MoqDebugInfo>): void {
     ...window.__campfire_moq,
     ...patch,
   };
+}
+
+/** Base64 of an ArrayBuffer without the call-stack limits of
+ *  `btoa(String.fromCharCode(...bytes))` (chunked, binary safe). */
+function btoaArrayBuffer(buffer: ArrayBuffer): string {
+  const bytes = new Uint8Array(buffer);
+  const parts: string[] = [];
+  for (let i = 0; i < bytes.length; i += 0x8000) {
+    parts.push(
+      String.fromCharCode(...bytes.subarray(i, i + 0x8000)),
+    );
+  }
+  return btoa(parts.join(""));
 }
 
 /** One participant's downlink pipeline (all handles for teardown). */
@@ -224,6 +262,9 @@ interface Downlink {
   /** Level meter tap (the decoder's own audio context; see wireAudio). */
   analyser: AnalyserNode | null;
   levelData: Uint8Array<ArrayBuffer> | null;
+  /** E2e recorder tap for this downlink (build:e2e only; re-attached by
+   *  wireAudio when the audio graph rewires). */
+  recorderProc: ScriptProcessorNode | null;
   /** Silent zone: output muted (the meter keeps showing). */
   muted: boolean;
   /** Last status reported to `onDownlinkChange` (transition guard). */
@@ -371,8 +412,14 @@ export class MoqCall {
             keyframeInterval: Net.Time.Milli(1000),
             // Auto-sizing bound (the capture is capped at 800x600):
             // nothing above it, so the bandwidth grant has a ceiling to
-            // scale down from.
-            maxPixels: 800 * 600,
+            // scale down from. The e2e harness overrides this (320x240):
+            // headless software H264 at 800x600 in two tabs saturates the
+            // box (the OpenH264 reinit storms alone eat ~4 cores), which
+            // pushes the whole transport ~800 ms behind the live edge and
+            // makes any latency-sensitive assertion meaningless there.
+            maxPixels:
+              (__CAMPFIRE_DEBUG__ && window.__campfire_video_maxpx) ||
+              800 * 600,
             frameRate: 30,
             // Hard bitrate cap (docs/dev/latency-optimization.md §2 step 4):
             // without it a video rendition may claim the entire uplink
@@ -450,6 +497,24 @@ export class MoqCall {
       if (__CAMPFIRE_DEBUG__) {
         call.refreshDownlinks();
         call.hookTimer = window.setInterval(() => call.refreshDownlinks(), 1000);
+        // The audio-quality harness reads recordings back through here
+        // (base64 of the Float32 chunk buffers; see attachRecorder). A
+        // recording is handed over only when its budget is met — the
+        // attachRecorder marks it done; the harness polls.
+        window.__campfire_record_done = {};
+        window.__campfire_audio_capture = async (id) => {
+          if (!window.__campfire_record_done?.[id]) return null;
+          const rec = window.__campfire_audio_data?.[id];
+          if (!rec || rec.chunks.length === 0) return null;
+          const total = rec.chunks.reduce((n, c) => n + c.length, 0);
+          const data = new Float32Array(total);
+          let at = 0;
+          for (const c of rec.chunks) {
+            data.set(c, at);
+            at += c.length;
+          }
+          return { rate: rec.rate, base64: btoaArrayBuffer(data.buffer) };
+        };
       }
       return call;
     } catch (err) {
@@ -562,9 +627,18 @@ export class MoqCall {
       announced: true,
     });
     // The playback delay is per medium (see AUDIO_DELAY_MS / VIDEO_DELAY_MS);
-    // each medium's `buffer` = 2 × its delay keeps the backlog budget inside
-    // the ring capacity (BACKLOG_FACTOR). Two clocks: video (camera + screen)
-    // and audio, free to drift apart.
+    // each medium's `buffer` = BACKLOG_FACTOR × its delay keeps the backlog
+    // budget inside the ring capacity. Two clocks: video (camera + screen)
+    // and audio, free to drift apart. The e2e audio-quality harness
+    // overrides the audio budget (build:e2e only): its environment
+    // delivers audio with ~150–200 ms of transport lag — beyond the
+    // production 40 ms target, live playback correctly drops frames older
+    // than maxAge, and a fidelity recording under that budget would just
+    // document the dropping. The override gives the test a buffer that
+    // fits its environment; the delay assertion scales with it
+    // (tools/e2e/moq.js step 5b).
+    const audioDelayTarget =
+      (__CAMPFIRE_DEBUG__ && window.__campfire_audio_ms) || AUDIO_DELAY_MS;
     const delaySig = new Signal<Net.Time.Milli>(Net.Time.Milli(VIDEO_DELAY_MS));
     const bufferSig = new Signal<Net.Time.Milli>(
       Net.Time.Milli(VIDEO_DELAY_MS * BACKLOG_FACTOR),
@@ -574,9 +648,11 @@ export class MoqCall {
       buffer: bufferSig,
       probe: session.probe,
     });
-    const audDelaySig = new Signal<Net.Time.Milli>(Net.Time.Milli(AUDIO_DELAY_MS));
+    const audDelaySig = new Signal<Net.Time.Milli>(
+      Net.Time.Milli(audioDelayTarget),
+    );
     const audBufferSig = new Signal<Net.Time.Milli>(
-      Net.Time.Milli(AUDIO_DELAY_MS * BACKLOG_FACTOR),
+      Net.Time.Milli(audioDelayTarget * BACKLOG_FACTOR),
     );
     const audSync = new Watch.Sync({
       delay: audDelaySig,
@@ -661,6 +737,7 @@ export class MoqCall {
       gain: null,
       analyser: null,
       levelData: null,
+      recorderProc: null,
       muted: false,
       lastStatus: "subscribing",
       camEnabled,
@@ -914,6 +991,97 @@ export class MoqCall {
     d.gain = gain;
     d.analyser = analyser;
     d.levelData = new Uint8Array(analyser.frequencyBinCount);
+    if (__CAMPFIRE_DEBUG__) {
+      try {
+        this.attachRecorder(d, ctx, root);
+      } catch (e) {
+        // The recorder must never break the audio graph: a bug there
+        // would surface as audio flatline, not a test failure.
+        console.warn(`[recorder] attach failed: ${e}`);
+      }
+    }
+  }
+
+  /** E2e audio-quality recorder (the `build:e2e` client only; the audio
+   *  intelligibility test in tools/e2e/moq.js drives it): when the page
+   *  sets `window.__campfire_record = true`, tap this downlink's decoder
+   *  root through a ScriptProcessor and accumulate PCM until the sample
+   *  budget is met (default 8 s), then `window.__campfire_audio_capture(
+   *  id)` hands `{rate, base64}` to the harness. Re-attached on every
+   *  `wireAudio` (the re-announce pulse rebuilds the audio graph, and a
+   *  recorder left on the old root would silently stop filling);
+   *  accumulated samples live in the page hook, so they survive a
+   *  downlink teardown. Inert in the production bundle. */
+  private attachRecorder(d: Downlink, ctx: AudioContext, root: AudioNode): void {
+    if (!window.__campfire_record || !window.__campfire_audio_data) return;
+    window.__campfire_wire_count = (window.__campfire_wire_count ?? 0) + 1;
+    window.__campfire_attach_count = (window.__campfire_attach_count ?? 0) + 1;
+    const maxSamples = Math.ceil(
+      (ctx.sampleRate * (window.__campfire_record_ms ?? 8000)) / 1000,
+    );
+    const store = window.__campfire_audio_data[d.id];
+    if (store) {
+      const filled = store.chunks.reduce((n, c) => n + c.length, 0);
+      if (filled >= maxSamples) return; // done
+    } else {
+      window.__campfire_audio_data[d.id] = {
+        rate: ctx.sampleRate,
+        chunks: [],
+      };
+    }
+    let proc = d.recorderProc;
+    // The decoder rebuilds its AudioContext on a rewire; a tap from the
+    // old context cannot connect to the new root (cross-context connect
+    // throws) — drop it and make a fresh one. Its already-recorded
+    // samples live in the page-hook store.
+    if (proc && proc.context !== ctx) {
+      try {
+        proc.disconnect();
+      } catch {
+        // the old context already went away
+      }
+      proc = null;
+      d.recorderProc = null;
+    }
+    if (!proc) {
+      // ScriptProcessorNode is deprecated but exactly right here: an
+      // audio-worklet would need the module-source dance, and this is
+      // the debug build only. Pushed onto d.nodes, so a rewire
+      // disconnects it and the re-attach below reconnects it.
+      proc = ctx.createScriptProcessor(4096, 1, 1);
+      proc.onaudioprocess = (e) => {
+        const self = d.recorderProc;
+        if (!self) return;
+        const s = window.__campfire_audio_data?.[d.id];
+        if (!s) return;
+        const filled = s.chunks.reduce((n, c) => n + c.length, 0);
+        if (filled >= maxSamples) return;
+        s.chunks.push(new Float32Array(e.inputBuffer.getChannelData(0)));
+        const now = s.chunks.reduce((n, c) => n + c.length, 0);
+        if (now >= maxSamples) {
+          self.onaudioprocess = null;
+          window.__campfire_record_done![d.id] = true;
+          try {
+            self.disconnect(ctx.destination);
+          } catch {
+            // already gone with the context
+          }
+        }
+      };
+      d.recorderProc = proc;
+      root.connect(proc);
+      proc.connect(ctx.destination);
+      d.nodes.push(proc);
+    } else {
+      // Re-attach to the new root (the rewire above disconnected it).
+      try {
+        proc.disconnect();
+      } catch {
+        // already gone with the context
+      }
+      root.connect(proc);
+      proc.connect(ctx.destination);
+    }
   }
 
   /** Push each participant's audio level (0-255, the average of the
@@ -997,6 +1165,7 @@ export class MoqCall {
     d.nodes = [];
     d.analyser = null;
     d.levelData = null;
+    d.recorderProc = null;
     d.sync.close();
     d.audSync.close();
     d.broadcast.close();
