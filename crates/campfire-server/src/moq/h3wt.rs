@@ -256,8 +256,14 @@ impl wt::SendStream for SendStream {
     }
 
     fn set_priority(&mut self, _order: u8) {
-        // h3 0.0.8 cannot re-prioritize an already-open QUIC stream; see the
-        // lib docs for the impact (MoQ importance degrades to FIFO).
+        // h3 0.0.8 cannot re-prioritize an already-open QUIC stream. Not as
+        // bad as it sounds: moq-net's own PriorityQueue orders *stream
+        // opens* by the track priority negotiated on the wire (audio 80 >
+        // video 60, `PRIORITY.audio/video` in @moq/hang, relayed through
+        // the SFU's track model — lite/subscriber.rs copies upstream
+        // TRACK_INFO verbatim), so a video burst queues its streams behind
+        // audio's at the open, and each stream is one group with the same
+        // send budget. In-stream bytes are still FIFO.
     }
 
     fn finish(&mut self) -> Result<(), Error> {

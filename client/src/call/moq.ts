@@ -400,6 +400,16 @@ export class MoqCall {
           broadcast,
           capture,
           enabled: true,
+          // 50 ms of frames per group (5 × 10 ms). The stock default
+          // (groupDuration 0) closes a group after every frame, and the
+          // SFU opens one QUIC unidirectional stream per group — 50
+          // stream opens + FINs per second per subscriber. Batching cuts
+          // that to 10/s. Frames still stream out of the open group as
+          // they encode (`readFrame()` on the watch side), so batching
+          // adds no delivery wait; it only coarsens catch-up granularity
+          // (a mid-group join replays up to 50 ms).
+          // (docs/dev/latency-optimization.md §7 finding 2)
+          groupDuration: Net.Time.Milli(50),
           // In-band FEC: the audio latency budget (AUDIO_DELAY_MS on the
           // downlink) has no room for retransmission, so a lost frame is
           // lost — FEC lets the decoder reconstruct it from the redundancy

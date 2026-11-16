@@ -82,6 +82,11 @@ const R = [
 // itself (not the worklet blob).
 const M = [
   [
+    "AudioContext: latencyHint interactive -> 0 (decoder output)",
+    'new AudioContext({\n\t\t\tlatencyHint: "interactive",\n\t\t\tsampleRate: n\n\t\t})',
+    'new AudioContext({ latencyHint: 0, sampleRate: n }) // [campfire latency] 0 = minimum output buffer; "interactive" is 10-20 ms on most setups (docs/dev/latency-optimization.md §7 finding 1)'
+  ],
+  [
     "#g: bounded pacing wait (re-anchor on stalled playhead)",
     "\t\t\tif (await this.#n?.wait(i.timestamp, e.abort), t.state === \"closed\") return !1;",
     "\t\t\t{ // [campfire catch-up] Bounded pacing wait. Stock waits until the ring playhead\n\t\t\t// reaches the frame's timestamp minus headroom. If the container consumer\n\t\t\t// skipped ahead by more than the headroom (a gap in the media timeline),\n\t\t\t// the ring drains, the playhead never arrives, and the wait blocks\n\t\t\t// forever (audio flatline). On a 2000 ms grace expiry with the playhead\n\t\t\t// still more than a second behind, reset the ring: the next insert\n\t\t\t// re-anchors the playhead at this frame's timestamp, so playback skips\n\t\t\t// the (already dropped) gap instead of stalling.\n\t\t\t\tlet cfUp = !1;\n\t\t\t\tconst cfWait = this.#n?.wait(i.timestamp, e.abort);\n\t\t\t\tcfWait?.catch(() => {});\n\t\t\t\tconst cfT = setTimeout(() => { cfUp = !0; }, 2000);\n\t\t\t\tawait Promise.race([cfWait, new Promise((s) => setTimeout(s, 2000))]).catch(() => {});\n\t\t\t\tclearTimeout(cfT);\n\t\t\t\tif (cfUp && this.#n && t.state !== \"closed\") {\n\t\t\t\t\tconst cfPh = this.#n.timestamp.peek();\n\t\t\t\t\tif (cfPh == null || i.timestamp - cfPh > 1000000) this.#n.reset();\n\t\t\t\t}\n\t\t\t}\n\t\t\tif (t.state === \"closed\") return !1;"

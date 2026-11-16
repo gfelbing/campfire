@@ -30,18 +30,35 @@ const target = join(
   "encoder-rLv2ovr2.js",
 );
 
-const STOCK = "stalled: this.#l.flag()";
-const PATCHED = "stalled: !1 // [campfire publish patch]";
+const STOCK_STALLED = "stalled: this.#l.flag()";
+const PATCHED_STALLED = "stalled: !1 // [campfire publish patch]";
+// [campfire latency] the capture AudioContext: "interactive" is 10-20 ms of
+// output-buffer latency on most setups; 0 asks for the minimum
+// (docs/dev/latency-optimization.md §7 finding 1).
+const STOCK_HINT = 'latencyHint: "interactive"';
+const PATCHED_HINT = "latencyHint: 0 /* [campfire latency] minimum output buffer */";
+
+// (name, stock, patched, expected stock sites).
+const R = [
+  ["stalled catalog pin", STOCK_STALLED, PATCHED_STALLED, 2],
+  ["capture latencyHint", STOCK_HINT, PATCHED_HINT, 1],
+];
 
 let file = readFileSync(target, "utf8");
-const already = file.split(PATCHED).length - 1;
-const stock = file.split(STOCK).length - 1;
-if (already > 0 && stock > 0) die(`mixed state: ${already} patched, ${stock} stock`);
-if (stock === 0) {
-  console.log(`@moq/publish patch: already present (${already} sites)`);
-  process.exit(0);
+let applied = 0;
+let already = 0;
+for (const [name, stock, patched, expected] of R) {
+  const haveStock = file.split(stock).length - 1;
+  const havePatched = file.split(patched).length - 1;
+  if (havePatched > 0 && haveStock > 0) die(`${name}: mixed state (${havePatched} patched, ${haveStock} stock)`);
+  if (haveStock === 0) {
+    if (havePatched !== expected) die(`${name}: ${havePatched} patched sites, expected ${expected}`);
+    already += havePatched;
+    continue;
+  }
+  if (haveStock !== expected) die(`${name}: expected ${expected} stock occurrences, found ${haveStock}`);
+  file = file.split(stock).join(patched);
+  applied += expected;
 }
-if (stock !== 2) die(`expected exactly 2 stock occurrences, found ${stock}`);
-file = file.split(STOCK).join(PATCHED);
 writeFileSync(target, file);
-console.log(`@moq/publish patch: ${stock} sites patched`);
+console.log(`@moq/publish patch: ${applied} applied, ${already} already present`);

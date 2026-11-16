@@ -249,6 +249,16 @@ out of the hot path; packet-rate ceiling before queue growth rises.
 - **Step 6 — done** (`demux.rs`): batched `poll_recv` drains the handoff queue into
   quinn's buffer array; queued buffers recycle through a pool inside the same
   mutex (no per-packet allocation, one copy each side).
+- **Step 8 — done** (§7 audit): `latencyHint: 0` on both AudioContexts (watch
+  decoder + publish capture, via the two vendored patches — new main-chunk
+  replacement in moq-watch, new replacement table in moq-publish); audio uplink
+  `groupDuration: 50 ms` (per-frame groups closed per 10 ms frame before → 50
+  QUIC stream opens/s per subscriber at the SFU, now 10/s). Video needed no
+  batching — `Legacy.Producer` groups per keyframe already. Track priority was
+  already wired end-to-end (`PRIORITY.audio` 80 > video 60, negotiated in
+  TRACK_INFO and honored by the SFU's group-open ordering); the h3wt comment
+  claiming "importance degrades to FIFO" was stale and now records the actual
+  mechanism.
 
 ## 6. Audio latency floor (step 7)
 
