@@ -524,3 +524,27 @@ BBR paces it.
 (pixels) → 9.2.2 (churn diagnosis → patch). Measure each with the e2e
 suite + a manual two-tab run.
 
+### 9.4 Implementation status
+
+- **9.1 — done**: both tile numbers are playout-based (audio ring
+  playhead / video presented frame); the arrival formula stays as the
+  warmup fallback. `VIDEO_DELAY_MS` 400 → 200 with a 2× skip-stale
+  backlog (maxAge ≈ 600 ms) — backlog beyond it re-anchors the Sync
+  reference, i.e. stale frames are skipped. E2E step 5b asserts the
+  a/v offset (|video − audio| playout difference ≤ 500 ms); fresh run:
+  248 ms.
+- **9.2.1 — done**: camera `maxPixels` 480×360 (−65% pixel work);
+  30 fps kept.
+- **9.2.2 — done, partially**: the estimate module's catalog writes are
+  rate-limited to 1/s and hysteretic (≥ 25% growth) in the vendored
+  `@moq/publish` patch — the camera encoder now constructs ONCE per
+  call (was: dozens of OpenH264 reinit warnings). Residual: the
+  *screen-share* encoder still rebuilds ~10× per share (a different
+  churn path — the encode effect re-runs on per-frame signal changes
+  and reconfigures with an identical config); screen is not the
+  priority, tracked as follow-up.
+- **Rejected with data**: bitrate-only reduction — OpenH264 ignores
+  bitrate without frame-skip (its own configure warning), so it moves
+  bytes without touching CPU; the burst pressure is already capped and
+  BBR-paced.
+
