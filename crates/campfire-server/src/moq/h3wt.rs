@@ -109,9 +109,22 @@ impl From<h3::quic::StreamErrorIncoming> for Error {
 }
 
 /// DEBUG: name the failing operation; the error text itself comes from h3.
-fn log_err<T: std::fmt::Display + Into<Error>>(op: &str, err: T) -> Error {
-    tracing::warn!(%op, %err, "h3wt bridge error");
-    err.into()
+///
+/// Stream-level terminal errors (`StreamClosed` and friends) are expected
+/// churn, not faults: the SFU keeps writing a subscriber stream until its
+/// teardown notices the reset (camera toggle, the re-announce pulse,
+/// session close race). Logging those at warn flooded the server log with
+/// `op=send_stream.write err=StreamClosed` lines that carried no signal
+/// (docs/dev/latency-optimization.md §2 step 5) — they go to debug.
+/// Connection-level failures stay at warn.
+fn log_err<T: Into<Error>>(op: &str, err: T) -> Error {
+    let error = err.into();
+    if matches!(error, Error::Stream(_)) {
+        tracing::debug!(%op, err = %error, "h3wt stream error");
+    } else {
+        tracing::warn!(%op, err = %error, "h3wt bridge error");
+    }
+    error
 }
 
 impl wt::Session for Session {
