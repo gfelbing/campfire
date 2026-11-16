@@ -35,7 +35,10 @@ use quinn::udp::{RecvMeta, Transmit};
 use quinn::{AsyncUdpSocket, UdpPoller};
 use tracing::debug;
 
-/// A queued QUIC datagram with its source address.
+/// A queued QUIC datagram with its source address. The buffer is taken
+/// from the handoff's pool and returned to it right after quinn copied
+/// the packet out in `poll_recv` — no allocation per packet on either
+/// side (docs/dev/latency-optimization.md §2 step 6).
 type Queued = (Vec<u8>, SocketAddr);
 
 /// The shared UDP socket (docs/arch/decisions.md).
@@ -47,7 +50,31 @@ pub struct DemuxSocket {
     /// QUIC datagrams queued by the reader task, plus the waker of the task
     /// parked in `poll_recv`. One mutex so push-and-wake and park-and-check
     /// cannot race.
-    handoff: Mutex<(VecDeque<Queued>, Option<Waker>)>,
+    handoff: Mutex<Handoff>,
+}
+
+/// The handoff queue plus the buffer pool the queued buffers were drawn
+/// from and are returned to. One mutex: `poll_recv` pops a batch, copies
+/// it out and recycles the buffers without ever dropping a `Vec`.
+#[derive(Debug, Default)]
+struct Handoff {
+    queue: VecDeque<Queued>,
+    /// Waker of the task parked in `poll_recv` (the quinn side). Set when
+    /// the queue is found empty; woken by the reader's push-and-wake.
+    waker: Option<Waker>,
+    /// Buffers read by the reader task, parked between packets. Grown
+    /// once to the burst-drain high-water mark and never shrunk: datagrams
+    /// are MTU-sized, the pool is bounded by the max in-flight packets.
+    pool: Vec<Vec<u8>>,
+}
+
+impl Handoff {
+    /// Take a buffer from the pool (or allocate a fresh one when empty).
+    fn take_buf(&mut self) -> Vec<u8> {
+        self.pool
+            .pop()
+            .unwrap_or_else(|| Vec::with_capacity(65_536))
+    }
 }
 
 impl DemuxSocket {
@@ -61,7 +88,7 @@ impl DemuxSocket {
         let io = tokio::net::UdpSocket::from_std(std_sock)?;
         let socket = Arc::new(Self {
             io,
-            handoff: Mutex::new((VecDeque::new(), None)),
+            handoff: Mutex::new(Handoff::default()),
         });
         spawn_demux(socket.clone(), reader);
         Ok(socket)
@@ -76,10 +103,10 @@ impl DemuxSocket {
 /// The background reader loop: receive everything, queue QUIC.
 fn spawn_demux(socket: Arc<DemuxSocket>, reader: tokio::net::UdpSocket) {
     tokio::spawn(async move {
-        let mut buf = vec![0u8; 65_536];
+        let mut inner_buf = vec![0u8; 65_536];
         loop {
             // Block for the first datagram of the burst…
-            let (n, src) = match reader.recv_from(&mut buf).await {
+            let (n, src) = match reader.recv_from(&mut inner_buf).await {
                 Ok(x) => x,
                 Err(err) => {
                     debug!(%err, "socket receive loop ended");
@@ -92,12 +119,19 @@ fn spawn_demux(socket: Arc<DemuxSocket>, reader: tokio::net::UdpSocket) {
             let mut quic_pending = false;
             let mut datagram: Option<(usize, SocketAddr)> = Some((n, src));
             while let Some((n, src)) = datagram.take() {
-                let pkt = &buf[..n];
-                // QUIC: hand to quinn.
+                // One buffer per packet, taken from the pool: the reader
+                // copies the kernel buffer into a pooled slot and hands the
+                // slot on; `poll_recv` recycles it after quinn copied out.
+                let mut buf = {
+                    let mut h = socket.handoff.lock().unwrap();
+                    h.take_buf()
+                };
+                buf.clear();
+                buf.extend_from_slice(&inner_buf[..n]);
                 let mut h = socket.handoff.lock().unwrap();
-                h.0.push_back((pkt.to_vec(), src));
+                h.queue.push_back((buf, src));
                 quic_pending = true;
-                match reader.try_recv_from(&mut buf) {
+                match reader.try_recv_from(&mut inner_buf) {
                     Ok(next) => datagram = Some(next),
                     Err(err) if err.kind() == io::ErrorKind::WouldBlock => break,
                     Err(err) => {
@@ -108,7 +142,7 @@ fn spawn_demux(socket: Arc<DemuxSocket>, reader: tokio::net::UdpSocket) {
             }
             if quic_pending {
                 let mut h = socket.handoff.lock().unwrap();
-                if let Some(waker) = h.1.take() {
+                if let Some(waker) = h.waker.take() {
                     waker.wake();
                 }
             }
@@ -135,36 +169,49 @@ impl AsyncUdpSocket for DemuxSocket {
         bufs: &mut [IoSliceMut<'_>],
         meta: &mut [RecvMeta],
     ) -> Poll<io::Result<usize>> {
-        loop {
-            let (pkt, src) = {
-                let mut h = self.handoff.lock().unwrap();
-                match h.0.pop_front() {
-                    Some(q) => q,
-                    None => {
-                        h.1 = Some(cx.waker().clone());
-                        return Poll::Pending;
-                    }
-                }
+        // Batch: drain as many queued datagrams as quinn offered buffers
+        // for (docs/dev/latency-optimization.md §2 step 6). One `poll_recv`
+        // per datagram paid the mutex hop twice per packet on a burst;
+        // quinn sizes the arrays for GRO-style batches either way.
+        let mut h = self.handoff.lock().unwrap();
+        if h.queue.is_empty() {
+            h.waker = Some(cx.waker().clone());
+            return Poll::Pending;
+        }
+        let mut n = 0;
+        while n < bufs.len() {
+            let Some((pkt, src)) = h.queue.pop_front() else {
+                break;
             };
-            if pkt.len() > bufs[0].len() {
+            let len = pkt.len();
+            if len > bufs[n].len() {
                 // The peer violated max_udp_payload_size; drop the packet
                 // (the sender will retransmit). This mirrors what the kernel
                 // did with ENOBUFS for oversized datagrams on the old
-                // GRO-enabled socket.
-                debug!(len = pkt.len(), "dropping oversized datagram");
+                // GRO-enabled socket. The buffer still goes back to the pool.
+                h.pool.push(pkt);
+                debug!(len, "dropping oversized datagram");
                 continue;
             }
-            let n = pkt.len();
-            bufs[0][..n].copy_from_slice(&pkt);
-            meta[0] = RecvMeta {
+            bufs[n][..len].copy_from_slice(&pkt);
+            meta[n] = RecvMeta {
                 addr: src,
-                len: n,
-                stride: n,
+                len,
+                stride: len,
                 ecn: None,
                 dst_ip: None,
             };
-            return Poll::Ready(Ok(1));
+            // Recycle: quinn has already copied the packet out above.
+            h.pool.push(pkt);
+            n += 1;
         }
+        if n == 0 {
+            // Only oversized packets were in the queue; park like an empty
+            // one instead of handing quinn a zero batch (it expects ≥ 1).
+            h.waker = Some(cx.waker().clone());
+            return Poll::Pending;
+        }
+        Poll::Ready(Ok(n))
     }
 
     fn local_addr(&self) -> io::Result<SocketAddr> {
