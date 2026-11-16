@@ -365,6 +365,13 @@ export class MoqCall {
             // scale down from.
             maxPixels: 800 * 600,
             frameRate: 30,
+            // Hard bitrate cap (docs/dev/latency-optimization.md §2 step 4):
+            // without it a video rendition may claim the entire uplink
+            // estimate, and every 1 s keyframe flight then saturates the
+            // shared connection's congestion window and stalls the audio
+            // streams too. The cap leaves headroom for mic + screen even
+            // on a small uplink; the allocator's grant can only go lower.
+            maxBitrate: 1_500_000,
           },
         });
       }
@@ -749,6 +756,9 @@ export class MoqCall {
         // Screen capture targets 15 fps (media.ts); bound it so the
         // auto-sizing and the bandwidth grant have a ceiling.
         frameRate: 15,
+        // Bitrate cap, same rationale as the camera's (a screen burst
+        // must not eat the shared window the audio streams need).
+        maxBitrate: 800_000,
       },
     });
   }
