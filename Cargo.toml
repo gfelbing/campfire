@@ -52,7 +52,7 @@ wtransport = { version = "0.7", features = ["quinn"] }
 # third_party/moq-net (see third_party/moq-net/PATCH.md for the local fix
 # and how to re-vendor on a bump).
 moq-net = "0.3.23"
-moq-tokio = { version = "0.19.35", default-features = false }
+moq-tokio = { version = "0.19.36", default-features = false }
 web-transport-trait = "0.4"
 
 # Internal crates

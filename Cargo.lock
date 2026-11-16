@@ -1563,9 +1563,9 @@ dependencies = [
 
 [[package]]
 name = "moq-tokio"
-version = "0.19.35"
+version = "0.19.36"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "edbc4300c92e42f019e3b2fe1cebd59c70d252712bb88ffde805c32305f2ede1"
+checksum = "d4cf81843bf2cb8c123be9315bf70d5e425bd1a1d873e6d89451ec94568fb512"
 dependencies = [
  "bytes",
  "futures",
