@@ -250,11 +250,6 @@ out of the hot path; packet-rate ceiling before queue growth rises.
   quinn's buffer array; queued buffers recycle through a pool inside the same
   mutex (no per-packet allocation, one copy each side).
 
-Remaining follow-ups (not in this pass): the datagram-audio epic (step 4), the
-measurement runs of §4 against a real deployment (steps 1–6 are implemented but
-their effect is unverified until measured), and the SO_REUSEPORT reader sharding
-only if profiling still shows demux contention.
-
 ## 6. Audio latency floor (step 7)
 
 Observation after steps 1–3: on a clean local link (two tabs on one machine), audio
@@ -321,3 +316,78 @@ the jitter buffer from the connection probe (`max(20 ms, minRTT × 1.25) +
 rendition jitter`) and would have been the safe choice for lossy networks; it
 was rejected in favor of the fixed instant floor above. If remote links turn out
 to gap too much, `auto` is the one-line rollback.
+
+## 7. Pipeline audit (step 8)
+
+State after step 7: local two-tab audio mouth-to-ear ≈ 50–100 ms. This is an
+end-to-end audit of the a/v pipeline, stage by stage, with what is app-tunable
+and what is not. Sources: `@moq/publish` (capture/encoder), the moq-lite wire
+(both JS and the vendored `moq-net` SFU), `@moq/watch` (ring/decoder), and the
+browser audio stack.
+
+### What is not tunable (bounds)
+
+| Stage | Cost | Why |
+|---|---|---|
+| Mic pipeline (AEC + NS + AGC) | ~20–40 ms | Chrome processes the mic track before it reaches the app; `echoCancellation` is required (calls play through speakers). Removing it would cause echo for anyone without headphones. |
+| AudioContext output buffer | ~10–20 ms | `latencyHint: "interactive"` is already the smallest *stable* hint Chrome honors well. |
+| Worklet quanta | 2.7 ms | 128 samples; the granularity everything below inherits. |
+| QUIC transport on localhost | ~1 ms/RT | one RTT per flight, negligible. |
+
+### Tunable findings, ranked
+
+1. **AudioContext `latencyHint` → `0`** (two sites: the publish capture context
+   and the watch decoder context — both hardcode `"interactive"`).
+   `latencyHint: 0` asks Chrome for the minimum output buffer; on many setups it
+   shaves 5–10 ms off both capture and playback. Requires extending the vendored
+   `patch.mjs` (these sites are in the *main* chunk, not the worklet blob the
+   patch currently covers). Reversible per-site; keep a fallback if Chrome
+   glitches (audible buffer thrash) on some hardware.
+
+2. **Batch audio groups: `groupDuration: 50 ms` on the uplink audio encoder.**
+   Today every 10 ms Opus frame becomes its own group with an immediate close
+   (`#v`: `groupDuration = 0` → `c.close()`), and the SFU opens **one QUIC
+   unidirectional stream per group** (`poll_open_uni` in the Serve state) —
+   50 stream opens + FINs per second per subscriber, each with its own
+   priority handle and h3 framing. `groupDuration: 50` batches 5 frames per
+   group → 10 streams/s. Verified: the subscriber reads frames from an *open*
+   group stream (`readFrame()` loop, frames pushed to the track's `frames`
+   signal on write) — batching adds **no** delivery wait, only coarser
+   fallback/catch-up granularity (a mid-group catch-up replays up to 50 ms).
+   Expected win: a few ms of CPU/scheduling jitter per frame and less FIN/ACK
+   churn; the real benefit is stability under load.
+
+3. **Same batching for video: `groupDuration: 100 ms`** (video encoders also
+   emit per-frame groups — 30 streams/s at 30 fps). Video is not the priority,
+   but this is the same one-line change with the same rationale.
+
+4. **Video delay trim (optional, product decision): `VIDEO_DELAY_MS` 400 →
+   200.** The video clock is decoupled from audio, so nothing but visual
+   "liveness" is at stake; 400 ms is conservative for the current SFU. Halve it
+   only if the ring stays stable — video underruns show as frozen frames, not
+   audio gaps.
+
+5. **Track priority: mark the audio rendition higher than video.** moq-net
+   carries a `PriorityHandle` per stream (`send_order`); all renditions share
+   one tier today, so the SFU interleaves by creation order. With per-frame
+   groups after finding 2, giving audio a higher order means a video burst
+   queues *behind* audio instead of displacing it — the client-side complement
+   of the step-4 bitrate caps. Needs checking what `@moq/net`/moq-lite expose
+   per rendition (moq.ts comments say importance degrades to FIFO over the
+   current h3 stack — verify whether the lite `priority` parameter is actually
+   negotiated on our wire before promising this).
+
+### Explicitly not worth it
+
+- Opus `complexity`/bitrate tuning: CPU-only wins, no latency.
+- Dropping `echoCancellation`/`noiseSuppression`: latency win ~20 ms, breaks
+  speaker playback for everyone else in the call. No.
+- `Sync.wait` threshold (5 ms) and worklet quantum: library/browser constants.
+- Demux/BBR (steps 3/6): already done; nothing further visible at 3-party load.
+
+### Order of attack
+
+Findings 1 → 2 → 3 → 5, measuring the beep test after each (§4 protocol).
+Expected end state: audio number ~25–40 ms, wall mouth-to-ear ~45–60 ms with
+the remainder dominated by the mic pipeline.
+
