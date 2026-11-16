@@ -28,38 +28,32 @@ import { Catalog } from "@moq/hang";
 import { Signal } from "@moq/signals";
 
 /** Playback delay behind the live edge, per medium (docs/dev/
- *  latency-optimization.md §6 step 7). Audio runs in *instant mode*: the
- *  smallest floor the ring tolerates stably. The ring's catch-up drain
- *  consumes at `1 + excess/floor` (capped 2.5×), so the floor must
- *  dominate the worklet quantum (128 samples ≈ 2.7 ms) plus one Opus
- *  frame — at a 3 ms floor the rate formula spikes to its 2.5× cap on
- *  every quantum, the playhead outruns the arrivals, and every
- *  subsequent frame is dropped as behind the cursor (observed as a
- *  runaway 1000–2000 ms delay number: the newest *received* frame's
- *  timestamp stops advancing). 20 ms — two 10 ms frames, and exactly the
- *  library's `"auto"` floor — keeps the drain gentle (a one-frame
- *  backlog is rate ≈ 1.5×, decaying) while staying sub-perceptual. The
- *  audio `Sync` instance stays wired (the decoder API requires it) but
- *  no longer gates playback meaningfully: `Sync.wait` returns
- *  immediately for waits < 5 ms.
+ *  latency-optimization.md §6–§8). A fixed offset lets a burst of
+ *  frames land in the jitter buffer instead of re-anchoring the clock
+ *  mid-burst.
  *
- *  The trade-off, accepted here, is a thin jitter buffer: a late frame
- *  beyond ~20 ms is a hard underrun (the catch-up drain cannot help what
- *  has not arrived), which on lossy links means gaps instead of drift.
- *  In-band FEC remains the loss mitigation; `delay: "auto"` is the
- *  one-line rollback for poor networks.
+ *  Audio runs in instant mode: 40 ms is the balance point between the
+ *  ring's drain stability and playback liveness (§8). Below ~20 ms the
+ *  catch-up drain destabilized (3 ms dropped every frame); 20 ms was
+ *  still too thin for arrival bursts and played with gaps. 40 ms —
+ *  two 20 ms Opus frames — rides out an arrival burst of that size, the
+ *  drain ratio per frame is gentle (excess/floor = 0.5), and the ring
+ *  has 4× its depth (§8 finding 1) to absorb longer bursts before the
+ *  drain recovers at up to 2.5×.
  *
  *  Video trails further (400 ms) — a/v sync is explicitly secondary
  *  (docs/dev/latency-optimization.md), and separate `Sync` clocks mean a
  *  video buffer burst can never hold audio playback back.
  *
- *  Each medium's `Sync.in.buffer` = 2 × its delay: the backlog budget
- *  (how far ahead of the live edge buffered media may sit) that keeps
- *  the backlog inside the ring capacity. */
-const AUDIO_DELAY_MS = 20;
+ *  Each medium's `Sync.in.buffer` = 4 × its delay: the backlog budget
+ *  (how far ahead of the live edge buffered media may sit), matching
+ *  the ring's 4× capacity (§8 finding 1) so the writer never has to
+ *  drop either. */
+const AUDIO_DELAY_MS = 40;
 const VIDEO_DELAY_MS = 400;
-/** Backlog budget as a multiple of the delay (see AUDIO_DELAY_MS). */
-const BACKLOG_FACTOR = 2;
+/** Backlog budget as a multiple of the delay (see AUDIO_DELAY_MS): 4×
+ *  matches the ring's 4× capacity (§8 finding 1). */
+const BACKLOG_FACTOR = 4;
 
 /** Options for one call session. */
 export interface MoqCallOpts {
@@ -400,16 +394,16 @@ export class MoqCall {
           broadcast,
           capture,
           enabled: true,
-          // 50 ms of frames per group (5 × 10 ms). The stock default
+          // 60 ms of frames per group (3 × 20 ms). The stock default
           // (groupDuration 0) closes a group after every frame, and the
-          // SFU opens one QUIC unidirectional stream per group — 50
-          // stream opens + FINs per second per subscriber. Batching cuts
-          // that to 10/s. Frames still stream out of the open group as
-          // they encode (`readFrame()` on the watch side), so batching
-          // adds no delivery wait; it only coarsens catch-up granularity
-          // (a mid-group join replays up to 50 ms).
+          // SFU opens one QUIC unidirectional stream per group — one
+          // stream open + FIN per frame. Batching cuts that 3x. Frames
+          // still stream out of the open group as they encode
+          // (`readFrame()` on the watch side), so batching adds no
+          // delivery wait; it only coarsens catch-up granularity (a
+          // mid-group join replays up to 60 ms).
           // (docs/dev/latency-optimization.md §7 finding 2)
-          groupDuration: Net.Time.Milli(50),
+          groupDuration: Net.Time.Milli(60),
           // In-band FEC: the audio latency budget (AUDIO_DELAY_MS on the
           // downlink) has no room for retransmission, so a lost frame is
           // lost — FEC lets the decoder reconstruct it from the redundancy
@@ -417,12 +411,16 @@ export class MoqCall {
           // §2 step 1). Costs bitrate; worth it on lossy paths.
           codec: {
             mime: "opus",
-            // 10 ms frames (allowed: 2.5/5/10/20/40/60): halves the
-            // packetization delay the encoder's 20 ms default adds (a
-            // frame is only emitted when full — docs/dev/
-            // latency-optimization.md §6). 2.5/5 ms exist but Chromium's
-            // encoder quality collapses and per-frame overhead climbs.
-            frameDuration: Net.Time.Milli(10),
+            // 20 ms frames: two frames per 40 ms ring floor, gentle drain
+            // ratio (excess/floor = 0.5), fewer encode/insert/publish
+            // events; a lost frame is a 20 ms gap, reconstructed by FEC
+            // (docs/dev/latency-optimization.md §8 finding 4).
+            frameDuration: Net.Time.Milli(20),
+            // 48 kbps: the stock 32 kbps starved the in-band FEC layer —
+            // LBRR redundancy barely fits at 10 ms frames, so "lost"
+            // frames were never reconstructed. 48 k gives the redundancy
+            // room (docs/dev/latency-optimization.md §8 finding 2).
+            bitrate: 48_000,
             useinbandfec: true,
             packetlossperc: 10,
           },

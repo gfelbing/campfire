@@ -401,3 +401,36 @@ Findings 1 → 2 → 3 → 5, measuring the beep test after each (§4 protocol).
 Expected end state: audio number ~25–40 ms, wall mouth-to-ear ~45–60 ms with
 the remainder dominated by the mic pipeline.
 
+## 8. Audio quality: underruns and the bitrate question (step 9)
+
+After step 8 the *speed* was right but the audio played with disruptions —
+jitter-buffer underruns, not loss: an arrival gap beyond the ring's depth is
+played as silence. Reducing the bitrate was the proposed remedy and is the
+wrong lever: the audio stream is ~32–40 kbps (bandwidth was never the
+constraint), and Opus's in-band FEC *needs* bitrate headroom — starving it
+weakens exactly the loss robustness covering the gaps. Implemented instead,
+all four levers:
+
+1. **Ring depth decoupled from the playback floor** (vendored `@moq/watch`
+   patch, three sites): `AudioRingBuffer.#capacityFor` and the main-thread
+   wrapper's initial capacity (`Math.max(rate, floor × 4)`) and resize path
+   grow the buffered ring to **4× the floor** instead of 2×. `Sync.in.buffer`
+   = 4 × delay (`BACKLOG_FACTOR = 4`) matches. Playback still sits at the
+   floor; the ring just holds ~4× longer arrival bursts, and the catch-up
+   drain recovers at up to 2.5×.
+2. **Opus bitrate 48 kbps** (stock 32 k): room for the LBRR redundancy layer,
+   so `useinbandfec` actually reconstructs lost frames instead of dropping.
+3. **`AUDIO_DELAY_MS` 20 → 40**: two frames of depth *and* drain stability
+   (see 4) — the +20 ms latency bought deliberately for quality.
+4. **`frameDuration` back to 20 ms** (from 10): fewer, larger frames — drain
+   ratio per frame `excess/floor = 0.5` (was 1.5), 3× fewer encode/insert/
+   publish events at the same `groupDuration` (now 60 ms = 3 frames), gap per
+   lost frame 20 ms — reconstructed by FEC with the new bitrate headroom.
+
+Grouped effect on the numbers: ring floor 40 ms, ring depth 160 ms, packet-
+ization 20 ms, uplink ~48 kbps + FEC. Expected wall mouth-to-ear ~50–65 ms
+(the step-7 win partially traded back for robustness), with underrun
+exposure extended from ~40 ms to ~160 ms of arrival jitter. The 10 ms-frame
+instant configuration remains documented above if speed is ever again worth
+more than continuity.
+

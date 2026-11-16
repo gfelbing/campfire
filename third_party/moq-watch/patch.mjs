@@ -75,7 +75,12 @@ const R = [
     "SharedRingBuffer.read: time-compression catch-up (epoch resync + no skip)",
     "\tread(output) {\n\t\tconst state = Atomics.load(this.#state, 0);\n\t\tif (Atomics.load(this.#control, STALLED) === 1) return 0;\n\t\tif (retreating(state)) return 0;\n\t\tlet read = readOf(state);\n\t\tconst write = Atomics.load(this.#control, WRITE);\n\t\tconst latency = Atomics.load(this.#control, LATENCY);\n\t\tconst buffered = write - read | 0;\n\t\tif (!this.buffered && latency > 0 && buffered > latency) {\n\t\t\tconst skipTo = write - latency | 0;\n\t\t\tif ((skipTo - read | 0) > 0) read = skipTo;\n\t\t}\n\t\tconst available = write - read | 0;\n\t\tconst count = Math.min(available, output[0].length);\n\t\tif (count <= 0) {\n\t\t\tif ((read - readOf(state) | 0) > 0) Atomics.compareExchange(this.#state, 0, state, pack(epochOf(state), read));\n\t\t\treturn 0;\n\t\t}\n\t\tfor (let channel = 0; channel < this.channels; channel++) {\n\t\t\tconst src = this.#samples[channel];\n\t\t\tconst dst = output[channel];\n\t\t\tfor (let i = 0; i < count; i++) dst[i] = src[slot(read + i | 0, this.capacity)];\n\t\t}\n\t\tconst next = pack(epochOf(state), read + count | 0);\n\t\tif (Atomics.compareExchange(this.#state, 0, state, next) !== state) {\n\t\t\tfor (let channel = 0; channel < this.channels; channel++) output[channel].fill(0, 0, count);\n\t\t\treturn 0;\n\t\t}\n\t\treturn count;\n\t}",
     "\tread(output) {\n\t\tconst state = Atomics.load(this.#state, 0);\n\t\tif (Atomics.load(this.#control, STALLED) === 1) return 0;\n\t\tif (retreating(state)) return 0;\n\t\t// [campfire catch-up] The writer steps the playhead epoch on a\n\t\t// re-anchor, a truncate, or a deeper latency floor; a cursor from\n\t\t// the previous epoch belongs to a dead timeline. Resync the local\n\t\t// fractional cursor to the current shared playhead, otherwise a\n\t\t// stale cursor lands past WRITE, ahead goes negative, and read()\n\t\t// returns nothing forever.\n\t\tif (epochOf(state) !== this.#lastEpoch) {\n\t\t\tthis.#lastEpoch = epochOf(state);\n\t\t\tthis.#readPosF = readOf(Atomics.load(this.#state, 0));\n\t\t} else {\n\t\t\tconst read = readOf(state);\n\t\t\tif ((read - this.#readPosF | 0) > 0) this.#readPosF = read;\n\t\t}\n\t\tconst write = Atomics.load(this.#control, WRITE);\n\t\tconst latency = Atomics.load(this.#control, LATENCY);\n\t\tconst outLen = output[0].length;\n\t\tconst ahead = (write - (this.#readPosF | 0)) | 0;\n\t\tif (ahead <= 0) return 0;\n\t\t// [campfire catch-up] The stock code skips the backlog in\n\t\t// non-buffered mode (audio dropped at read time). Instead: while the\n\t\t// backlog exceeds the latency floor, drain it faster - consume\n\t\t// rate source samples per output sample, linearly interpolated on\n\t\t// the fractional read cursor. rate = 1 + excess/latency, capped at\n\t\t// 2.5; below the floor this is the stock 1:1 copy. Time\n\t\t// compression raises pitch with the rate; accepted for a bounded\n\t\t// transient.\n\t\tconst excess = ahead - latency;\n\t\tlet rate = excess > 0 ? Math.min(1 + excess / latency, 2.5) : 1;\n\t\tif (rate > 1 && ahead < outLen) rate = ahead / outLen;\n\t\tconst consume = outLen * rate;\n\t\tfor (let channel = 0; channel < this.channels; channel++) {\n\t\t\tconst src = this.#samples[channel];\n\t\t\tconst dst = output[channel];\n\t\t\tfor (let i = 0; i < outLen; i++) {\n\t\t\t\tconst pos = this.#readPosF + i * rate;\n\t\t\t\tconst idx = Math.floor(pos) | 0;\n\t\t\t\tconst frac = pos - idx;\n\t\t\t\tconst a = src[slot(idx, this.capacity)];\n\t\t\t\tconst b = idx + 1 < write ? src[slot(idx + 1, this.capacity)] : a;\n\t\t\t\tdst[i] = a + (b - a) * frac;\n\t\t\t}\n\t\t}\n\t\t// [campfire catch-up] Publish the advance only when the exchange\n\t\t// wins: on failure the writer moved the epoch, and keeping the\n\t\t// local cursor where it was lets the next read resync cleanly.\n\t\tconst next = pack(epochOf(state), Math.floor(this.#readPosF + consume) | 0);\n\t\tif (Atomics.compareExchange(this.#state, 0, state, next) !== state) {\n\t\t\tfor (let channel = 0; channel < this.channels; channel++) output[channel].fill(0, 0, outLen);\n\t\t\treturn 0;\n\t\t}\n\t\tthis.#readPosF += consume;\n\t\treturn outLen;\n\t}"
-  ]
+  ],
+  [
+    "AudioRingBuffer.#capacityFor: 4x ring depth (jitter headroom)",
+    "\t#capacityFor(latencySamples) {\n\t\treturn this.#buffered ? latencySamples * 2 : latencySamples;\n\t}",
+    "\t#capacityFor(latencySamples) {\n\t\t// [campfire latency] Buffered capacity 4x the playback floor instead of 2x:\n\t\t// the extra depth absorbs arrival bursts without moving the floor; the\n\t\t// catch-up drain recovers it at up to 2.5x (docs/dev/latency-optimization.md \u00a78).\n\t\treturn this.#buffered ? latencySamples * 4 : latencySamples;\n\t}"
+  ],
 ];
 
 // Main-bundle (decoder) replacements, applied to the player chunk text
@@ -87,10 +92,20 @@ const M = [
     'new AudioContext({ latencyHint: 0, sampleRate: n }) // [campfire latency] 0 = minimum output buffer; "interactive" is 10-20 ms on most setups (docs/dev/latency-optimization.md §7 finding 1)'
   ],
   [
+    "SharedRingBuffer wrapper (Ce): initial capacity 4x floor",
+    "\t\tlet a = Math.max(n, r * 2);",
+    "\t\t// [campfire latency] 4x the floor instead of 2x — jitter headroom without\n\t\t// extra playback delay (docs/dev/latency-optimization.md §8).\n\t\tlet a = Math.max(n, r * 4);"
+  ],
+  [
+    "SharedRingBuffer wrapper (Ce): setLatency resize capacity 4x floor",
+    "\t\t\tlet t = Math.max(this.rate, e * 2);",
+    "\t\t\t// [campfire latency] Match the 4x initial capacity.\n\t\t\tlet t = Math.max(this.rate, e * 4);"
+  ],
+  [
     "#g: bounded pacing wait (re-anchor on stalled playhead)",
     "\t\t\tif (await this.#n?.wait(i.timestamp, e.abort), t.state === \"closed\") return !1;",
     "\t\t\t{ // [campfire catch-up] Bounded pacing wait. Stock waits until the ring playhead\n\t\t\t// reaches the frame's timestamp minus headroom. If the container consumer\n\t\t\t// skipped ahead by more than the headroom (a gap in the media timeline),\n\t\t\t// the ring drains, the playhead never arrives, and the wait blocks\n\t\t\t// forever (audio flatline). On a 2000 ms grace expiry with the playhead\n\t\t\t// still more than a second behind, reset the ring: the next insert\n\t\t\t// re-anchors the playhead at this frame's timestamp, so playback skips\n\t\t\t// the (already dropped) gap instead of stalling.\n\t\t\t\tlet cfUp = !1;\n\t\t\t\tconst cfWait = this.#n?.wait(i.timestamp, e.abort);\n\t\t\t\tcfWait?.catch(() => {});\n\t\t\t\tconst cfT = setTimeout(() => { cfUp = !0; }, 2000);\n\t\t\t\tawait Promise.race([cfWait, new Promise((s) => setTimeout(s, 2000))]).catch(() => {});\n\t\t\t\tclearTimeout(cfT);\n\t\t\t\tif (cfUp && this.#n && t.state !== \"closed\") {\n\t\t\t\t\tconst cfPh = this.#n.timestamp.peek();\n\t\t\t\t\tif (cfPh == null || i.timestamp - cfPh > 1000000) this.#n.reset();\n\t\t\t\t}\n\t\t\t}\n\t\t\tif (t.state === \"closed\") return !1;"
-  ]
+  ],
 ];
 
 // --- apply ------------------------------------------------------------------
