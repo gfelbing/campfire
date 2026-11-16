@@ -4,6 +4,59 @@ All notable releases of campfire. Versions follow calendar-agnostic
 semver; releases are cut by tagging `vX.Y.Z` (the Docker image is built
 and pushed to GHCR on each tag).
 
+## [0.0.18] — 2026-11-16
+
+The sound-check release: audio gets its bitrate and buffer balance
+(final tuning of the latency work), and the call pipeline now has a
+headless test that transmits an actual audio file and verifies it
+survives — the "can you hear me properly" check, automated.
+
+### Changed
+
+- Audio playback delay settles at 40 ms with 20 ms Opus frames (down
+  from the instant-mode experiments that destabilized the ring: below
+  ~20 ms the catch-up drain rate spikes, the playhead outruns the
+  arrivals, and every frame is dropped — the full analysis and the
+  accepted trade-offs live in `docs/dev/latency-optimization.md` §8).
+- The audio ring holds 4× its playback floor (vendored `@moq/watch`
+  patch, buffer pool and resize path) and the playback budget follows
+  (`Sync.in.buffer` = 4 × delay): arrival bursts up to ~160 ms are
+  absorbed and recovered by the catch-up drain instead of gapping.
+- The uplink Opus encoder runs at 48 kbps (stock 32 k): the in-band FEC
+  layer was starved at the old rate and never actually reconstructed
+  lost frames. Group batching follows the 20 ms frames (60 ms groups).
+
+### Added
+
+- E2E audio intelligibility test (`tools/e2e/moq.js` step 5b): the fake
+  media device plays a generated syllable WAV as the microphone, the
+  e2e client records each downlink's decoded PCM, and the harness
+  cross-correlates the recording against the source (best of five
+  voiced windows, ≥ 70% = content survived) and asserts continuity
+  (no silence gap > 150 ms). Found and fixed a recorder bug on the way:
+  an audio-graph rewire rebuilt the decoder's AudioContext and the
+  cross-context tap reconnect threw inside `wireAudio`, which could
+  flatline audio — the tap now detects a context change and rebuilds,
+  and a recorder failure can never break audio.
+- The e2e environment: the fake video device renders a static y4m file
+  instead of Chromium's animated generator (which burned ~5 cores in
+  the browser process and pushed the transport ~800 ms behind the live
+  edge), and the harness carries debug-only budget overrides
+  (`__campfire_audio_ms`, `__campfire_video_maxpx`) so latency-
+  sensitive assertions run against a budget that fits the headless
+  environment — production budgets untouched.
+
+### Fixed
+
+- Stale e2e selectors: the topbar redesign moved the call buttons to
+  `#mic-btn` / `#cam-btn` / `#screen-btn`; the suite's mute/camera/
+  screen steps still queried the pre-redesign `.call-*` classes.
+- The camera-off delivery gate accounts for the 4× playback buffer
+  (a ~2 s ≈ 60-frame tail presents after the catalog lands, not the
+  15 frames the old 2× budget allowed).
+- Node 24 LTS in the check workflow and Docker build; actions/checkout
+  v5, actions/setup-node v5.
+
 ## [0.0.17] — 2026-11-16
 
 The instant-audio release: the call's audio path sheds every adjustable
