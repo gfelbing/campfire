@@ -90,19 +90,19 @@ export interface DownlinkView {
   screenFrames: number;
   /** Encoded audio bytes received (debug/e2e). */
   audioBytes: number;
-  /** How far playback trails wall-clock time, ms, on the audio clock (the
-   *  conversational metric): the latest audio's arrival lag behind the
-   *  live edge plus the audio sync target (`audSync.out.delay`).
-   *  Both move with the network — a fixed target (`in.delay`) alone would
-   *  sit flat. Computed from the root catalog's `clock` (see
-   *  `delayOf`), not `out.reference`: the wire timestamps are the
-   *  *publisher's* page clock, so `out.reference` anchors each viewer to
-   *  its own load time and two tabs of the same stream disagreed by
-   *  seconds (observed +5 s vs -4.3 s). */
+  /** How far playback trails wall-clock time, ms — the **playout**
+   *  position (audio ring playhead; what you hear), not the arrival lag:
+   *  the old arrival-based number hid the backlog the playhead holds
+   *  (docs/dev/latency-optimization.md §9.1). Computed from the root
+   *  catalog's `clock` (see `delayOf`), not `out.reference`: the wire
+   *  timestamps are the *publisher's* page clock, so `out.reference`
+   *  anchors each viewer to its own load time and two tabs of the same
+   *  stream disagreed by seconds (observed +5 s vs -4.3 s). Falls back
+   *  to the arrival-based formula when the playhead has not started. */
   delay: number;
-  /** Same, on the video clock (camera/screen renditions; trails
-   *  `VIDEO_DELAY_MS`, its own `Sync` instance — see `delay`). The two
-   *  clocks drift freely by design, so the UI shows both. */
+  /** Same, on the video clock (camera/screen; the presented frame's
+   *  timestamp — the video playhead). The two media drift freely by
+   *  design; the *difference* of the two numbers is the a/v offset. */
   videoDelay: number;
   /** Jitter buffer depth, ms (audio clock). */
   jitter: number;
@@ -1183,17 +1183,33 @@ export class MoqCall {
    *  directly comparable to our own wall clock
    *  (`performance.timeOrigin - moq epoch + performance.now()`).
    *  Falls back to the clockless formula when the catalog or the
-   *  timestamp has not arrived yet. */
-  private delayOf(d: Downlink, sync: Watch.Sync): number {
+   *  timestamp has not arrived yet.
+   *
+   *  Playout vs arrival: the Sync timestamp is the newest *received*
+   *  frame (arrival lag + the delay target) — for audio ≈ the playout
+   *  position (the ring plays only the floor behind arrivals), but for
+   *  video the playhead may trail arrivals by up to the whole backlog
+   *  budget, which the arrival number hides. When the decoder exposes a
+   *  playout timestamp (audio ring playhead / video presented frame),
+   *  the delay is computed from it instead — the number then says how
+   *  far what you *see/hear* trails live (docs/dev/latency-optimization.md
+   *  §9.1). */
+  private delayOf(d: Downlink, sync: Watch.Sync, playoutTs?: number | null): number {
     const fallback = () =>
       Number(sync.out.reference.peek() ?? 0) + Number(sync.out.delay.peek());
-    const ts = sync.out.timestamp.peek();
+    const ts = playoutTs ?? sync.out.timestamp.peek();
     if (ts === undefined) return fallback();
     const clock = d.broadcast.out.catalog.peek()?.clock;
     if (!clock) return fallback();
     const frameWallMs = (clock.wall / clock.timescale) * 1000 + Number(ts);
     const nowWallMs =
       performance.timeOrigin - Catalog.MOQ_EPOCH_UNIX_MILLIS + performance.now();
+    // Playout timestamp: how far the presented media trails the live edge,
+    // full stop — the delay target is already inside the playhead position,
+    // adding it again would double-count.
+    if (playoutTs !== undefined && playoutTs !== null) {
+      return nowWallMs - frameWallMs;
+    }
     return nowWallMs - frameWallMs + Number(sync.out.delay.peek());
   }
 
@@ -1205,8 +1221,8 @@ export class MoqCall {
       frames: d.camDecoder.out.stats.peek()?.frameCount ?? 0,
       screenFrames: d.scrDecoder.out.stats.peek()?.frameCount ?? 0,
       audioBytes: d.audDecoder.out.stats.peek()?.bytesReceived ?? 0,
-      delay: this.delayOf(d, d.audSync),
-      videoDelay: this.delayOf(d, d.sync),
+      delay: this.delayOf(d, d.audSync, d.audDecoder.out.timestamp.peek()),
+      videoDelay: this.delayOf(d, d.sync, d.camDecoder.out.timestamp.peek()),
       jitter: Number(d.audSync.out.jitter.peek()),
       width: d.canvas.width,
       height: d.canvas.height,
