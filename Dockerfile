@@ -14,12 +14,12 @@
 # Pinned to rust-toolchain.toml (the rust:* images honor it via rustup, but
 # a valid base tag is a hard requirement — `rust:1-slim` does not exist).
 FROM rust:1.99.1-slim AS build
-# Node 22 LTS from NodeSource (matches CI's node-version): the Debian apt
+# Node 24 LTS from NodeSource (matches CI's node-version): the Debian apt
 # node (20.x) is below vitest's engine requirement and npm warns EBADENGINE
 # for the whole install.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends curl ca-certificates \
-    && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
+    && curl -fsSL https://deb.nodesource.com/setup_24.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /build
