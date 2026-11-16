@@ -40,8 +40,12 @@ export interface PeerView {
   /** The screen-share downlink's paint target (only while they share). */
   screen: HTMLCanvasElement | null;
   state: DownlinkState;
-  /** Downlink playback delay from the live edge, ms (0 while no downlink). */
+  /** Downlink playback delay from the live edge, ms (0 while no downlink).
+   *  Audio clock — the conversational metric. */
   delay: number;
+  /** Same on the video clock (the two `Sync` instances drift freely by
+   *  design — see moq.ts AUDIO_DELAY_MS / VIDEO_DELAY_MS). */
+  delayVideo: number;
   /** Downlink jitter buffer depth, ms (0 while no downlink). */
   jitter: number;
   /** Decoded camera-frame resolution, px (0x0 until the first frame). */
@@ -533,6 +537,7 @@ export class CallManager {
           screen: pres.screen ? (dl?.screenCanvas ?? null) : null,
           state: dl?.status ?? "subscribing",
           delay: dl?.delay ?? 0,
+          delayVideo: dl?.videoDelay ?? 0,
           jitter: dl?.jitter ?? 0,
           width: dl?.width ?? 0,
           height: dl?.height ?? 0,

@@ -38,12 +38,17 @@ interface Tile {
   media: HTMLCanvasElement | null;
   nameEl: HTMLElement;
   stateEl: HTMLElement;
-  /** Downlink latency label (e2e delay + transport RTT), live tiles only. */
+  /** Downlink latency label (video/audio e2e delays + transport RTT),
+   *  live tiles only. */
   latencyEl: HTMLElement;
-  /** E2e-delay sparkline (the last ~90 s at the 1 Hz refresh). */
+  latencyVEl: HTMLElement;
+  latencyAEl: HTMLElement;
+  /** E2e-delay sparkline, video + audio (the last ~90 s at the 1 Hz
+   *  refresh). */
   spark: HTMLCanvasElement | null;
-  /** Delay samples behind the sparkline (ring; trimmed at SPARK_LEN). */
-  sparkSamples: number[];
+  /** Delay samples behind the sparklines (rings; trimmed at SPARK_LEN). */
+  sparkVideo: number[];
+  sparkAudio: number[];
   muteEl: HTMLElement;
   camEl: HTMLElement;
   screenEl: HTMLElement;
@@ -78,34 +83,51 @@ const SPARK_LEN = 90;
 /** Sparkline canvas size (CSS px = canvas px; the tile is small). */
 const SPARK_W = 60;
 const SPARK_H = 20;
+/** Sparkline + latency-label colors, video and audio: the tile's latency
+ *  spans reuse the same two values, so the numbers and their lines read
+ *  as a pair (video = blue, audio = the speaking-pulse green). */
+const SPARK_VIDEO_COLOR = "#6cb0e0";
+const SPARK_AUDIO_COLOR = "#4d9e57";
 
 /** Draw the tile's e2e-delay history (last SPARK_LEN samples, right edge =
- *  now). A flat delay renders as a flat line near the bottom; the y-scale
- *  is the running max so a delay spike is visible without reflow. */
+ *  now): one line per medium, video (blue) in the upper band, audio
+ *  (green) in the lower band, both sharing the running max scale so a
+ *  delay spike is visible without reflow. A flat delay renders as a flat
+ *  line near its band's bottom. */
 function drawSpark(t: Tile): void {
   const c = t.spark;
   if (!c) return;
   const ctx = c.getContext("2d");
   if (!ctx) return;
-  const s = t.sparkSamples;
+  const v = t.sparkVideo;
+  const a = t.sparkAudio;
   ctx.clearRect(0, 0, SPARK_W, SPARK_H);
-  if (s.length < 2) return;
+  if (v.length < 2 && a.length < 2) return;
   let max = 0;
-  for (const v of s) max = Math.max(max, v);
-  // Floor the scale at the steady delay (300 ms) so the line is readable
-  // and does not reflow as small samples age out of the ring.
-  max = Math.max(max, 300);
-  ctx.beginPath();
-  const step = SPARK_W / (SPARK_LEN - 1);
-  for (let i = 0; i < s.length; i++) {
-    const x = SPARK_W - (s.length - 1 - i) * step;
-    const y = SPARK_H - 1 - (s[i] / max) * (SPARK_H - 2);
-    if (i === 0) ctx.moveTo(x, y);
-    else ctx.lineTo(x, y);
-  }
-  ctx.strokeStyle = "rgba(255,255,255,0.75)";
-  ctx.lineWidth = 1;
-  ctx.stroke();
+  for (const s of v) max = Math.max(max, s);
+  for (const s of a) max = Math.max(max, s);
+  // Floor the scale at the steady video delay (400 ms) so the lines are
+  // readable and do not reflow as small samples age out of the ring.
+  max = Math.max(max, 400);
+  // Two bands, audio underneath: half the canvas height each (minus a
+  // px of padding), so the lines never overdraw each other.
+  const bandH = Math.floor(SPARK_H / 2) - 1;
+  const draw = (samples: number[], color: string, bandTop: number): void => {
+    if (samples.length < 2) return;
+    ctx.beginPath();
+    const step = SPARK_W / (SPARK_LEN - 1);
+    for (let i = 0; i < samples.length; i++) {
+      const x = SPARK_W - (samples.length - 1 - i) * step;
+      const y = bandTop + bandH - 1 - (samples[i] / max) * (bandH - 2);
+      if (i === 0) ctx.moveTo(x, y);
+      else ctx.lineTo(x, y);
+    }
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 1;
+    ctx.stroke();
+  };
+  draw(v, SPARK_VIDEO_COLOR, 0);
+  draw(a, SPARK_AUDIO_COLOR, bandH + 1);
 }
 
 export function createCallUI(container: HTMLElement, actions: CallUiActions): CallUI {
@@ -156,7 +178,7 @@ export function createCallUI(container: HTMLElement, actions: CallUiActions): Ca
     const el = document.createElement("div");
     el.className = `theater-tile${screen ? " screen" : ""}`;
     el.innerHTML = `
-      <div class="theater-tile-info"><span class="tile-name"></span><span class="tile-state"></span><canvas class="tile-spark" width="${SPARK_W}" height="${SPARK_H}"></canvas><span class="tile-latency hidden"></span></div>
+      <div class="theater-tile-info"><span class="tile-name"></span><span class="tile-state"></span><canvas class="tile-spark" width="${SPARK_W}" height="${SPARK_H}"></canvas><span class="tile-latency hidden"><span class="tile-lat-v"></span>/<span class="tile-lat-a"></span><span class="tile-lat-extra"></span></span></div>
       <span class="call-badge tile-mute hidden" title="microphone muted"></span>
       <span class="call-badge tile-cam hidden" title="camera off"></span>
       <span class="call-badge tile-screen hidden" title="sharing their screen"></span>`;
@@ -167,8 +189,11 @@ export function createCallUI(container: HTMLElement, actions: CallUiActions): Ca
       nameEl: el.querySelector<HTMLElement>(".tile-name")!,
       stateEl: el.querySelector<HTMLElement>(".tile-state")!,
       latencyEl: el.querySelector<HTMLElement>(".tile-latency")!,
+      latencyVEl: el.querySelector<HTMLElement>(".tile-lat-v")!,
+      latencyAEl: el.querySelector<HTMLElement>(".tile-lat-a")!,
       spark: el.querySelector<HTMLCanvasElement>(".tile-spark"),
-      sparkSamples: [],
+      sparkVideo: [],
+      sparkAudio: [],
       muteEl: el.querySelector<HTMLElement>(".tile-mute")!,
       camEl: el.querySelector<HTMLElement>(".tile-cam")!,
       screenEl: el.querySelector<HTMLElement>(".tile-screen")!,
@@ -190,30 +215,49 @@ export function createCallUI(container: HTMLElement, actions: CallUiActions): Ca
     return tile;
   }
 
-  function updateTile(t: Tile, name: string, state: DownlinkState, canvas: HTMLCanvasElement | null, audioOn: boolean, videoOn: boolean, delay: number, rtt: number | null, width = 0, height = 0): void {
+  function updateTile(t: Tile, name: string, state: DownlinkState, canvas: HTMLCanvasElement | null, audioOn: boolean, videoOn: boolean, delayVideo: number, delayAudio: number, rtt: number | null, width = 0, height = 0): void {
     const label = t.key.endsWith(":scr") ? `${name} · screen` : name;
     // 1 Hz roster pushes: only touch the DOM when the text changed.
     if (t.nameEl.textContent !== label) t.nameEl.textContent = label;
     const stateLabel = stateText(state);
     if (t.stateEl.textContent !== stateLabel) t.stateEl.textContent = stateLabel;
-    // Latency: e2e playback delay (how far the canvas trails the live
-    // edge) plus the transport RTT of our signaling connection — a proxy
-    // for the path to the SFU. The RTT part is omitted when the transport
-    // cannot measure it (SSE fallback, or no `WebTransport.getStats()`).
-    // The sparkline tracks the e2e delay over the last ~90 s.
+    // Latency: e2e playback delay per medium (how far the playback trails
+    // the live edge, on the video and audio clocks — the two Sync
+    // instances drift freely by design) plus the transport RTT of our
+    // signaling connection — a proxy for the path to the SFU. The RTT
+    // part is omitted when the transport cannot measure it (SSE
+    // fallback, or no `WebTransport.getStats()`). The two numbers' colors
+    // match the sparkline's two lines (video = blue, audio = green).
+    // The sparklines track the per-medium e2e delay over the last ~90 s.
     if (state === "live") {
-      t.latencyEl.textContent =
-        rtt != null
-          ? `${Math.round(delay)} ms · RTT ${Math.round(rtt)} ms`
-          : `${Math.round(delay)} ms`;
-      if (width > 0 && height > 0) t.latencyEl.textContent += ` · ${width}×${height}`;
+      const v = `${Math.round(delayVideo)}`;
+      const a = `${Math.round(delayAudio)}`;
+      if (t.latencyVEl.textContent !== v) t.latencyVEl.textContent = v;
+      if (t.latencyAEl.textContent !== a) t.latencyAEl.textContent = a;
+      const extra = [
+        rtt != null ? `RTT ${Math.round(rtt)} ms` : null,
+        width > 0 && height > 0 ? `${width}×${height}` : null,
+      ]
+        .filter(Boolean)
+        .join(" · ");
+      const extraText = extra ? ` ms · ${extra}` : " ms";
+      if (t.latencyEl.dataset.extra !== extraText) {
+        t.latencyEl.dataset.extra = extraText;
+        t.latencyEl.lastElementChild!.textContent = extraText;
+      }
       t.latencyEl.classList.remove("hidden");
-      t.sparkSamples.push(delay);
-      if (t.sparkSamples.length > SPARK_LEN) t.sparkSamples.shift();
+      t.sparkVideo.push(delayVideo);
+      t.sparkAudio.push(delayAudio);
+      if (t.sparkVideo.length > SPARK_LEN) t.sparkVideo.shift();
+      if (t.sparkAudio.length > SPARK_LEN) t.sparkAudio.shift();
       drawSpark(t);
     } else {
       t.latencyEl.classList.add("hidden");
-      t.sparkSamples.length = 0;
+      t.latencyEl.dataset.extra = "";
+      t.latencyVEl.textContent = "";
+      t.latencyAEl.textContent = "";
+      t.sparkVideo.length = 0;
+      t.sparkAudio.length = 0;
       drawSpark(t);
     }
     t.muteEl.classList.toggle("hidden", audioOn);
@@ -317,7 +361,9 @@ export function createCallUI(container: HTMLElement, actions: CallUiActions): Ca
         screen: boolean;
         canvas: HTMLCanvasElement | null;
         state: DownlinkState;
-        delay: number;
+        /** E2e playback delay, video and audio clocks (ms). */
+        delayVideo: number;
+        delayAudio: number;
         rtt: number | null;
         audioOn: boolean;
         videoOn: boolean;
@@ -333,7 +379,8 @@ export function createCallUI(container: HTMLElement, actions: CallUiActions): Ca
           screen: false,
           canvas: p.camera,
           state: p.state,
-          delay: p.delay,
+          delayVideo: p.delayVideo,
+          delayAudio: p.delay,
           rtt: p.rtt,
           audioOn: p.audioOn,
           videoOn: p.videoOn,
@@ -347,7 +394,8 @@ export function createCallUI(container: HTMLElement, actions: CallUiActions): Ca
             screen: true,
             canvas: p.screen,
             state: p.state,
-            delay: p.delay,
+            delayVideo: p.delayVideo,
+            delayAudio: p.delay,
             rtt: p.rtt,
             audioOn: true,
             videoOn: true,
@@ -364,7 +412,7 @@ export function createCallUI(container: HTMLElement, actions: CallUiActions): Ca
           t = makeTile(v.key, v.name, v.screen);
           tiles.set(v.key, t);
         }
-        updateTile(t, v.name, v.state, v.canvas, v.audioOn, v.videoOn, v.delay, v.rtt, v.width, v.height);
+        updateTile(t, v.name, v.state, v.canvas, v.audioOn, v.videoOn, v.delayVideo, v.delayAudio, v.rtt, v.width, v.height);
       }
       for (const [key, t] of tiles) {
         if (!seen.has(key)) {

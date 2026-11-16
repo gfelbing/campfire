@@ -976,7 +976,10 @@ body {
   white-space: nowrap;
 }
 
-/* the tile's downlink latency (e2e delay + transport RTT), live tiles only */
+/* the tile's downlink latency (video/audio e2e delays + transport RTT),
+   live tiles only. The two numbers' colors match the sparkline's two
+   lines (video = blue upper band, audio = green lower band), so the
+   numbers and their lines read as a pair. */
 .theater-tile-info .tile-latency {
   font-size: 0.6rem;
   color: #6f7580;
@@ -984,7 +987,17 @@ body {
   font-variant-numeric: tabular-nums;
 }
 
-/* the tile's e2e-delay sparkline (last ~90 s), right of the name/state */
+.theater-tile-info .tile-lat-v {
+  color: #6cb0e0;
+}
+
+.theater-tile-info .tile-lat-a {
+  color: #4d9e57;
+}
+
+/* the tile's e2e-delay sparklines (video/audio, last ~90 s), right of the
+   name/state; the line colors live in callui.ts (SPARK_VIDEO_COLOR /
+   SPARK_AUDIO_COLOR) and match the latency spans above */
 .theater-tile-info .tile-spark {
   width: 45px;
   height: 15px;

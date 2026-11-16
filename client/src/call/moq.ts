@@ -95,6 +95,10 @@ export interface DownlinkView {
    *  its own load time and two tabs of the same stream disagreed by
    *  seconds (observed +5 s vs -4.3 s). */
   delay: number;
+  /** Same, on the video clock (camera/screen renditions; trails
+   *  `VIDEO_DELAY_MS`, its own `Sync` instance — see `delay`). The two
+   *  clocks drift freely by design, so the UI shows both. */
+  videoDelay: number;
   /** Jitter buffer depth, ms (audio clock). */
   jitter: number;
   /** Decoded frame resolution, px (0x0 until the first frame). */
@@ -974,8 +978,9 @@ export class MoqCall {
     d.scrBroadcast.close();
   }
 
-  /** Playback delay behind the live edge, ms, audio clock (the
-   *  conversational metric — see AUDIO_DELAY_MS). The wire media timestamps
+  /** Playback delay behind the live edge, ms, on the given medium's clock
+   *  (audio: the conversational metric — see AUDIO_DELAY_MS; video: the
+   *  camera/screen clock — see VIDEO_DELAY_MS). The wire media timestamps
    *  are the publisher's `performance.now()` (page uptime), so
    *  `out.reference` (viewer-now minus frame-ts) bakes in the offset
    *  between the two pages' load times. The root catalog carries the
@@ -985,20 +990,17 @@ export class MoqCall {
    *  (`performance.timeOrigin - moq epoch + performance.now()`).
    *  Falls back to the clockless formula when the catalog or the
    *  timestamp has not arrived yet. */
-  private delayOf(d: Downlink): number {
+  private delayOf(d: Downlink, sync: Watch.Sync): number {
     const fallback = () =>
-      Number(d.audSync.out.reference.peek() ?? 0) +
-      Number(d.audSync.out.delay.peek());
-    const ts = d.audSync.out.timestamp.peek();
+      Number(sync.out.reference.peek() ?? 0) + Number(sync.out.delay.peek());
+    const ts = sync.out.timestamp.peek();
     if (ts === undefined) return fallback();
     const clock = d.broadcast.out.catalog.peek()?.clock;
     if (!clock) return fallback();
     const frameWallMs = (clock.wall / clock.timescale) * 1000 + Number(ts);
     const nowWallMs =
       performance.timeOrigin - Catalog.MOQ_EPOCH_UNIX_MILLIS + performance.now();
-    return (
-      nowWallMs - frameWallMs + Number(d.audSync.out.delay.peek())
-    );
+    return nowWallMs - frameWallMs + Number(sync.out.delay.peek());
   }
 
   private viewOf(d: Downlink): DownlinkView {
@@ -1009,7 +1011,8 @@ export class MoqCall {
       frames: d.camDecoder.out.stats.peek()?.frameCount ?? 0,
       screenFrames: d.scrDecoder.out.stats.peek()?.frameCount ?? 0,
       audioBytes: d.audDecoder.out.stats.peek()?.bytesReceived ?? 0,
-      delay: this.delayOf(d),
+      delay: this.delayOf(d, d.audSync),
+      videoDelay: this.delayOf(d, d.sync),
       jitter: Number(d.audSync.out.jitter.peek()),
       width: d.canvas.width,
       height: d.canvas.height,
