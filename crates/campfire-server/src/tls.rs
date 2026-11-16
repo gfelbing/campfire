@@ -62,6 +62,17 @@ pub fn server_config(
     let keep_alive = idle_timeout / 3;
     let keep_alive = Duration::max(keep_alive, Duration::from_secs(1));
     transport.keep_alive_interval(Some(keep_alive));
+    // BBR instead of the Cubic default (docs/dev/latency-optimization.md
+    // §2 step 3). The SFU's send path carries real-time media whose value
+    // decays in flight: Cubic's loss-driven sawtooth queues bursts behind
+    // each other and lets a keyframe flight stall every stream on the
+    // connection (the "spikes hit both incoming streams at once"
+    // signature). BBR paces to the estimated bottleneck bandwidth instead,
+    // keeps queues shallow, and recovers from a loss event without the
+    // multiplicative window collapse. Flow-control windows are left at
+    // quinn's defaults, which are already unbounded (connection) /
+    // 1.25 MiB (stream) / 8 × stream (send) — they do not bind first.
+    transport.congestion_controller_factory(Arc::new(quinn::congestion::BbrConfig::default()));
     config.transport = Arc::new(transport);
     Ok(config)
 }
