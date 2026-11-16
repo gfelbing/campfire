@@ -4,6 +4,67 @@ All notable releases of campfire. Versions follow calendar-agnostic
 semver; releases are cut by tagging `vX.Y.Z` (the Docker image is built
 and pushed to GHCR on each tag).
 
+## [0.0.19] — 2026-11-16
+
+The honest-clocks release: the call's delay indicators now tell the
+truth about what you see and hear, the video playhead skips to the live
+edge instead of parking behind a buffer, the a/v offset is measured and
+asserted, and the startup spike that came from anchoring playback in
+the past is gone. The full analysis lives in
+`docs/dev/latency-optimization.md` §9–§10.
+
+### Changed
+
+- Both delay indicators (the call tiles' `video/audio ms`) are now
+  **playout-based**: the audio ring's playhead and the video decoder's
+  presented frame, not the arrival lag. The old video number could read
+  400 ms while playback trailed by seconds — the buffer backlog it
+  hid. The two numbers' difference is the true a/v offset.
+- The video clock tightens: `VIDEO_DELAY_MS` 400 → 200 with a 2×
+  skip-stale backlog (maxAge ≈ 600 ms) — beyond it the Sync reference
+  re-anchors and the playhead jumps to near the live edge (the
+  "skipping images" trade: visible frame jumps instead of drift).
+  Audio keeps its 4× buffer depth — it is the priority.
+- The camera's auto-sizing bound drops 800×600 → 480×360 (−65% pixel
+  work on the software encode + decode path); bitrate was the wrong
+  lever for the CPU spikes (OpenH264 ignores bitrate without
+  frame-skip — its own configure warning).
+- The re-announce guard pulses the downlink gates on the *symptom*
+  (decoded audio frozen ≥ 2 s while the broadcast is live — a re-route)
+  instead of on every catalog change: the old trigger fired on the
+  peer's warmup catalog churn too, tearing down and re-anchoring the
+  subscriptions — the join-time spikes.
+
+### Added
+
+- A/v offset assertion in the e2e suite (|video − audio| playout ≤
+  500 ms; fresh run 248 ms) plus a join-transient sampler and a
+  console probe (doc §10.2) for diagnosing startup behavior in a real
+  setup.
+- `--delay-join-b-ms` in the MoQ e2e harness: reproduces walking into
+  a call where the peer has been publishing for minutes.
+
+### Fixed
+
+- **Startup audio spike (up to 20 s, decaying over 10–20 s)**: the
+  moq-lite-02 wire serves groups newest-first, so the publisher's held
+  head arrived after the live edge and the audio ring anchored at the
+  *oldest* released frame. The audio decode loop now drops frames older
+  than the newest arrival minus the sync budget before decode (the
+  ring anchors at the live edge), and the SFU's serving budget for
+  lite-02 subscriptions honors the requested value instead of the
+  upstream-unbounded default — live media is served at the live edge
+  (vendored moq-net deviation, documented in its PATCH.md; catalog and
+  fetch/replay paths unaffected).
+- The OpenH264 reinit storm: the media-estimate module wrote its
+  estimate into the catalog on any monotonic bump, re-announcing the
+  hang and rebuilding every encoder. Writes are rate-limited to 1/s
+  with ≥ 25% hysteresis (vendored `@moq/publish` patch) — the camera
+  encoder now constructs once per call.
+- Stale e2e selectors (`.call-*` → `#mic-btn`/`#cam-btn`/`#screen-btn`,
+  broken since the topbar redesign) and the camera-off delivery gate
+  for the 4× playback buffer.
+
 ## [0.0.18] — 2026-11-16
 
 The sound-check release: audio gets its bitrate and buffer balance
