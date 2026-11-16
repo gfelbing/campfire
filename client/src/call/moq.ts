@@ -27,16 +27,27 @@ import * as Watch from "@moq/watch";
 import { Catalog } from "@moq/hang";
 import { Signal } from "@moq/signals";
 
-/** Playback delay behind the live edge (issues.md "skipping when falling
- *  behind"): a fixed offset lets a burst of frames land in the jitter
- *  buffer instead of re-anchoring the clock mid-burst.
- *  `Sync.in.buffer` = 2 × delay, which switches the audio ring into
- *  buffered mode (no read skip, capacity 2 × delay) and grows the
- *  transport `maxAge` so a backlog reaches the ring instead of being
- *  dropped. The invariant `buffer ≤ 2 × delay` keeps the backlog inside
- *  the ring capacity, so the writer never has to drop either. */
-const DELAY_MS = 300;
-/** Backlog budget as a multiple of the delay (see DELAY_MS). */
+/** Playback delay behind the live edge, per medium (docs/dev/
+ *  latency-optimization.md §2 step 1). A fixed offset lets a burst of
+ *  frames land in the jitter buffer instead of re-anchoring the clock
+ *  mid-burst.
+ *
+ *  Audio is the conversational medium and gets the smallest delay the
+ *  ring tolerates without underrun; video trails further — a/v sync is
+ *  explicitly secondary (docs/dev/latency-optimization.md), and separate
+ *  `Sync` clocks mean a video buffer burst can never hold back audio
+ *  playback (the old single shared clock coupled them: both media shared
+ *  one 300 ms delay, which was the bulk of the observed mouth-to-ear
+ *  latency even on a clean local link).
+ *
+ *  Each medium's `Sync.in.buffer` = 2 × its delay, which switches the
+ *  audio ring into buffered mode (no read skip, capacity 2 × delay) and
+ *  grows the transport `maxAge` so a backlog reaches the ring instead of
+ *  being dropped. The invariant `buffer ≤ 2 × delay` keeps the backlog
+ *  inside the ring capacity, so the writer never has to drop either. */
+const AUDIO_DELAY_MS = 100;
+const VIDEO_DELAY_MS = 400;
+/** Backlog budget as a multiple of the delay (see AUDIO_DELAY_MS). */
 const BACKLOG_FACTOR = 2;
 
 /** Options for one call session. */
@@ -74,8 +85,9 @@ export interface DownlinkView {
   screenFrames: number;
   /** Encoded audio bytes received (debug/e2e). */
   audioBytes: number;
-  /** How far playback trails wall-clock time, ms: the latest media's
-   *  arrival lag behind the live edge plus the sync target (`out.delay`).
+  /** How far playback trails wall-clock time, ms, on the audio clock (the
+   *  conversational metric): the latest audio's arrival lag behind the
+   *  live edge plus the audio sync target (`audSync.out.delay`).
    *  Both move with the network — a fixed target (`in.delay`) alone would
    *  sit flat. Computed from the root catalog's `clock` (see
    *  `delayOf`), not `out.reference`: the wire timestamps are the
@@ -83,7 +95,7 @@ export interface DownlinkView {
    *  its own load time and two tabs of the same stream disagreed by
    *  seconds (observed +5 s vs -4.3 s). */
   delay: number;
-  /** Jitter buffer depth, ms. */
+  /** Jitter buffer depth, ms (audio clock). */
   jitter: number;
   /** Decoded frame resolution, px (0x0 until the first frame). */
   width: number;
@@ -182,7 +194,11 @@ interface Downlink {
   /** The peer's screen share (its own hang, `*.screen.hang`); null-side
    *  counterpart of the uplink's `screenBroadcast`. */
   scrBroadcast: Watch.Broadcast;
+  /** Video playback clock (camera + screen; trails VIDEO_DELAY_MS). */
   sync: Watch.Sync;
+  /** Audio playback clock (trails AUDIO_DELAY_MS; deliberately separate
+   *  from `sync`, see AUDIO_DELAY_MS — the two media drift freely). */
+  audSync: Watch.Sync;
   camSource: Watch.Video.Source;
   camDecoder: Watch.Video.Decoder;
   camRenderer: Watch.Video.Renderer;
@@ -362,7 +378,16 @@ export class MoqCall {
           broadcast,
           capture,
           enabled: true,
-          codec: "opus",
+          // In-band FEC: the audio latency budget (AUDIO_DELAY_MS on the
+          // downlink) has no room for retransmission, so a lost frame is
+          // lost — FEC lets the decoder reconstruct it from the redundancy
+          // of the following frames instead (docs/dev/latency-optimization.md
+          // §2 step 1). Costs bitrate; worth it on lossy paths.
+          codec: {
+            mime: "opus",
+            useinbandfec: true,
+            packetlossperc: 10,
+          },
         });
       }
       if (!call.videoEncoder && !call.audioEncoder) {
@@ -500,15 +525,26 @@ export class MoqCall {
       enabled: true,
       announced: true,
     });
-    // The playback delay is fixed (see DELAY_MS); `buffer` = 2 × delay
-    // keeps the backlog budget inside the ring capacity (BACKLOG_FACTOR).
-    const delaySig = new Signal<Net.Time.Milli>(Net.Time.Milli(DELAY_MS));
+    // The playback delay is per medium (see AUDIO_DELAY_MS / VIDEO_DELAY_MS);
+    // each medium's `buffer` = 2 × its delay keeps the backlog budget inside
+    // the ring capacity (BACKLOG_FACTOR). Two clocks: video (camera + screen)
+    // and audio, free to drift apart.
+    const delaySig = new Signal<Net.Time.Milli>(Net.Time.Milli(VIDEO_DELAY_MS));
     const bufferSig = new Signal<Net.Time.Milli>(
-      Net.Time.Milli(DELAY_MS * BACKLOG_FACTOR),
+      Net.Time.Milli(VIDEO_DELAY_MS * BACKLOG_FACTOR),
     );
     const sync = new Watch.Sync({
       delay: delaySig,
       buffer: bufferSig,
+      probe: session.probe,
+    });
+    const audDelaySig = new Signal<Net.Time.Milli>(Net.Time.Milli(AUDIO_DELAY_MS));
+    const audBufferSig = new Signal<Net.Time.Milli>(
+      Net.Time.Milli(AUDIO_DELAY_MS * BACKLOG_FACTOR),
+    );
+    const audSync = new Watch.Sync({
+      delay: audDelaySig,
+      buffer: audBufferSig,
       probe: session.probe,
     });
     const camSource = new Watch.Video.Source({
@@ -555,7 +591,7 @@ export class MoqCall {
     const audDecoder = new Watch.Audio.Decoder({
       enabled: audEnabled,
       source: audSource,
-      sync,
+      sync: audSync,
     });
     const canvas = document.createElement("canvas");
     const screenCanvas = document.createElement("canvas");
@@ -574,6 +610,7 @@ export class MoqCall {
       broadcast,
       scrBroadcast,
       sync,
+      audSync,
       camSource,
       camDecoder,
       camRenderer,
@@ -922,11 +959,13 @@ export class MoqCall {
     d.analyser = null;
     d.levelData = null;
     d.sync.close();
+    d.audSync.close();
     d.broadcast.close();
     d.scrBroadcast.close();
   }
 
-  /** Playback delay behind the live edge, ms. The wire media timestamps
+  /** Playback delay behind the live edge, ms, audio clock (the
+   *  conversational metric — see AUDIO_DELAY_MS). The wire media timestamps
    *  are the publisher's `performance.now()` (page uptime), so
    *  `out.reference` (viewer-now minus frame-ts) bakes in the offset
    *  between the two pages' load times. The root catalog carries the
@@ -938,15 +977,18 @@ export class MoqCall {
    *  timestamp has not arrived yet. */
   private delayOf(d: Downlink): number {
     const fallback = () =>
-      Number(d.sync.out.reference.peek() ?? 0) + Number(d.sync.out.delay.peek());
-    const ts = d.sync.out.timestamp.peek();
+      Number(d.audSync.out.reference.peek() ?? 0) +
+      Number(d.audSync.out.delay.peek());
+    const ts = d.audSync.out.timestamp.peek();
     if (ts === undefined) return fallback();
     const clock = d.broadcast.out.catalog.peek()?.clock;
     if (!clock) return fallback();
     const frameWallMs = (clock.wall / clock.timescale) * 1000 + Number(ts);
     const nowWallMs =
       performance.timeOrigin - Catalog.MOQ_EPOCH_UNIX_MILLIS + performance.now();
-    return nowWallMs - frameWallMs + Number(d.sync.out.delay.peek());
+    return (
+      nowWallMs - frameWallMs + Number(d.audSync.out.delay.peek())
+    );
   }
 
   private viewOf(d: Downlink): DownlinkView {
@@ -958,7 +1000,7 @@ export class MoqCall {
       screenFrames: d.scrDecoder.out.stats.peek()?.frameCount ?? 0,
       audioBytes: d.audDecoder.out.stats.peek()?.bytesReceived ?? 0,
       delay: this.delayOf(d),
-      jitter: Number(d.sync.out.jitter.peek()),
+      jitter: Number(d.audSync.out.jitter.peek()),
       width: d.canvas.width,
       height: d.canvas.height,
     };
