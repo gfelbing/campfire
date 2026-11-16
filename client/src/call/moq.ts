@@ -419,14 +419,15 @@ export class MoqCall {
             keyframeInterval: Net.Time.Milli(1000),
             // Auto-sizing bound (the capture is capped at 800x600):
             // nothing above it, so the bandwidth grant has a ceiling to
-            // scale down from. The e2e harness overrides this (320x240):
-            // headless software H264 at 800x600 in two tabs saturates the
-            // box (the OpenH264 reinit storms alone eat ~4 cores), which
-            // pushes the whole transport ~800 ms behind the live edge and
-            // makes any latency-sensitive assertion meaningless there.
+            // scale down from. 480x360 (§9.2): the software pipeline
+            // (OpenH264 encode + WebCodecs decode, both ends) is the CPU
+            // driver, and pixels × fps is what it scales with — bitrate
+            // alone does not cut it (OpenH264 ignores bitrate without
+            // frame-skip). −65% pixel work vs 800x600. The e2e harness
+            // overrides this (320x240, see the launch args).
             maxPixels:
               (__CAMPFIRE_DEBUG__ && window.__campfire_video_maxpx) ||
-              800 * 600,
+              480 * 360,
             frameRate: 30,
             // Hard bitrate cap (docs/dev/latency-optimization.md §2 step 4):
             // without it a video rendition may claim the entire uplink
