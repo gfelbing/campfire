@@ -548,3 +548,95 @@ suite + a manual two-tab run.
   bytes without touching CPU; the burst pressure is already capped and
   BBR-paced.
 
+## 10. Join-time spikes (step 11)
+
+Observation: a/v is close and stable in steady state, but the first
+10–20 s of a call shows large delay spikes, especially on the audio
+number, then everything settles. Steady state is what the previous
+steps tuned; the join transient was never designed — several mechanisms
+converge at once, each with a *different spike shape*. The shape tells
+which mechanism is responsible, so the plan starts with measurement.
+
+### 10.1 Mechanism candidates (ranked, each with its signature)
+
+1. **Decode-loop pacing resets during ring warmup** — most likely for
+   the *audio* number. The audio ring parks (STALLED) until the 40 ms
+   floor fills; the decode loop's insert pacing waits for the ring
+   playhead. The vendored bounded-pacing patch gives that wait a 2 s
+   grace, then **resets the ring** (re-anchor at the newest frame). At
+   join, the ring is empty/parked for a while (the first groups still
+   travel, the AudioContext resumes, the decoder warms up), so the
+   2 s grace can fire repeatedly: reset → re-anchor → play a burst →
+   park again — the playout delay swings for seconds until every stage
+   is warm. Signature: **oscillation** (delay swings up/down every
+   ~2 s), `audStalled` flipping, resets visible via `audClock` jumps.
+2. **Subscription opens before the Sync budget is final** — the
+   media Sources subscribe with `maxAge = sync.out.maxAge`
+   (delay + buffer). If the subscription opens while the budget signal
+   still carries a different value (the audio override in e2e, or an
+   initial "auto" evaluation), the SFU delivers whatever that first
+   value allowed and a later SUBSCRIBE_UPDATE has to walk it back —
+   backlog already buffered then drains (or drops). Signature:
+   **instant high, decaying** (a fixed backlog at anchor time).
+3. **Video keyframe hunt contaminating the shared start** — the first
+   delivered video group starts at the previous keyframe (up to one GOP
+   behind the live edge); the first `received()` anchors the Sync
+   reference at that age, and everything after holds until the
+   re-anchor logic pulls it in. One-time, decays within the first
+   seconds. Signature: video number high *first*, audio following via
+   the shared startup churn.
+4. **Pipeline warmup, not a buffer problem** — OpenH264's first GOPs
+   are slow, the audio decoder's wasm (libav polyfill) compiles on
+   first use, the AudioContext starts, the SFU origin is created on the
+   first admitted session and its pool/cache fills. For the first
+   seconds the *consumer* is slower than real time, so a backlog forms
+   that the budget then skips. Signature: **delayed peak** (delay grows
+   for a few seconds, then falls to steady state).
+
+### 10.2 Step 1 — measure the shape
+
+The e2e hooks already expose everything needed: `delay` (audio
+playout), `videoDelay`, `jitter`, `audClock` (ring playhead),
+`audBuf` (buffered ranges), `audStalled`, `bufferedMs`, plus
+`__campfire_wire_count`. Add a harness step (or extend 5b): after the
+downlink goes live, sample all of it every 250 ms for 30 s, log one line
+per sample, and print a compact summary (max delay, time to < 150 ms,
+reset count via audClock discontinuities). Run it 3× and classify the
+shape per 10.1. No client changes needed.
+
+### 10.3 Likely fixes (per shape)
+
+- **Shape A (oscillation, resets)** — the bounded-pacing reset is the
+  trigger. Fix in the vendored `@moq/watch` patch: during warmup (no
+  anchor yet, or ring length 0 since the last reset), don't count the
+  grace from zero repeatedly — anchor on the newest frame immediately
+  when the wait expires and the ring is empty (that is what the reset
+  does), but suppress the intermediate park/unpark churn by keeping the
+  ring stalled until the floor fills *before* releasing the decode
+  loop. Concretely: gate the decode loop's insert pacing on
+  `!ring.stalled` so it never waits against an empty ring, removing the
+  2 s grace path at startup entirely.
+- **Shape B (instant high, decaying)** — the subscription opened with a
+  stale budget. Fix in the client: wire the Sources' subscribe step to
+  wait for the Sync budget to be settled (the budget signal is set in
+  the Sync constructor, so this may already be fine — the measurement
+  decides), or issue one immediate SUBSCRIBE_UPDATE with the final
+  budget right after the subscription opens.
+- **Shape C (video first)** — nothing to do if the skip budget keeps
+  the total under the a/v offset gate; the 10.3-A fix removes the audio
+  swings that make it visible.
+- **Shape D (delayed peak)** — warmup work is the cost of entry; the
+  budget skips the backlog once it forms. If the peak is large, shrink
+  the warmup itself (precompile the libav wasm at page load, defer the
+  first video decode until the audio ring is anchored) — only if
+  measurement shows it dominates.
+
+### 10.4 Acceptance
+
+- e2e: the new sampling step asserts a settled bound instead of a
+  single-shot reading — e.g. within 15 s of the downlink going live,
+  audio playout delay < 300 ms and no 2 s-period oscillation (audClock
+  monotonic modulo resets).
+- Manual: the first seconds of a two-tab call stay within ~300 ms of
+  the steady-state numbers; the tile numbers don't swing.
+
