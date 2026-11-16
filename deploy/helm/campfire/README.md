@@ -9,22 +9,36 @@ presence are stateful; see docs/ops/README.md) on its one port: 443 **TCP + UDP*
 |---|---|
 | `Namespace` | created when `namespace.create: true` (default) — every chart resource lands there; `create: false` keeps resources in the release namespace |
 | `Deployment` (Recreate) | one pod: `campfire --listen 0.0.0.0:443 --cert /certs/tls.crt --key /certs/tls.key` |
-| `Service` | port 443 TCP (`appProtocol: https`) + 443 UDP (`appProtocol: kubernetes.io/h3c`) |
 | `Certificate` (cert-manager.io/v1, optional) | `certificate.create: true` issues `secretName` for `values.domain` via your issuer; set `false` to mount an existing `kubernetes.io/tls` secret instead (e.g. a wildcard cert). Either way the secret is mounted read-only at `/certs` in the pod |
-| `IngressRouteTCP` (traefik.io/v1alpha1) | routes 443/tcp from the Traefik entrypoint to the service with **`tls.passthrough: true`** and an SNI match on `values.domain` — Traefik never terminates TLS; the pod does (QUIC/WebTransport require the server's own certificate in the handshake) |
-| `IngressRouteUDP` (traefik.io/v1alpha1) | forwards 443/udp datagrams raw to the service (QUIC/HTTP/3) |
+
+`network.kind` selects how 443 reaches the pod (docs/dev/latency-optimization.md §2
+step 2):
+
+- `hostNetwork` (default): the pod runs on the host's network stack (`hostNetwork:
+  true` + `dnsPolicy: ClusterFirstWithHostNet`) — the server's QUIC/UDP and TCP
+  sockets are the node's 443. No `Service`, no Traefik routes; nothing relays or
+  NATs the media path (the UDP entry hop added latency and conntrack could drop
+  live QUIC flows). Requires a free host port 443; `values.domain` must resolve to
+  the node and `values.external` must be the node's address.
+- `traefik`: the previous shape. Creates:
+  - `Service` — port 443 TCP (`appProtocol: https`) + 443 UDP (`appProtocol: kubernetes.io/h3c`)
+  - `IngressRouteTCP` (traefik.io/v1alpha1) — routes 443/tcp from the Traefik entrypoint to the service with **`tls.passthrough: true`** and an SNI match on `values.domain` — Traefik never terminates TLS; the pod does (QUIC/WebTransport require the server's own certificate in the handshake)
+  - `IngressRouteUDP` (traefik.io/v1alpha1) — forwards 443/udp datagrams raw to the service (QUIC/HTTP/3)
 
 ## Requirements
 
-- Traefik v2+ with the CRDs installed and **two entrypoints published on
-  port 443**: a TCP one (`traefik.tcp.entrypoint`, default `websecure`) and
-  a UDP one (`traefik.udp.entrypoint`, default `quic`).
+- With `network.kind: hostNetwork` (default): a free host port 443 on the node the
+  pod lands on, and clients that reach that node. TLS material still comes from
+  cert-manager or an existing secret (see below).
+- With `network.kind: traefik`: Traefik v2+ with the CRDs installed and **two
+  entrypoints published on port 443**: a TCP one (`traefik.tcp.entrypoint`,
+  default `websecure`) and a UDP one (`traefik.udp.entrypoint`, default `quic`).
 - TLS material for the pod: either cert-manager (chart creates the
   `Certificate`) or an existing `kubernetes.io/tls` secret — e.g. a wildcard
   cert you already requested (set `certificate.create: false` and
   `certificate.secretName`). The cert must be publicly trusted for browser
   QUIC (Chromium trusts only built-in roots for UDP/QUIC — docs/arch/decisions.md).
-  Note the TCP route is TLS **passthrough**, so Traefik's own
+  Note the traefik-mode TCP route is TLS **passthrough**, so Traefik's own
   `certResolver` cannot serve this route: the pod terminates TLS itself.
 
 ## Using an existing wildcard certificate
@@ -107,13 +121,14 @@ image:
 domain: campfire.example.com       # cert dnsName + IngressRouteTCP SNI match
 external: ""                       # public "IP:port" for --external (Alt-Svc);
                                    # empty = flag omitted
+network: { kind: hostNetwork }     # or traefik: { tcp/udp entrypoints } below
 certificate:
   create: true                     # false = bring your own kubernetes.io/tls secret
   secretName: campfire-tls
   issuerRef:
     name: my-issuer
     kind: ClusterIssuer
-traefik:
+traefik:                           # network.kind: traefik only
   tcp: { entrypoint: websecure }
   udp: { entrypoint: quic }
 service: { type: ClusterIP }
@@ -124,9 +139,10 @@ auth:                              # OpenID Connect; see "Authentication"
   openid: { enabled: false }
 ```
 
-Note: the Traefik CRDs (routes) live in the chart's namespace and reference
-the Service there — make sure Traefik's `kubernetesCRD` provider watches
-that namespace (the official chart watches all namespaces by default).
+Note: in traefik mode, the Traefik CRDs (routes) live in the chart's
+namespace and reference the Service there — make sure Traefik's
+`kubernetesCRD` provider watches that namespace (the official chart
+watches all namespaces by default).
 
 ## Why no TLS offload
 

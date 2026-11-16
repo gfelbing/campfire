@@ -1,3 +1,4 @@
+{{- if eq .Values.network.kind "traefik" }}
 {{/*
 443/tcp through Traefik WITHOUT TLS offload: `tls.passthrough` forwards the
 ClientHello to the pod, which terminates TLS itself. The QUIC socket lives
@@ -22,3 +23,4 @@ spec:
           port: 443
   tls:
     passthrough: true
+{{- end }}

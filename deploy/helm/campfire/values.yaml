@@ -25,6 +25,20 @@ namespace:
   create: true
   name: campfire
 
+# How 443 reaches the pod (docs/dev/latency-optimization.md §2 step 2):
+#
+#  1. hostNetwork (default) — the pod runs on the host's network stack: the
+#     server's QUIC/UDP and TCP sockets ARE the node's 443. No Service, no
+#     Traefik, no conntrack/DNAT on the media path (the UDP entry hop was a
+#     latency source and conntrack could drop live QUIC flows). Requires a
+#     free host port 443 (stop whatever occupies it) and single-node (the
+#     pod must land where clients point at). DNS: `domain` must resolve to
+#     the node, and `external` must be the node's IP:443.
+#  2. traefik — the previous shape: Traefik terminates nothing but relays
+#     both entrypoints to a ClusterIP Service. Keep for multi-node.
+network:
+  kind: hostNetwork  # or "traefik"
+
 replicaCount: 1  # single instance by design (in-memory state)
 
 maps:
@@ -68,6 +82,7 @@ certificate:
     kind: ClusterIssuer  # or "Issuer"
 
 traefik:
+  # Only used when `network.kind: traefik`.
   tcp:
     # Traefik TCP entrypoint listening on 443/tcp. TLS stays end-to-end:
     # the route uses tls.passthrough, so Traefik forwards the ClientHello

@@ -1,3 +1,4 @@
+{{- if eq .Values.network.kind "traefik" }}
 apiVersion: v1
 kind: Service
 metadata:
@@ -21,3 +22,4 @@ spec:
       protocol: UDP
       {{- /* appProtocol "kubernetes.io/h3c" = HTTP/3 hint for LBs that support it */}}
       appProtocol: kubernetes.io/h3c
+{{- end }}

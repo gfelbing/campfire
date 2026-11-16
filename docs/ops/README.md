@@ -40,10 +40,13 @@ helm install campfire \
 ```
 
 The chart deploys a single instance (`Deployment` with `Recreate` — state is
-in-memory) on 443 TCP + UDP, fronted by Traefik
-(`IngressRouteTCP` with `tls.passthrough: true` + SNI, `IngressRouteUDP`
-forwarding raw datagrams) and either issuing a `Certificate` via cert-manager
-or mounting an existing `kubernetes.io/tls` secret. Full value reference,
+in-memory) on 443 TCP + UDP. `network.kind: hostNetwork` (default) binds
+443 on the node itself — no Service or ingress relay on the media path
+(docs/dev/latency-optimization.md §2 step 2); `network.kind: traefik` keeps
+the relay shape (`IngressRouteTCP` with `tls.passthrough: true` + SNI,
+`IngressRouteUDP` forwarding raw datagrams). Either way the chart issues a
+`Certificate` via cert-manager or mounts an existing `kubernetes.io/tls`
+secret. Full value reference,
 wildcard-cert and private-GHCR notes: the
 [chart README](../../deploy/helm/campfire/README.md).
 
@@ -130,5 +133,5 @@ identity-free logs (random user ids).
 | Page loads, then "UDP unreachable" explanation page | the network blocks all UDP — HTTP/3 is the only data path |
 | Page works, calls/realtime do not | the browser reached the server over TCP only; check the HTTPS DNS record and `Alt-Svc` (`curl --http3 -sv https://…`) |
 | QUIC fails with a valid-looking cert | not publicly trusted — browsers reject private CAs for QUIC |
-| Chart installs, no traffic | Traefik CRDs must be watched for the chart's namespace (the official chart watches all by default); both 443 entrypoints (TCP + UDP) must exist |
+| Chart installs, no traffic | hostNetwork: port 443 must be free on the node and DNS must point at it; traefik: CRDs must be watched for the chart's namespace (the official chart watches all by default), both 443 entrypoints (TCP + UDP) must exist |
 | New map not visible | maps are scanned **at startup** — restart the pod/process after adding files; parse errors are skipped silently by design (check server logs) |

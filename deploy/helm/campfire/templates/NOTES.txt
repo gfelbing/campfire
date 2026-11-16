@@ -6,12 +6,18 @@ Campfire is deploying. One replica, one port (443 TCP + UDP).
    Check: `kubectl get certificate -n {{ include "campfire.namespace" . }}`{{ else }}using your
    pre-existing secret `{{ .Values.certificate.secretName }}`{{ end }}.
 
+{{- if eq .Values.network.kind "traefik" }}
 2. Traefik routes:
    - TCP 443 via entrypoint `{{ .Values.traefik.tcp.entrypoint }}` with TLS
      passthrough (SNI match: {{ .Values.domain }}) — the pod terminates TLS.
    - UDP 443 via entrypoint `{{ .Values.traefik.udp.entrypoint }}` — raw
      datagrams to the pod (QUIC/HTTP/3).
    Make sure both Traefik entrypoints exist and are published on 443.
+{{- else }}
+2. hostNetwork: the pod binds 443 (TCP + UDP) on the node directly — no
+   Service, no Traefik. Make sure port 443 is free on the node and DNS
+   points {{ .Values.domain }} at it.
+{{- end }}
 
 3. Pod mount: the certificate secret is mounted read-only at /certs and the
    server is started with --cert /certs/tls.crt --key /certs/tls.key.
@@ -24,4 +30,5 @@ Campfire is deploying. One replica, one port (443 TCP + UDP).
 {{- end }}
 
 Open https://{{ .Values.domain }}/ once DNS points {{ .Values.domain }} at
-the Traefik entrypoint and the certificate is Ready.
+the node (hostNetwork) or the Traefik entrypoint (traefik) and the
+certificate is Ready.

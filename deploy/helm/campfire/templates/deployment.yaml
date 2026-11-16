@@ -25,6 +25,15 @@ spec:
       {{- if not (or (eq .Values.maps.kind "persistentVolume") (eq .Values.maps.kind "hostPath")) }}
       {{- fail (printf "maps.kind must be persistentVolume or hostPath, got %q" .Values.maps.kind) }}
       {{- end }}
+      {{- if not (or (eq .Values.network.kind "hostNetwork") (eq .Values.network.kind "traefik")) }}
+      {{- fail (printf "network.kind must be hostNetwork or traefik, got %q" .Values.network.kind) }}
+      {{- end }}
+      {{- if eq .Values.network.kind "hostNetwork" }}
+      # The server binds 443 on the node itself (values.yaml network.kind):
+      # no Service or ingress relay in front of the QUIC/UDP media path.
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      {{- end }}
       containers:
         - name: campfire
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
