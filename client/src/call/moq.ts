@@ -269,6 +269,10 @@ interface Downlink {
   /** Level meter tap (the decoder's own audio context; see wireAudio). */
   analyser: AnalyserNode | null;
   levelData: Uint8Array<ArrayBuffer> | null;
+  /** Stall-watchdog state (the re-announce pulse trigger, §10): last
+   *  decoded-audio total and the seconds it has been frozen. */
+  stallSeconds: number;
+  lastAudioBytes: number;
   /** E2e recorder tap for this downlink (build:e2e only; re-attached by
    *  wireAudio when the audio graph rewires). */
   recorderProc: ScriptProcessorNode | null;
@@ -335,6 +339,8 @@ export class MoqCall {
   /** 10 Hz level-meter poll (see wireAudio); null when the session is down. */
   private levelTimer: number | null = null;
   private hookTimer: number | null = null;
+  /** Stall watchdog (the re-announce pulse trigger), 1 Hz. */
+  private stallTimer: number | null = null;
 
   private constructor(
     room: string,
@@ -746,6 +752,8 @@ export class MoqCall {
       analyser: null,
       levelData: null,
       recorderProc: null,
+      stallSeconds: 0,
+      lastAudioBytes: 0,
       muted: false,
       lastStatus: "subscribing",
       camEnabled,
@@ -780,40 +788,47 @@ export class MoqCall {
         this.onDownlinkChange?.(id, next);
       }),
     );
-    // Re-announce guard (plan 3): the main hang can be re-announced while
-    // the peer stays in the call (their session reloads, or the SFU
-    // re-routes it), which re-routes the hang server-side and kills the
-    // existing v/a subscriptions. The library only re-subscribes when the
-    // active consumer's identity or a deep-unequal config changes; a
-    // same-content re-announce changes neither, so the track keeps its
-    // name but the subscription is dead. Watching the catalog and the
-    // active consumer and pulsing the three `enabled` gates off→on forces
-    // each decoder's subscribe effect to re-run, re-subscribing the same
-    // track on the current consumer (the canvas keeps its last frame; the
-    // off window is covered by the playback buffer). The first change of
-    // each signal is the initial load, not a re-announce, so it is
-    // skipped.
-    let catalogFirst = true;
-    let activeFirst = true;
-    d.unsubs.push(
-      d.broadcast.out.catalog.subscribe(() => {
-        if (catalogFirst) {
-          catalogFirst = false;
-          return;
-        }
-        this.schedulePulse(d);
-      }),
-      d.broadcast.out.active.subscribe(() => {
-        if (activeFirst) {
-          activeFirst = false;
-          return;
-        }
-        this.schedulePulse(d);
-      }),
-    );
+    // Re-announce guard (plan 3 → §10): a re-announce re-routes the hang
+    // server-side, which kills the existing v/a subscriptions (the track
+    // keeps its name, the subscription is dead — the library only
+    // re-subscribes on an identity or deep-unequal config change). The
+    // original guard watched the catalog and pulsed the three `enabled`
+    // gates on every change — but at startup the peer's catalog churns
+    // anyway (dimensions settling, estimates), so each warmup re-announce
+    // tore the subscriptions down and re-anchored the ring: the
+    // join-time spikes. The trigger is now the *symptom*: decoded audio
+    // frozen for ≥ 2 s while the broadcast is live → pulse once
+    // (cooldown after). Mute does not false-positive (the sender keeps
+    // encoding silence frames); camera-off omits the rendition without
+    // touching audio.
+    this.stallTimer = window.setInterval(() => this.checkStalls(), 1000);
     this.downlinks.set(id, d);
     this.refreshDownlinks();
     return this.viewOf(d);
+  }
+
+  /** The stall watchdog tick (1 s): decoded audio frozen for ≥ 2 s while
+   *  the broadcast is live → pulse the downlink's gates once (cooldown
+   *  via the negative count). See the re-announce guard comment at the
+   *  pulse wiring. */
+  private checkStalls(): void {
+    for (const d of this.downlinks.values()) {
+      if (this.statusOf(d) !== "live") {
+        d.stallSeconds = 0;
+        continue;
+      }
+      const bytes = d.audDecoder.out.stats.peek()?.bytesReceived ?? 0;
+      if (bytes > 0 && bytes === d.lastAudioBytes) {
+        d.stallSeconds++;
+        if (d.stallSeconds >= 2) {
+          d.stallSeconds = -2; // cooldown: no re-pulse for ~4 s
+          this.schedulePulse(d);
+        }
+      } else {
+        d.stallSeconds = 0;
+      }
+      d.lastAudioBytes = bytes;
+    }
   }
 
   /** Remove a participant's downlink (they left the call). */
@@ -952,6 +967,10 @@ export class MoqCall {
     if (this.levelTimer !== null) {
       window.clearInterval(this.levelTimer);
       this.levelTimer = null;
+    }
+    if (this.stallTimer !== null) {
+      window.clearInterval(this.stallTimer);
+      this.stallTimer = null;
     }
     this.allocator?.close();
     this.allocator = null;
