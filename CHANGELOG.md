@@ -4,6 +4,57 @@ All notable releases of campfire. Versions follow calendar-agnostic
 semver; releases are cut by tagging `vX.Y.Z` (the Docker image is built
 and pushed to GHCR on each tag).
 
+## [0.0.17] — 2026-11-16
+
+The instant-audio release: the call's audio path sheds every adjustable
+millisecond — playback delay down to one ring floor, per-media clocks,
+minimum browser buffers — and the call tiles show both media's latency
+so a spike can be blamed on the right medium. The full analysis and the
+stage-by-stage budget live in `docs/dev/latency-optimization.md`.
+
+### Changed
+
+- Call audio plays in instant mode: the ring floor is 20 ms (two 10 ms
+  Opus frames, the smallest value the ring's catch-up drain tolerates
+  stably — a 3 ms floor destabilized it and dropped every frame, seen as
+  a runaway delay number), with the tile's audio number now reading
+  ~25–40 ms instead of 100+. Audio and video run on separate playback
+  clocks (100/400 ms targets became ~20/400), so a video buffer burst
+  can no longer hold audio back; a/v sync is explicitly secondary.
+- The uplink Opus encoder emits 10 ms frames (the browser default is
+  20 ms, and a frame is only emitted when full) with in-band FEC
+  (`useinbandfec`, `packetlossperc` 10) — packetization halved, loss
+  reconstructed from the next frame's redundancy since there is no
+  retransmission budget.
+- Both AudioContexts (publish capture and watch decoder) run with
+  `latencyHint: 0` instead of `"interactive"` — the smallest output
+  buffer Chrome honors, ~10–20 ms less per side. Extended the vendored
+  `@moq/watch` patch (new main-chunk replacement) and `@moq/publish`
+  patch (now a replacement table).
+- The audio uplink batches 5 frames per group (`groupDuration` 50 ms):
+  the stock per-frame groups made the SFU open one QUIC stream per 10 ms
+  frame — 50 opens + FINs per second per subscriber, now 10/s. Frames
+  still stream out of the open group as they encode, so no delivery wait
+  is added. Video already batches per keyframe via the legacy container.
+
+### Added
+
+- The call tiles show both media's e2e playback delay — video number,
+  then audio number, each in its own color (video blue, audio green)
+  matching the tile sparkline's two lines (video upper band, audio lower
+  band), with RTT and resolution appended. Both numbers ride the two
+  free-drifting Sync clocks; `delay` keeps meaning the audio clock
+  downstream, e2e hooks included.
+- A pipeline audit and optimization plan (`docs/dev/latency-optimization.md`
+  §6–§7): the stage-by-stage mouth-to-ear budget, the library constraints
+  that rule out literal `"instant"` mode, and the remaining (mostly
+  hardware-bound) floor.
+
+### Fixed
+
+- Dependencies: moq-tokio 0.19.36 (pairs with the vendored moq-net
+  0.3.23), @moq/net 0.4.8, pixi.js 8.23, eslint 10.15, vite 6.4.6.
+
 ## [0.0.16] — 2026-11-16
 
 The latency release: call audio gets priority everywhere — in the
