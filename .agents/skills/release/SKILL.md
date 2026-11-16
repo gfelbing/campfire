@@ -112,15 +112,6 @@ old entry to remain).
 - Show the user the changelog entry and the commit; after approval:
   `git push origin main && git push origin vX.Y.Z`.
 
-## 5. Confirm
-
-- `git ls-remote origin refs/tags/vX.Y.Z` shows the tag.
-- The `docker` workflow builds on the tag; watch it if `gh` is
-  available (`gh run list --workflow=docker`) and report the outcome.
-  Image tags land as `ghcr.io/gfelbing/campfire:X.Y.Z`, `:X.Y`, and
-  `:latest`; the Helm chart is pushed as OCI to
-  `ghcr.io/gfelbing/helm`.
-
 ## Edge cases
 
 - Version argument malformed (not `X.Y.Z`): ask, do not coerce.
