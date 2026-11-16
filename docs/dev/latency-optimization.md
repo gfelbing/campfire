@@ -254,3 +254,50 @@ Remaining follow-ups (not in this pass): the datagram-audio epic (step 4), the
 measurement runs of §4 against a real deployment (steps 1–6 are implemented but
 their effect is unverified until measured), and the SO_REUSEPORT reader sharding
 only if profiling still shows demux contention.
+
+## 6. Audio latency floor (step 7)
+
+Observation after steps 1–3: on a clean local link (two tabs on one machine), audio
+still lands at ~100+ ms mouth-to-ear, while the target for near-lossless links is
+15–20 ms. The remaining budget is a stack of fixed floors, each verified in the
+vendored `@moq` sources:
+
+| Stage | Cost today | Where |
+|---|---|---|
+| Opus packetization | 20 ms (frame emitted only when full) | `@moq/publish` `frameDuration` default (`pe = 20ms`; allowed: 2.5/5/10/20/40/60) |
+| Playback delay target | 100 ms (`AUDIO_DELAY_MS`, fixed) | `moq.ts`; the audio ring **parks** until buffered ≥ the delay target, then plays the whole target behind the live edge — this is the dominant term |
+| Ring capacity headroom | 0 extra (capacity 2×delay, but playback sits `delay` behind WRITE) | `@moq/watch` `SharedRingBuffer` (`LATENCY` control = `sync.out.delay`) |
+| AudioContext output | ~10–20 ms (`latencyHint: "interactive"`, already minimal) | `@moq/watch` audio decoder |
+| Capture + codec + QUIC transport | ~5–10 ms on localhost | AudioWorklet quanta + frame group emission + one-RTT delivery |
+
+With `AUDIO_DELAY_MS = 100`, the observed 100+ ms is the configured floor — same
+conclusion as step 1, just at a lower setting. To reach 15–20 ms:
+
+1. **Adaptive audio delay: `delay: "auto"` instead of the fixed 100.**
+   `@moq/watch`'s Sync computes `auto` as `max(20 ms, minRTT × 1.25) + rendition
+   jitter` from the connection probe — a 20 ms floor exactly on healthy links,
+   growing automatically on poor ones. A fixed tiny value (e.g. 15 ms) would
+   underrun on any real network; `auto` keeps local at the floor and remote
+   calls usable without a config surface. The `Sync.in.buffer` input must become
+   a small fixed value (e.g. 50 ms) instead of `2 × AUDIO_DELAY_MS`: it is the
+   *backlog* budget (how far ahead of the live edge buffered media may sit), not
+   a latency term, and the ring's catch-up drain (already implemented) recovers
+   the backlog by playing faster instead of skipping.
+2. **Opus `frameDuration: 10` on the uplink encoder.** Halves packetization
+   (20 → 10 ms) for 50 frames/s — still trivial bandwidth. 2.5/5 ms exist but
+   Chromium's Opus encoder quality collapses and per-frame overhead climbs; 10 ms
+   is the sweet spot.
+3. **Verification.** Local two-tab beep test (§4 protocol): expect ≈ 20 ms delay
+   target + 10 ms packetization + ~15 ms output/capture hardware = 45 ms wall
+   mouth-to-ear, with the *adjustable* software budget at ~30 ms. The hardware
+   capture/output latency (mic pipeline with `echoCancellation`, speaker buffer)
+   is not reachable from the app and bounds the ideal below ~40 ms total.
+
+Note on what "delay" means in the UI after this change: the tile's audio number
+drops to ~20–40 ms and the video number stays at 400 ms — the two clocks drift by
+design (product decision: audio latency outranks a/v sync), so the a/v divergence
+growing from 300 to ~380 ms is expected and acceptable.
+
+Explicitly not in this step: `"instant"` mode (zero delay) — it disables the ring
+and pacing entirely; any hiccup is a hard underrun. `auto`'s 20 ms floor is the
+cheapest safety margin that meets the target.
