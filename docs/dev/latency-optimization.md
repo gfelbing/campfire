@@ -291,20 +291,28 @@ And zero is physically meaningless regardless: the worklet drains in 128-sample
 quanta (~2.7 ms), so the smallest floor that exists is one quantum. Implemented
 therefore:
 
-- `AUDIO_DELAY_MS = 3` — one worklet quantum. `Sync.wait` returns immediately
-  for waits < 5 ms, the ring unstalls on the first (10 ms) Opus frame, and the
-  pacing machinery contributes nothing measurable. This is instant mode with the
-  ring kept alive; the audio `Sync` instance stays wired because the decoder API
-  requires it, but its delay no longer gates playback.
+- ~~`AUDIO_DELAY_MS = 3`~~ **revised to 20** after a live regression: at a 3 ms
+  floor the ring's catch-up drain (`rate = 1 + excess/floor`, capped 2.5×) went
+  unstable — the floor sits at roughly one worklet quantum, so any backlog
+  spiked the rate to its cap, the playhead outran the arrivals, and every
+  subsequent frame was dropped by the ring's `behind` guard. The observable was
+  a runaway delay number (1000–2000 ms and climbing): the newest *received*
+  frame's timestamp stopped advancing while the playhead ran 2.5× real time.
+  The floor must dominate quantum + frame size; 20 ms — two 10 ms frames, and
+  exactly the library's `"auto"` floor — keeps the drain gentle (a one-frame
+  backlog is rate ≈ 1.5×, decaying). Still sub-perceptual as pacing; the tile's
+  audio number should now read ~20–40 ms.
 - `frameDuration: 10` on the uplink Opus encoder — packetization 20 → 10 ms.
-- Accepted trade-off, made explicit: there is no jitter buffer to ride out
-  arrival bursts. A late frame is a hard underrun (the catch-up drain cannot
-  help what has not arrived); on lossy links this means gaps instead of drift.
+  (Kept through the 3 ms regression — the instability was the drain rate, not
+  the frame size.)
+- Accepted trade-off, made explicit: the jitter buffer is thin (~20 ms). A late
+  frame beyond it is a hard underrun (the catch-up drain cannot help what has
+  not arrived); on lossy links this means gaps instead of drift.
   `packetlossperc`/in-band FEC remains the loss mitigation.
 
-Expected budget after this step: ≈ 10 ms packetization + ≤ 3 ms ring floor +
-~15 ms output/capture hardware ≈ 30–40 ms wall mouth-to-ear on a clean link;
-the software-adjustable portion is ~13 ms. The hardware capture/output latency
+Expected budget after this step: ≈ 10 ms packetization + ≤ 20 ms ring floor +
+~15 ms output/capture hardware ≈ 45 ms wall mouth-to-ear on a clean link; the
+software-adjustable portion is ~30 ms. The hardware capture/output latency
 (mic pipeline with `echoCancellation`, speaker buffer) is not reachable from the
 app and bounds the ideal below that.
 

@@ -29,18 +29,25 @@ import { Signal } from "@moq/signals";
 
 /** Playback delay behind the live edge, per medium (docs/dev/
  *  latency-optimization.md §6 step 7). Audio runs in *instant mode*: the
- *  smallest floor the ring physically allows. The worklet drains in
- *  128-sample quanta (~2.7 ms), and a ring of zero depth is both
- *  unsupported by the library (`@moq/watch` d.ts: "a ring with no depth
- *  underruns" — the decoder disables its decode loop entirely in
- *  `"instant"` mode, and the postMessage ring throws on a 0-sample
- *  latency) and physically meaningless below one quantum. So the audio
- *  delay is one worklet quantum: `Sync.wait` returns immediately for
- *  waits < 5 ms, the ring unstalls on the first (10 ms) Opus frame, and
- *  pacing contributes nothing measurable. The trade-off, accepted here,
- *  is that there is no jitter buffer to ride out arrival bursts: a late
- *  frame is a hard underrun (the catch-up drain cannot help what has not
- *  arrived), which on lossy links means gaps instead of drift.
+ *  smallest floor the ring tolerates stably. The ring's catch-up drain
+ *  consumes at `1 + excess/floor` (capped 2.5×), so the floor must
+ *  dominate the worklet quantum (128 samples ≈ 2.7 ms) plus one Opus
+ *  frame — at a 3 ms floor the rate formula spikes to its 2.5× cap on
+ *  every quantum, the playhead outruns the arrivals, and every
+ *  subsequent frame is dropped as behind the cursor (observed as a
+ *  runaway 1000–2000 ms delay number: the newest *received* frame's
+ *  timestamp stops advancing). 20 ms — two 10 ms frames, and exactly the
+ *  library's `"auto"` floor — keeps the drain gentle (a one-frame
+ *  backlog is rate ≈ 1.5×, decaying) while staying sub-perceptual. The
+ *  audio `Sync` instance stays wired (the decoder API requires it) but
+ *  no longer gates playback meaningfully: `Sync.wait` returns
+ *  immediately for waits < 5 ms.
+ *
+ *  The trade-off, accepted here, is a thin jitter buffer: a late frame
+ *  beyond ~20 ms is a hard underrun (the catch-up drain cannot help what
+ *  has not arrived), which on lossy links means gaps instead of drift.
+ *  In-band FEC remains the loss mitigation; `delay: "auto"` is the
+ *  one-line rollback for poor networks.
  *
  *  Video trails further (400 ms) — a/v sync is explicitly secondary
  *  (docs/dev/latency-optimization.md), and separate `Sync` clocks mean a
@@ -49,7 +56,7 @@ import { Signal } from "@moq/signals";
  *  Each medium's `Sync.in.buffer` = 2 × its delay: the backlog budget
  *  (how far ahead of the live edge buffered media may sit) that keeps
  *  the backlog inside the ring capacity. */
-const AUDIO_DELAY_MS = 3;
+const AUDIO_DELAY_MS = 20;
 const VIDEO_DELAY_MS = 400;
 /** Backlog budget as a multiple of the delay (see AUDIO_DELAY_MS). */
 const BACKLOG_FACTOR = 2;
