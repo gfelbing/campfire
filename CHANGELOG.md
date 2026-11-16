@@ -4,6 +4,63 @@ All notable releases of campfire. Versions follow calendar-agnostic
 semver; releases are cut by tagging `vX.Y.Z` (the Docker image is built
 and pushed to GHCR on each tag).
 
+## [0.0.16] — 2026-11-16
+
+The latency release: call audio gets priority everywhere — in the
+playback clock, on the wire's congestion window, and in the deployment's
+datagram path — while the video tracks stop monopolizing the connection.
+The analysis behind every number lives in `docs/dev/latency-optimization.md`.
+
+### Changed
+
+- Call audio plays 100 ms behind the live edge instead of the shared
+  300 ms (the bulk of the observed mouth-to-ear latency even on a clean
+  link), and camera/screen run on their own playback clock at 400 ms:
+  a/v sync is explicitly secondary, so a video buffer burst can no
+  longer hold audio playback back. The downlink `delay`/`jitter` shown
+  in the roster (and read by the e2e hooks) now report the audio clock,
+  the conversational metric. The uplink Opus encoder enables in-band
+  FEC (`useinbandfec`, `packetlossperc` 10) — the audio budget has no
+  room for retransmission, so a lost frame is reconstructed from the
+  next frame's redundancy instead.
+- Video renditions carry hard bitrate caps (1.5 Mbps camera, 800 kbps
+  screen). Without a cap a rendition could claim the entire uplink
+  estimate, and each 1 s keyframe flight then saturated the shared
+  connection's congestion window — stalling every audio stream on the
+  connection at once, the "spikes hit both incoming streams
+  simultaneously" signature.
+- The QUIC endpoint runs BBR congestion control instead of quinn's
+  Cubic default: Cubic is loss-driven, so a keyframe flight collapsed
+  the window and queued burst behind burst; BBR paces to the estimated
+  bottleneck bandwidth, keeps queues shallow, and recovers without the
+  multiplicative collapse. Flow-control windows stay at quinn's
+  defaults (verified generous: unbounded connection receive, 1.25 MiB
+  per stream).
+- The demux socket hands datagrams to quinn in batches (`poll_recv`
+  drains the whole queue into the buffer array quinn offers) and
+  recycles its buffers through a pool — no per-packet allocation, one
+  copy each side, instead of a fresh `Vec` plus two mutex hops and two
+  copies per datagram on every call's hot path.
+
+### Added
+
+- Helm chart `network.kind: hostNetwork` (the new default) runs the pod
+  on the host's network stack: the server's QUIC/UDP and TCP sockets are
+  the node's 443, with no Service and no Traefik routes — nothing
+  relays, NATs or conntracks the media path (the UDP entry hop was a
+  latency source and conntrack garbage collection could drop live QUIC
+  flows). `network.kind: traefik` keeps the previous shape for
+  multi-node deployments; the cert-manager certificate flow is
+  unchanged in both modes.
+
+### Fixed
+
+- Expected WebTransport stream teardown (camera toggle, re-announce
+  pulse, session-close race) no longer spams the server log with
+  `h3wt bridge error op=send_stream.write err=StreamClosed` warnings:
+  stream-level terminal errors log at debug, connection-level failures
+  keep warning.
+
 ## [0.0.15] — 2026-11-15
 
 The icon release: the functional UI emoji move out, replaced by a
