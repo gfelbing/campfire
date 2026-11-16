@@ -104,6 +104,9 @@ const AUDIO_DELAY_MAX_MS = 4000;
 // Loop drift (source-offset delta between two correlation anchors in
 // one recording): how much buffering the path added or shed mid-stream.
 const AUDIO_DRIFT_MAX_MS = 300;
+// A/v offset (|video playout delay − audio playout delay|): both are
+// playout-based, the environment's transport lag cancels out.
+const AV_OFFSET_MAX_MS = 500;
 
 /** Synthesize a static 2-frame 320×240 I420 y4m for the fake *video*
  *  device (`--use-file-for-fake-video-capture`): Chromium's generated
@@ -860,7 +863,22 @@ async function assertDownlinkLive(page, label, timeoutMs) {
     console.log(`   correlation: ${(corr.score * 100).toFixed(1)}% (best of ${windows.length} windows, at rec ${(start0 / 1000).toFixed(2)} s, source offset ${(corr.offset / 1000).toFixed(2)} s)`);
     console.log(`   longest gap: ${gapMs} ms`);
     const downBNow = await soleDown(pageB);
-    console.log(`   tile delay: ${downBNow?.delay} ms`);
+    console.log(
+      `   tile delay: audio ${downBNow?.delay?.toFixed(0)} ms, video ${downBNow?.videoDelay?.toFixed(0)} ms`,
+    );
+    // A/v offset: both numbers are now playout-based (what is heard vs
+    // what is shown), so their difference is the sync metric that
+    // matters — the environment's transport lag hits both media
+    // equally and cancels out.
+    if (downBNow && Number.isFinite(downBNow.videoDelay)) {
+      const avOffset = Math.abs(downBNow.videoDelay - downBNow.delay);
+      console.log(`   a/v offset: ${avOffset.toFixed(0)} ms`);
+      if (avOffset > AV_OFFSET_MAX_MS) {
+        throw new Error(
+          `a/v out of sync: video ${downBNow.videoDelay.toFixed(0)} ms vs audio ${downBNow.delay.toFixed(0)} ms (offset ${avOffset.toFixed(0)} ms > ${AV_OFFSET_MAX_MS} ms)`,
+        );
+      }
+    }
     const audDiag = await pageB.evaluate(() => {
       const h = window.__campfire_moq_down;
       if (!h) return null;

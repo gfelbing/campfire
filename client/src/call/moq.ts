@@ -150,6 +150,9 @@ export interface MoqDownHook {
   screenFrames: number;
   audioBytes: number;
   delay: number;
+  /** Video playout delay, ms (the presented frame; see DownlinkView) —
+   *  the a/v-offset assertion reads the difference of the two. */
+  videoDelay: number;
   jitter: number;
   /** Audio ring backlog, ms (the span of buffered media): the catch-up
    *  test watches this drain back to the delay floor after a spike. */
@@ -1258,6 +1261,7 @@ export class MoqCall {
           screenFrames: v.screenFrames,
           audioBytes: v.audioBytes,
           delay: v.delay,
+          videoDelay: v.videoDelay,
           jitter: v.jitter,
           bufferedMs: this.bufferedMsOf(d),
           camTrack: d.camSource.out.track.peek(),
