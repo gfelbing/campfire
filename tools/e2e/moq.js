@@ -604,6 +604,14 @@ async function assertDownlinkLive(page, label, timeoutMs) {
     await pageA.goto(`${URL_BASE}/?room=${ROOM}&name=${NAME_A}&color=%23e05f38`, {
       waitUntil: "domcontentloaded",
     });
+    // Optional: delay B's join (DELAY_JOIN_B_MS) so A publishes alone for
+    // a while first — reproduces "walk into a call where the peer has
+    // been publishing for minutes" (the held-head join spike, §10).
+    const delayJoinB = Number(arg("delay-join-b-ms", "0"));
+    if (delayJoinB > 0) {
+      console.log(`   (holding B back ${delayJoinB} ms so A publishes alone first)`);
+      await sleep(delayJoinB);
+    }
     await pageB.goto(`${URL_BASE}/?room=${ROOM}&name=${NAME_B}&color=%23388ee0`, {
       waitUntil: "domcontentloaded",
     });

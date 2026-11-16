@@ -80,7 +80,7 @@ const MAX_SAFE_AGE_MS: u64 = (1_u64 << 53) - 1;
 fn serving_max_age(version: Version, requested: Duration) -> Duration {
 	match version.carries_max_age() {
 		true => requested,
-		false => Duration::from_millis(MAX_SAFE_AGE_MS),
+		false => requested,
 	}
 }
 

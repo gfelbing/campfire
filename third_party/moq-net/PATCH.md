@@ -29,9 +29,29 @@ A second, cosmetic change: `src/model/frame.rs` uses the renamed
 `AtomicUsize::try_update` (the 0.3.23 source calls the deprecated alias
 `fetch_update`, which the pinned Rust 1.99.1 warns about).
 
+See the end of this file for the campfire `serving_max_age` deviation.
+
 ## Keeping it in sync
 
 Re-vendor when the workspace bumps `moq-net`: download the new crate
 (`cargo download` or the crates.io API), replace `src/` and `Cargo.toml`, and
 re-apply the patch above (or drop it if the new version already carries it).
 Check `CHANGELOG.md` of the new version for other fixes while you are there.
+
+## Campfire deviation: serving_max_age for pre-06 wires
+
+Upstream (0.3.23, `src/lite/publisher.rs`): for Lite01/02 — which cannot
+carry a subscriber max-age on the wire — `serving_max_age` returns
+`MAX_SAFE_AGE_MS` (unbounded), so nothing is ever skipped under legacy
+peers. Campfire serves only its own lite-02 clients, and for live calls
+that budget is actively harmful: the publisher's held batches arrive
+after the live edge (newest-first serving), the subscriber-side skip is
+the only protection, and the startup delay spikes with it
+(docs/dev/latency-optimization.md §10.3).
+
+The deviation honors `requested` for every wire (both match arms return
+it). For a decoded Lite01/02 SUBSCRIBE that is ZERO — i.e. hold legacy
+peers to the live edge, skipping non-latest groups older than nothing.
+The catalog track is single-group-per-update and the fetch/replay paths
+are unaffected (they carry explicit bounds). Re-vendor on a bump and
+re-apply or drop if upstream changes the semantics.
