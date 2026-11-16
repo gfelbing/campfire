@@ -226,3 +226,31 @@ out of the hot path; packet-rate ceiling before queue growth rises.
    machine's mic, measure offset (works for local tabs; remote estimate comes from
    `delay` + probe RTT).
 4. Keep the deltas in this file's changelog section as results land.
+
+## 5. Implementation status
+
+- **Step 1 — done** (`client/src/call/moq.ts`): `AUDIO_DELAY_MS = 100`,
+  `VIDEO_DELAY_MS = 400`, two `Sync` clocks per downlink (audio and video drift
+  freely); downlink `delay`/`jitter` in the roster and e2e hooks now report the
+  audio clock. Uplink Opus gets `useinbandfec: true`, `packetlossperc: 10`.
+- **Step 2 — done** (`deploy/helm/campfire`): `network.kind: hostNetwork` (default)
+  runs the pod on the host network stack, Service/IngressRoutes skipped;
+  `network.kind: traefik` keeps the old shape.
+- **Step 3 — done** (`tls.rs`): BBR congestion controller. Flow-control windows were
+  verified against quinn 0.11.19 defaults (connection receive unbounded, stream
+  1.25 MiB, send 8 × stream) and left untouched; `send_fairness` is already on.
+- **Step 4 — partially done** (`client/src/call/moq.ts`): hard `maxBitrate` caps
+  (1.5 Mbps camera, 800 kbps screen). The camera keyframe interval stays at 1 s
+  (2 s would risk the T7 fast-start budget). Datagram-delivered audio is blocked:
+  neither `@moq/watch` nor `@moq/publish` touches datagrams, and the SFU only
+  relays what publishers send — both ends would need patched client libs. Epic.
+- **Step 5 — done** (`h3wt.rs`): stream-level errors log at debug, connection-level
+  at warn.
+- **Step 6 — done** (`demux.rs`): batched `poll_recv` drains the handoff queue into
+  quinn's buffer array; queued buffers recycle through a pool inside the same
+  mutex (no per-packet allocation, one copy each side).
+
+Remaining follow-ups (not in this pass): the datagram-audio epic (step 4), the
+measurement runs of §4 against a real deployment (steps 1–6 are implemented but
+their effect is unverified until measured), and the SO_REUSEPORT reader sharding
+only if profiling still shows demux contention.
