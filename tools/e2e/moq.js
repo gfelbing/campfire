@@ -71,11 +71,19 @@ const NAME_A = `moqa-${STAMP}`;
 const NAME_B = `moqb-${STAMP}`;
 const BROWSER = arg("browser", "brave");
 const ROOM = arg("room", "island");
+// Audio budget override passed to the client (moq.ts __campfire_audio_ms).
+// Default 600: the headless environment's transport lag exceeds the
+// production 40 ms budget and a fidelity recording under it only
+// documents correct dropping. E2E_AUDIO_MS=0 runs the PRODUCTION budget
+// (40 ms): step 5a's join-transient sampling then measures the real
+// startup shape, and step 5b's recording assertions are skipped (the
+// environment cannot hold a live-budget fidelity check).
+const AUDIO_MS_OVERRIDE = Number(process.env.E2E_AUDIO_MS ?? 600);
+
 // Latency budget for the downlink playback delay and jitter-buffer depth
 // (a sanity bound, docs/arch/moq-sfu.md). The audio budget override (see
 // evaluateOnNewDocument) adds to the tile delay by design, so the gate
 // scales with it.
-const AUDIO_MS_OVERRIDE = 600;
 const MAX_LATENCY_MS = 1000 + AUDIO_MS_OVERRIDE;
 // Soak (issues.md issue 8.6): minutes to hold the call before the teardown
 // step; 0 (unset) skips the soak. E2E_SERVER_LOG / E2E_SERVER_PID enable the
@@ -706,6 +714,58 @@ async function assertDownlinkLive(page, label, timeoutMs) {
     await waitUntil(async () => (await theaterState(pageB)) === "live", "B's column live", 15_000);
     console.log("   downlinks rendered, latency within budget");
 
+    console.log("5a. join-time transient sampling (measurement, no gate)…");
+    // The first 10-20 s of a call showed large delay spikes that settle.
+    // Sample the playout numbers every 250 ms and classify the shape
+    // (docs/dev/latency-optimization.md §10): oscillation ~2 s period =
+    // decode-loop pacing resets; instant-high-decaying = backlog at
+    // anchor; delayed-peak = pipeline warmup. `audClock` jumps mark ring
+    // resets.
+    const transient = { samples: [] };
+    {
+      const t0 = Date.now();
+      let lastClock = null;
+      let resets = 0;
+      let stalls = 0;
+      while (Date.now() - t0 < 30_000) {
+        const d = await soleDown(pageB);
+        if (d) {
+          if (lastClock !== null && d.audClock !== null && Math.abs(d.audClock - lastClock) > 1000) resets++;
+          if (d.audStalled) stalls++;
+          lastClock = d.audClock;
+          transient.samples.push({
+            t: Date.now() - t0,
+            delay: Math.round(d.delay),
+            videoDelay: Math.round(d.videoDelay),
+            jitter: Math.round(d.jitter),
+            clock: d.audClock ? Math.round(d.audClock) : null,
+            buffered: Math.round(d.bufferedMs),
+            stalled: d.audStalled,
+          });
+        }
+        await sleep(250);
+      }
+    }
+    {
+      const s = transient.samples;
+      const maxDelay = Math.max(...s.map((x) => x.delay), 0);
+      const startDelay = s[0]?.delay ?? 0;
+      const settledAt = s.find((x) => x.t >= 5000 && x.delay < 300)?.t ?? null;
+      const over300 = s.filter((x) => x.delay >= 300).length;
+      console.log(
+        `   join transient: start ${startDelay} ms, max ${maxDelay} ms, settled(<300 ms after 5 s) at ${settledAt ?? "never"} ms, samples >300 ms: ${over300}/${s.length}`,
+      );
+      console.log(
+        `   ring resets: ${transient.resets ?? 0}+${s.filter((x) => x.stalled).length} stalls; curve: ${s
+          .filter((_, i) => i % 8 === 0)
+          .map((x) => `${(x.t / 1000).toFixed(0)}s:${x.delay}`)
+          .join(" ")}`,
+      );
+    }
+
+    if (AUDIO_MS_OVERRIDE <= 0) {
+      console.log("5b. audio intelligibility: SKIPPED (production budget run, E2E_AUDIO_MS=0 — the headless environment cannot hold a live-budget fidelity check)");
+    } else {
     console.log("5b. audio intelligibility (recorded downlink vs source file)…");
     // Diagnostic: both pages' roster (id → name) and self identity, so a
     // self-subscription or duplicate identity is visible in the log.
@@ -939,6 +999,8 @@ async function assertDownlinkLive(page, label, timeoutMs) {
       "video downlinks live again after camera on",
       30_000,
     );
+
+    }
 
     console.log("6. SFU metrics: campfire_moq_objects_in_total…");
     const metrics = await pageA.evaluate(async () => {

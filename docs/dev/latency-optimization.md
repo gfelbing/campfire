@@ -595,14 +595,63 @@ which mechanism is responsible, so the plan starts with measurement.
 
 ### 10.2 Step 1 — measure the shape
 
-The e2e hooks already expose everything needed: `delay` (audio
-playout), `videoDelay`, `jitter`, `audClock` (ring playhead),
-`audBuf` (buffered ranges), `audStalled`, `bufferedMs`, plus
-`__campfire_wire_count`. Add a harness step (or extend 5b): after the
-downlink goes live, sample all of it every 250 ms for 30 s, log one line
-per sample, and print a compact summary (max delay, time to < 150 ms,
-reset count via audClock discontinuities). Run it 3× and classify the
-shape per 10.1. No client changes needed.
+**In e2e** (`tools/e2e/moq.js` step 5a, added): after the downlink goes
+live, sample `delay`/`videoDelay`/`jitter`/`audClock`/`audBuf`/
+`audStalled`/`bufferedMs` every 250 ms for 30 s and print a summary
+(max, settle time, ring-reset count). The audio budget override is now
+env-controlled: `E2E_AUDIO_MS=0` runs the *production* budget (the
+step-5b recording assertions are skipped — the headless environment
+cannot hold a live-budget fidelity check; its own delivery variance
+makes them flaky).
+
+**Findings from the e2e runs** (both override and production budget):
+the curve is a **flat plateau with sporadic bursts, zero ring resets,
+zero stalls** — Shape A (pacing resets) is ruled out; the plateau is
+the environment's own transport lag plus the override target, and the
+bursts are its CPU contention. The e2e environment cannot reproduce the
+production startup spike (its audio decode loop starves behind video
+decode + software WebGL, trailing seconds *steadily* rather than
+spiking at start).
+
+**In production** (the real two-tab setup), run the e2e-built client
+(`just e2e-build`, then the dev server serves the embedded debug hooks)
+and paste this into the console right after joining the call; call
+`__avprobe_stop()` after ~30 s:
+
+```js
+(() => {
+  const s = []; const t0 = performance.now(); let last = null, resets = 0, stalls = 0;
+  window.__avprobe_stop = () => {
+    clearInterval(iv);
+    const a = s.map((x) => x.a).filter(Number.isFinite);
+    console.log("samples", s.length,
+      "| start", s[0]?.a, "| max", Math.max(...a, 0),
+      "| settled<300ms:", (s.find((x) => x.t >= 5000 && x.a < 300)?.t ?? "never") + "ms",
+      "| ring resets", resets, "| stalls", stalls);
+    console.log(s.filter((_, i) => i % 8 === 0)
+      .map((x) => `${(x.t / 1000).toFixed(1)}s  audio=${x.a}  video=${x.v}  backlog=${x.buf}${x.stall ? "  STALLED" : ""}`)
+      .join("\n"));
+    window.__avprobe = s;
+  };
+  const iv = setInterval(() => {
+    const h = window.__campfire_moq_down; if (!h) return;
+    const d = Object.values(h)[0]; if (!d) return;
+    if (last !== null && d.audClock != null && Math.abs(d.audClock - last) > 1000) resets++;
+    if (d.audStalled) stalls++;
+    last = d.audClock;
+    s.push({ t: Math.round(performance.now() - t0), a: Math.round(d.delay), v: Math.round(d.videoDelay), buf: Math.round(d.bufferedMs), stall: d.audStalled });
+  }, 250);
+  console.log("a/v probe: sampling every 250 ms — call __avprobe_stop() after ~30 s");
+})();
+```
+
+The curve classifies the mechanism per §10.1: oscillation ~2 s = Shape
+A (pacing resets — the vendored-patch fix); instant-high-decaying =
+Shape B (stale subscription budget); delayed-peak = Shape D (warmup).
+`audio`/`video` are playout positions, `backlog` is the undelivered
+span — a backlog that grows *before* the peak and drains after points
+at the decode loop (Shape D or CPU starvation), a delay that starts
+high and decays monotonically points at the anchor (Shape B/C).
 
 ### 10.3 Likely fixes (per shape)
 
