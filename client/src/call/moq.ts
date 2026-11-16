@@ -28,24 +28,28 @@ import { Catalog } from "@moq/hang";
 import { Signal } from "@moq/signals";
 
 /** Playback delay behind the live edge, per medium (docs/dev/
- *  latency-optimization.md §2 step 1). A fixed offset lets a burst of
- *  frames land in the jitter buffer instead of re-anchoring the clock
- *  mid-burst.
+ *  latency-optimization.md §6 step 7). Audio runs in *instant mode*: the
+ *  smallest floor the ring physically allows. The worklet drains in
+ *  128-sample quanta (~2.7 ms), and a ring of zero depth is both
+ *  unsupported by the library (`@moq/watch` d.ts: "a ring with no depth
+ *  underruns" — the decoder disables its decode loop entirely in
+ *  `"instant"` mode, and the postMessage ring throws on a 0-sample
+ *  latency) and physically meaningless below one quantum. So the audio
+ *  delay is one worklet quantum: `Sync.wait` returns immediately for
+ *  waits < 5 ms, the ring unstalls on the first (10 ms) Opus frame, and
+ *  pacing contributes nothing measurable. The trade-off, accepted here,
+ *  is that there is no jitter buffer to ride out arrival bursts: a late
+ *  frame is a hard underrun (the catch-up drain cannot help what has not
+ *  arrived), which on lossy links means gaps instead of drift.
  *
- *  Audio is the conversational medium and gets the smallest delay the
- *  ring tolerates without underrun; video trails further — a/v sync is
- *  explicitly secondary (docs/dev/latency-optimization.md), and separate
- *  `Sync` clocks mean a video buffer burst can never hold back audio
- *  playback (the old single shared clock coupled them: both media shared
- *  one 300 ms delay, which was the bulk of the observed mouth-to-ear
- *  latency even on a clean local link).
+ *  Video trails further (400 ms) — a/v sync is explicitly secondary
+ *  (docs/dev/latency-optimization.md), and separate `Sync` clocks mean a
+ *  video buffer burst can never hold audio playback back.
  *
- *  Each medium's `Sync.in.buffer` = 2 × its delay, which switches the
- *  audio ring into buffered mode (no read skip, capacity 2 × delay) and
- *  grows the transport `maxAge` so a backlog reaches the ring instead of
- *  being dropped. The invariant `buffer ≤ 2 × delay` keeps the backlog
- *  inside the ring capacity, so the writer never has to drop either. */
-const AUDIO_DELAY_MS = 100;
+ *  Each medium's `Sync.in.buffer` = 2 × its delay: the backlog budget
+ *  (how far ahead of the live edge buffered media may sit) that keeps
+ *  the backlog inside the ring capacity. */
+const AUDIO_DELAY_MS = 3;
 const VIDEO_DELAY_MS = 400;
 /** Backlog budget as a multiple of the delay (see AUDIO_DELAY_MS). */
 const BACKLOG_FACTOR = 2;
@@ -396,6 +400,12 @@ export class MoqCall {
           // §2 step 1). Costs bitrate; worth it on lossy paths.
           codec: {
             mime: "opus",
+            // 10 ms frames (allowed: 2.5/5/10/20/40/60): halves the
+            // packetization delay the encoder's 20 ms default adds (a
+            // frame is only emitted when full — docs/dev/
+            // latency-optimization.md §6). 2.5/5 ms exist but Chromium's
+            // encoder quality collapses and per-frame overhead climbs.
+            frameDuration: Net.Time.Milli(10),
             useinbandfec: true,
             packetlossperc: 10,
           },

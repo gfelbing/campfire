@@ -271,33 +271,45 @@ vendored `@moq` sources:
 | Capture + codec + QUIC transport | ~5–10 ms on localhost | AudioWorklet quanta + frame group emission + one-RTT delivery |
 
 With `AUDIO_DELAY_MS = 100`, the observed 100+ ms is the configured floor — same
-conclusion as step 1, just at a lower setting. To reach 15–20 ms:
+conclusion as step 1, just at a lower setting.
 
-1. **Adaptive audio delay: `delay: "auto"` instead of the fixed 100.**
-   `@moq/watch`'s Sync computes `auto` as `max(20 ms, minRTT × 1.25) + rendition
-   jitter` from the connection probe — a 20 ms floor exactly on healthy links,
-   growing automatically on poor ones. A fixed tiny value (e.g. 15 ms) would
-   underrun on any real network; `auto` keeps local at the floor and remote
-   calls usable without a config surface. The `Sync.in.buffer` input must become
-   a small fixed value (e.g. 50 ms) instead of `2 × AUDIO_DELAY_MS`: it is the
-   *backlog* budget (how far ahead of the live edge buffered media may sit), not
-   a latency term, and the ring's catch-up drain (already implemented) recovers
-   the backlog by playing faster instead of skipping.
-2. **Opus `frameDuration: 10` on the uplink encoder.** Halves packetization
-   (20 → 10 ms) for 50 frames/s — still trivial bandwidth. 2.5/5 ms exist but
-   Chromium's Opus encoder quality collapses and per-frame overhead climbs; 10 ms
-   is the sweet spot.
-3. **Verification.** Local two-tab beep test (§4 protocol): expect ≈ 20 ms delay
-   target + 10 ms packetization + ~15 ms output/capture hardware = 45 ms wall
-   mouth-to-ear, with the *adjustable* software budget at ~30 ms. The hardware
-   capture/output latency (mic pipeline with `echoCancellation`, speaker buffer)
-   is not reachable from the app and bounds the ideal below ~40 ms total.
+**Decision (supersedes the `"auto"` option below): instant mode.** The original
+plan proposed `delay: "auto"` (a 20 ms RTT-derived floor). The user chose true
+instant playback instead. Verified against the library, literal
+`Sync delay = "instant"` cannot carry audio in `@moq/watch` 0.6.6:
 
-Note on what "delay" means in the UI after this change: the tile's audio number
-drops to ~20–40 ms and the video number stays at 400 ms — the two clocks drift by
-design (product decision: audio latency outranks a/v sync), so the a/v divergence
-growing from 300 to ~380 ms is expected and acceptable.
+- the audio decoder disables its decode loop entirely and resets the ring when
+  `in.delay === "instant"` — silence by construction (the type comment says so:
+  *"a ring with no depth underruns, so whoever wants this mode is expected to
+  turn audio off"*),
+- the postMessage ring (`AudioRingBuffer`, used without `crossOriginIsolated`,
+  which is campfire's reality — no COOP/COEP headers) throws on a 0-sample
+  latency (`invalid latency` / `empty buffer`),
+- the SharedArrayBuffer ring parks forever (`#resume` requires `latency > 0`).
 
-Explicitly not in this step: `"instant"` mode (zero delay) — it disables the ring
-and pacing entirely; any hiccup is a hard underrun. `auto`'s 20 ms floor is the
-cheapest safety margin that meets the target.
+And zero is physically meaningless regardless: the worklet drains in 128-sample
+quanta (~2.7 ms), so the smallest floor that exists is one quantum. Implemented
+therefore:
+
+- `AUDIO_DELAY_MS = 3` — one worklet quantum. `Sync.wait` returns immediately
+  for waits < 5 ms, the ring unstalls on the first (10 ms) Opus frame, and the
+  pacing machinery contributes nothing measurable. This is instant mode with the
+  ring kept alive; the audio `Sync` instance stays wired because the decoder API
+  requires it, but its delay no longer gates playback.
+- `frameDuration: 10` on the uplink Opus encoder — packetization 20 → 10 ms.
+- Accepted trade-off, made explicit: there is no jitter buffer to ride out
+  arrival bursts. A late frame is a hard underrun (the catch-up drain cannot
+  help what has not arrived); on lossy links this means gaps instead of drift.
+  `packetlossperc`/in-band FEC remains the loss mitigation.
+
+Expected budget after this step: ≈ 10 ms packetization + ≤ 3 ms ring floor +
+~15 ms output/capture hardware ≈ 30–40 ms wall mouth-to-ear on a clean link;
+the software-adjustable portion is ~13 ms. The hardware capture/output latency
+(mic pipeline with `echoCancellation`, speaker buffer) is not reachable from the
+app and bounds the ideal below that.
+
+~~The original `"auto"` proposal~~ (kept for the record): `delay: "auto"` sizes
+the jitter buffer from the connection probe (`max(20 ms, minRTT × 1.25) +
+rendition jitter`) and would have been the safe choice for lossy networks; it
+was rejected in favor of the fixed instant floor above. If remote links turn out
+to gap too much, `auto` is the one-line rollback.
