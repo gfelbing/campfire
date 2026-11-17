@@ -390,20 +390,20 @@ async fn three_participants_fan_out() {
     }
 
     // Everyone subscribes to the other two; read 10 live frames from each.
-    async fn read_frames(
-        client: &MoqClient,
-        path: &str,
-        label: &'static str,
-    ) -> u64 {
+    async fn read_frames(client: &MoqClient, path: &str, label: &'static str) -> u64 {
         let consumer = client.origin.consume();
         let bcast = tokio::time::timeout(Duration::from_secs(5), consumer.routed_broadcast(path))
             .await
             .unwrap_or_else(|_| panic!("{label}: timed out waiting for the announce"))
             .unwrap_or_else(|_| panic!("{label}: announce errored"));
-        let track = bcast.track("a").unwrap_or_else(|_| panic!("{label}: no audio track"));
+        let track = bcast
+            .track("a")
+            .unwrap_or_else(|_| panic!("{label}: no audio track"));
         let mut sub = tokio::time::timeout(
             Duration::from_secs(5),
-            track.subscribe(moq_net::track::Subscription::default().with_max_age(Duration::from_secs(2))),
+            track.subscribe(
+                moq_net::track::Subscription::default().with_max_age(Duration::from_secs(2)),
+            ),
         )
         .await
         .expect("{label}: subscribe timed out")
@@ -447,11 +447,26 @@ async fn three_participants_fan_out() {
     for stop in stops {
         let _ = stop.send(());
     }
-    assert!(pa >= 10, "alice received {pa} frames from bob through the SFU");
-    assert!(pc >= 10, "alice received {pc} frames from carol through the SFU");
-    assert!(ca >= 10, "bob received {ca} frames from carol through the SFU");
-    assert!(cc >= 10, "carol received {cc} frames from alice through the SFU");
-    assert!(cb >= 10, "carol received {cb} frames from bob through the SFU");
+    assert!(
+        pa >= 10,
+        "alice received {pa} frames from bob through the SFU"
+    );
+    assert!(
+        pc >= 10,
+        "alice received {pc} frames from carol through the SFU"
+    );
+    assert!(
+        ca >= 10,
+        "bob received {ca} frames from carol through the SFU"
+    );
+    assert!(
+        cc >= 10,
+        "carol received {cc} frames from alice through the SFU"
+    );
+    assert!(
+        cb >= 10,
+        "carol received {cb} frames from bob through the SFU"
+    );
 }
 
 /// A user in the room but outside the call has no media ticket: connecting
