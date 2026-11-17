@@ -455,6 +455,52 @@ body {
   position: relative;
 }
 
+/* Media dropdowns (device selection + noise suppression): the same
+   anchored-popover shape as the status menu, wrapped around the mic and
+   camera toggles. */
+.media-drop {
+  position: relative;
+  display: flex;
+  align-items: stretch;
+}
+
+.media-drop .topbar-chevron {
+  font: inherit;
+  font-size: 0.7rem;
+  color: var(--muted);
+  padding: 0 0.25rem;
+  min-width: unset;
+}
+
+.media-drop .topbar-chevron:hover {
+  color: var(--text);
+  border-color: var(--accent);
+}
+
+.media-drop .media-menu {
+  top: calc(100% + 4px);
+  right: 0;
+}
+
+.media-menu .media-item {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  width: 100%;
+}
+
+.media-menu .media-item .mcheck {
+  width: 1rem;
+  text-align: center;
+  color: var(--accent);
+}
+
+.media-menu .media-sep {
+  height: 1px;
+  background: var(--line);
+  margin: 0.2rem 0.3rem;
+}
+
 .status-drop .status-menu {
   left: auto;
   right: 0;

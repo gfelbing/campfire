@@ -46,6 +46,20 @@ export interface HeaderOptions {
   onToggleCamera(): void;
   /** Screen-share toggle (only offered while in a call). */
   onToggleScreen(): void;
+  /** Enumerate media devices + current selection (the dropdown menus'
+   *  content; labels need capture permission, which being in a call
+   *  implies). */
+  onListMediaDevices: () => Promise<{
+    mics: MediaDeviceInfo[];
+    cams: MediaDeviceInfo[];
+    micId?: string;
+    camId?: string;
+    noise: boolean;
+  }>;
+  /** The user picked a microphone / camera / noise-suppression state. */
+  onSelectMic: (deviceId: string) => void;
+  onSelectCamera: (deviceId: string) => void;
+  onNoiseSuppression: (on: boolean) => void;
 }
 
 export interface HeaderUI {
@@ -96,6 +110,127 @@ export function createHeader(
   micBtn.addEventListener("click", () => opts.onToggleMute());
   camBtn.addEventListener("click", () => opts.onToggleCamera());
   screenBtn.addEventListener("click", () => opts.onToggleScreen());
+
+  // --- right: media dropdowns (device selection) ----------------------------
+
+  const micMenuBtn = topbar.querySelector<HTMLButtonElement>("#mic-menu-btn")!;
+  const camMenuBtn = topbar.querySelector<HTMLButtonElement>("#cam-menu-btn")!;
+  const micMenu = topbar.querySelector<HTMLElement>("#mic-menu")!;
+  const camMenu = topbar.querySelector<HTMLElement>("#cam-menu")!;
+
+  /** One device row: label + a check mark when it is the active one. */
+  function deviceRow(
+    menu: HTMLElement,
+    label: string,
+    current: boolean,
+    activeTitle: string,
+    pick: () => void,
+  ): void {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "map-item media-item" + (current ? " current" : "");
+    const check = document.createElement("span");
+    check.className = "mcheck";
+    check.textContent = current ? "✓" : "";
+    const name = document.createElement("span");
+    name.textContent = label;
+    b.append(check, name);
+    b.title = current ? activeTitle : label;
+    b.addEventListener("click", () => {
+      closeAll();
+      if (!current) pick();
+    });
+    menu.appendChild(b);
+  }
+
+  /** The mic dropdown: microphone devices + the noise-suppression check
+   *  item. Filled on open (the device list can change; labels populate
+   *  once capture permission exists). */
+  async function renderMicMenu(): Promise<void> {
+    try {
+      micMenu.replaceChildren();
+      const { mics, micId, noise } = await opts.onListMediaDevices();
+      for (const d of mics) {
+        deviceRow(
+          micMenu,
+          d.label || "Default microphone",
+          d.deviceId === micId,
+          "selected microphone",
+          () => opts.onSelectMic(d.deviceId),
+        );
+      }
+      if (mics.length > 0) {
+        const sep = document.createElement("div");
+        sep.className = "media-sep";
+        micMenu.appendChild(sep);
+      }
+      // Noise suppression: a check item, not a device — clicking toggles
+      // it in place (the menu stays open).
+      const nc = document.createElement("button");
+      nc.type = "button";
+      nc.className = "map-item media-item";
+      nc.dataset.on = String(noise);
+      nc.title = "browser-side noise suppression on the microphone";
+      const ncCheck = document.createElement("span");
+      ncCheck.className = "mcheck";
+      ncCheck.textContent = noise ? "✓" : "";
+      const ncLabel = document.createElement("span");
+      ncLabel.textContent = "Noise cancellation";
+      nc.append(ncCheck, ncLabel);
+      nc.addEventListener("click", () => {
+        opts.onNoiseSuppression(!noise);
+        void renderMicMenu(); // re-render the check in place
+      });
+      micMenu.appendChild(nc);
+      if (mics.length === 0) {
+        const empty = document.createElement("div");
+        empty.className = "map-empty";
+        empty.textContent = "no microphones found";
+        micMenu.appendChild(empty);
+      }
+    } catch (e) {
+      console.warn(`[mediamenu] render failed: ${String(e)}`);
+    }
+  }
+
+  /** The camera dropdown: camera devices (see `renderMicMenu`). */
+  async function renderCamMenu(): Promise<void> {
+    camMenu.replaceChildren();
+    const { cams, camId } = await opts.onListMediaDevices();
+    for (const d of cams) {
+      deviceRow(
+        camMenu,
+        d.label || "Default camera",
+        d.deviceId === camId,
+        "selected camera",
+        () => opts.onSelectCamera(d.deviceId),
+      );
+    }
+    if (cams.length === 0) {
+      const empty = document.createElement("div");
+      empty.className = "map-empty";
+      empty.textContent = "no cameras found";
+      camMenu.appendChild(empty);
+    }
+  }
+
+  micMenuBtn.addEventListener("click", () => {
+    const willOpen = micMenu.classList.contains("hidden");
+    console.warn(`[mediamenu] click, willOpen=${willOpen}`);
+    closeAll();
+    if (willOpen) {
+      micMenu.classList.remove("hidden");
+      void renderMicMenu();
+    }
+  });
+  camMenuBtn.addEventListener("click", () => {
+    const willOpen = camMenu.classList.contains("hidden");
+    closeAll();
+    if (willOpen) {
+      camMenu.classList.remove("hidden");
+      void renderCamMenu();
+    }
+  });
 
   // --- map switcher -----------------------------------------------------------
 
@@ -211,6 +346,8 @@ export function createHeader(
   function closeAll(): void {
     mapList.classList.add("hidden");
     statusMenu.classList.add("hidden");
+    micMenu.classList.add("hidden");
+    camMenu.classList.add("hidden");
   }
 
   mapBtn.addEventListener("click", () => {

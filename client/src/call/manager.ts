@@ -15,7 +15,7 @@
 //! the bubble toggle (`sendBubble`).
 import type { UserBrief } from "../net/types";
 import { MoqCall, type DownlinkStatus, type DownlinkView } from "./moq";
-import { getLocalMedia, getScreenMedia } from "./media";
+import { getLocalMedia, getScreenMedia, loadMediaPrefs, saveMediaPrefs, type MediaPrefs } from "./media";
 
 /** Participant count at which the call degrades to voice-only (docs/ops/maps.md:
  *  "9+"; the done-when's "engages at 10" is satisfied, the 📷 button
@@ -114,6 +114,9 @@ export class CallManager {
   private presence = new Map<string, { audio: boolean; video: boolean; screen: boolean }>();
   /** Our screen share (when `screenOn`). */
   private screenStream: MediaStream | null = null;
+  /** The persisted media preferences (device selection + noise
+   *  suppression; the topbar dropdowns). */
+  private mediaPrefs = loadMediaPrefs();
   /** `sz` (README roadmap "Map enhancements"): peers inside a silentZone. */
   private silent = new Set<string>();
   /** The call roster including ourselves (from `call_start`/`call_join`). */
@@ -419,15 +422,160 @@ export class CallManager {
    *  tracks right away. */
   private async acquireMedia(): Promise<MediaStream | null> {
     try {
-      this.localStream = await getLocalMedia();
+      this.localStream = await getLocalMedia(this.mediaPrefs);
     } catch (err) {
       this.hooks.onLog(`cannot access microphone/camera: ${String(err)}`);
       return null;
     }
+    // A stored device id is an `ideal` constraint: a vanished device
+    // falls back to the OS default. Clear the stale id so the dropdown
+    // does not keep advertising it.
+    this.validateDevicePrefs();
     for (const t of this.localStream.getAudioTracks()) t.enabled = this.audioOn;
     for (const t of this.localStream.getVideoTracks()) t.enabled = this.videoOn;
     this.hooks.onLocalStream(this.localStream);
     return this.localStream;
+  }
+
+  /** After acquisition: a stored id that the browser did not honor (the
+   *  device vanished, or `ideal` fell back) is cleared from the prefs. */
+  private validateDevicePrefs(): void {
+    if (!this.localStream) return;
+    let dirty = false;
+    const [audio] = this.localStream.getAudioTracks();
+    const [video] = this.localStream.getVideoTracks();
+    if (this.mediaPrefs.micId && audio?.getSettings().deviceId !== this.mediaPrefs.micId) {
+      this.mediaPrefs.micId = undefined;
+      dirty = true;
+    }
+    if (this.mediaPrefs.cameraId && video?.getSettings().deviceId !== this.mediaPrefs.cameraId) {
+      this.mediaPrefs.cameraId = undefined;
+      dirty = true;
+    }
+    if (dirty) saveMediaPrefs(this.mediaPrefs);
+  }
+
+  /** Enumerate the media devices for the topbar dropdowns. Labels are
+   *  only populated once capture permission is granted — the menus
+   *  exist while in a call, which implies it. */
+  async listMediaDevices(): Promise<{
+    mics: MediaDeviceInfo[];
+    cams: MediaDeviceInfo[];
+    micId?: string;
+    camId?: string;
+    noise: boolean;
+  }> {
+    const devices = await navigator.mediaDevices.enumerateDevices().catch(() => []);
+    return {
+      mics: devices.filter((d) => d.kind === "audioinput"),
+      cams: devices.filter((d) => d.kind === "videoinput"),
+      micId: this.currentMicId(),
+      camId: this.currentCamId(),
+      noise: this.mediaPrefs.noiseSuppression,
+    };
+  }
+
+  /** The *active* mic/camera id: the stored preference if the acquired
+   *  track honored it, else the track's actual device (the OS default
+   *  the menu should then mark). */
+  private currentMicId(): string | undefined {
+    const [audio] = this.localStream?.getAudioTracks() ?? [];
+    return audio?.getSettings().deviceId ?? this.mediaPrefs.micId;
+  }
+
+  private currentCamId(): string | undefined {
+    const [video] = this.localStream?.getVideoTracks() ?? [];
+    return video?.getSettings().deviceId ?? this.mediaPrefs.cameraId;
+  }
+
+  /** Switch the microphone mid-call: fresh track, swapped into the
+   *  stream and the publish pipeline (the encoder rebuilds on the same
+   *  broadcast — receivers' stall watchdog re-subscribes). The mute
+   *  state survives. */
+  async selectMic(deviceId: string): Promise<void> {
+    const track = await this.acquireTrack("audio", deviceId);
+    if (!track) return;
+    this.mediaPrefs.micId = deviceId;
+    saveMediaPrefs(this.mediaPrefs);
+    const [old] = this.localStream?.getAudioTracks() ?? [];
+    for (const t of this.localStream?.getAudioTracks() ?? []) t.stop();
+    this.localStream?.removeTrack(old);
+    this.localStream?.addTrack(track);
+    track.enabled = this.audioOn;
+    this.hooks.onLocalStream(this.localStream!);
+    this.moq?.swapAudio(track);
+    this.hooks.onLog(`microphone switched: ${track.label || deviceId}`);
+  }
+
+  /** Switch the camera mid-call (see `selectMic`). The camera-off state
+   *  survives the swap (the new track is gated by the preference). */
+  async selectCamera(deviceId: string): Promise<void> {
+    const track = await this.acquireTrack("video", deviceId);
+    if (!track) return;
+    this.mediaPrefs.cameraId = deviceId;
+    saveMediaPrefs(this.mediaPrefs);
+    const [old] = this.localStream?.getVideoTracks() ?? [];
+    for (const t of this.localStream?.getVideoTracks() ?? []) t.stop();
+    this.localStream?.removeTrack(old);
+    this.localStream?.addTrack(track);
+    track.enabled = this.videoOn;
+    this.hooks.onLocalStream(this.localStream!);
+    this.moq?.swapVideo(track, this.videoOn);
+    this.hooks.onLog(`camera switched: ${track.label || deviceId}`);
+  }
+
+  /** Acquire a single replacement track of `kind` from `deviceId`
+   *  (`ideal`: a vanished device falls back to the default rather than
+   *  failing the switch). */
+  private async acquireTrack(
+    kind: "audio" | "video",
+    deviceId: string,
+  ): Promise<MediaStreamTrack | null> {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        [kind]: kind === "audio"
+          ? {
+              echoCancellation: true,
+              noiseSuppression: this.mediaPrefs.noiseSuppression,
+              autoGainControl: true,
+              deviceId: { ideal: deviceId },
+            }
+          : {
+              width: { ideal: 800, max: 800 },
+              height: { ideal: 600, max: 600 },
+              frameRate: { ideal: 30, max: 30 },
+              deviceId: { ideal: deviceId },
+            },
+      });
+      return kind === "audio"
+        ? stream.getAudioTracks()[0]
+        : stream.getVideoTracks()[0];
+    } catch (err) {
+      this.hooks.onLog(`cannot switch ${kind}: ${String(err)}`);
+      return null;
+    }
+  }
+
+  /** Toggle browser-side noise suppression on the live mic track
+   *  (`applyConstraints`: Chrome reconfigures the audio processing on a
+   *  running track). Persisted; a fresh acquisition picks it up. */
+  async setNoiseSuppression(on: boolean): Promise<void> {
+    this.mediaPrefs.noiseSuppression = on;
+    saveMediaPrefs(this.mediaPrefs);
+    const [audio] = this.localStream?.getAudioTracks() ?? [];
+    if (!audio) return;
+    try {
+      await audio.applyConstraints({ noiseSuppression: on });
+      const applied = audio.getSettings().noiseSuppression !== false;
+      if (applied !== on) throw new Error(`browser kept noiseSuppression ${applied}`);
+    } catch (err) {
+      this.hooks.onLog(`noise suppression toggle rejected: ${String(err)}`);
+    }
+  }
+
+  /** The current preferences snapshot (the dropdown menus' state). */
+  mediaState(): MediaPrefs {
+    return { ...this.mediaPrefs };
   }
 
   /** We are in the bubble with `participants` (including us): enter the

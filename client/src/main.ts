@@ -461,6 +461,10 @@ async function main(): Promise<void> {
     onToggleMute: () => manager.toggleMute(),
     onToggleCamera: () => manager.toggleCamera(),
     onToggleScreen: () => manager.toggleScreen(),
+    onListMediaDevices: () => manager.listMediaDevices(),
+    onSelectMic: (id) => void manager.selectMic(id),
+    onSelectCamera: (id) => void manager.selectCamera(id),
+    onNoiseSuppression: (on) => void manager.setNoiseSuppression(on),
   });
   header.setMute(true, true);
 

@@ -404,88 +404,10 @@ export class MoqCall {
       const video = opts.stream.getVideoTracks()[0];
       const audio = opts.stream.getAudioTracks()[0];
       if (video) {
-        const capture = new Publish.Video.Capture({
-          source: video as Publish.Video.StreamTrack,
-        });
-        call.videoCapture = capture;
-        const enabled = new Signal(true);
-        call.videoEnabled = enabled;
-        call.videoEncoder = new Publish.Video.Encoder("v", {
-          broadcast,
-          capture,
-          enabled,
-          // The allocator divides the uplink estimate between the video
-          // renditions; the encoder caps its resolved bitrate at the
-          // granted slice (advisory: the transport sheds whatever excess
-          // slips through).
-          bandwidth: allocator,
-          // A keyframe about every second: a late-joining downlink starts
-          // decoding at the next keyframe (fast-start, docs §10 T7).
-          config: {
-            keyframeInterval: Net.Time.Milli(1000),
-            // Auto-sizing bound (the capture is capped at 800x600):
-            // nothing above it, so the bandwidth grant has a ceiling to
-            // scale down from. 480x360 (§9.2): the software pipeline
-            // (OpenH264 encode + WebCodecs decode, both ends) is the CPU
-            // driver, and pixels × fps is what it scales with — bitrate
-            // alone does not cut it (OpenH264 ignores bitrate without
-            // frame-skip). −65% pixel work vs 800x600. The e2e harness
-            // overrides this (320x240, see the launch args).
-            maxPixels:
-              (__CAMPFIRE_DEBUG__ && window.__campfire_video_maxpx) ||
-              480 * 360,
-            frameRate: 30,
-            // Hard bitrate cap (docs/dev/latency-optimization.md §2 step 4):
-            // without it a video rendition may claim the entire uplink
-            // estimate, and every 1 s keyframe flight then saturates the
-            // shared connection's congestion window and stalls the audio
-            // streams too. The cap leaves headroom for mic + screen even
-            // on a small uplink; the allocator's grant can only go lower.
-            maxBitrate: 1_500_000,
-          },
-        });
+        call.buildVideo(video);
       }
       if (audio) {
-        const capture = new Publish.Audio.Capture({
-          source: audio as Publish.Audio.StreamTrack,
-          enabled: true,
-        });
-        call.audioCapture = capture;
-        call.audioEncoder = new Publish.Audio.Encoder("a", {
-          broadcast,
-          capture,
-          enabled: true,
-          // 60 ms of frames per group (3 × 20 ms). The stock default
-          // (groupDuration 0) closes a group after every frame, and the
-          // SFU opens one QUIC unidirectional stream per group — one
-          // stream open + FIN per frame. Batching cuts that 3x. Frames
-          // still stream out of the open group as they encode
-          // (`readFrame()` on the watch side), so batching adds no
-          // delivery wait; it only coarsens catch-up granularity (a
-          // mid-group join replays up to 60 ms).
-          // (docs/dev/latency-optimization.md §7 finding 2)
-          groupDuration: Net.Time.Milli(60),
-          // In-band FEC: the audio latency budget (AUDIO_DELAY_MS on the
-          // downlink) has no room for retransmission, so a lost frame is
-          // lost — FEC lets the decoder reconstruct it from the redundancy
-          // of the following frames instead (docs/dev/latency-optimization.md
-          // §2 step 1). Costs bitrate; worth it on lossy paths.
-          codec: {
-            mime: "opus",
-            // 20 ms frames: two frames per 40 ms ring floor, gentle drain
-            // ratio (excess/floor = 0.5), fewer encode/insert/publish
-            // events; a lost frame is a 20 ms gap, reconstructed by FEC
-            // (docs/dev/latency-optimization.md §8 finding 4).
-            frameDuration: Net.Time.Milli(20),
-            // 48 kbps: the stock 32 kbps starved the in-band FEC layer —
-            // LBRR redundancy barely fits at 10 ms frames, so "lost"
-            // frames were never reconstructed. 48 k gives the redundancy
-            // room (docs/dev/latency-optimization.md §8 finding 2).
-            bitrate: 48_000,
-            useinbandfec: true,
-            packetlossperc: 10,
-          },
-        });
+        call.buildAudio(audio);
       }
       if (!call.videoEncoder && !call.audioEncoder) {
         throw new Error("no video or audio track to publish");
@@ -537,6 +459,124 @@ export class MoqCall {
       setHook({ state: "failed", error: msg });
       throw new Error(`moq call failed: ${msg}`, { cause: err });
     }
+  }
+
+  /** Build (or rebuild) the camera capture + encoder for `track` on the
+   *  call's broadcast. Config identical across rebuilds — a device swap
+   *  must not silently change rendition settings. */
+  private buildVideo(track: MediaStreamTrack): void {
+    if (!this.broadcast) return;
+    const capture = new Publish.Video.Capture({
+      source: track as Publish.Video.StreamTrack,
+    });
+    this.videoCapture = capture;
+    const enabled = new Signal(true);
+    this.videoEnabled = enabled;
+    this.videoEncoder = new Publish.Video.Encoder("v", {
+      broadcast: this.broadcast,
+      capture,
+      enabled,
+      // The allocator divides the uplink estimate between the video
+      // renditions; the encoder caps its resolved bitrate at the
+      // granted slice (advisory: the transport sheds whatever excess
+      // slips through).
+      bandwidth: this.allocator ?? undefined,
+      // A keyframe about every second: a late-joining downlink starts
+      // decoding at the next keyframe (fast-start, docs §10 T7).
+      config: {
+        keyframeInterval: Net.Time.Milli(1000),
+        // Auto-sizing bound (the capture is capped at 800x600):
+        // nothing above it, so the bandwidth grant has a ceiling to
+        // scale down from. 480x360 (§9.2): the software pipeline
+        // (OpenH264 encode + WebCodecs decode, both ends) is the CPU
+        // driver, and pixels × fps is what it scales with — bitrate
+        // alone does not cut it (OpenH264 ignores bitrate without
+        // frame-skip). −65% pixel work vs 800x600. The e2e harness
+        // overrides this (320x240, see the launch args).
+        maxPixels:
+          (__CAMPFIRE_DEBUG__ && window.__campfire_video_maxpx) ||
+          480 * 360,
+        frameRate: 30,
+        // Hard bitrate cap (docs/dev/latency-optimization.md §2 step 4):
+        // without it a video rendition may claim the entire uplink
+        // estimate, and every 1 s keyframe flight then saturates the
+        // shared connection's congestion window and stalls the audio
+        // streams too. The cap leaves headroom for mic + screen even
+        // on a small uplink; the allocator's grant can only go lower.
+        maxBitrate: 1_500_000,
+      },
+    });
+  }
+
+  /** Build (or rebuild) the mic capture + encoder for `track` (see
+   *  `buildVideo`). */
+  private buildAudio(track: MediaStreamTrack): void {
+    if (!this.broadcast) return;
+    const capture = new Publish.Audio.Capture({
+      source: track as Publish.Audio.StreamTrack,
+      enabled: true,
+    });
+    this.audioCapture = capture;
+    this.audioEncoder = new Publish.Audio.Encoder("a", {
+      broadcast: this.broadcast,
+      capture,
+      enabled: true,
+      // 60 ms of frames per group (3 × 20 ms). The stock default
+      // (groupDuration 0) closes a group after every frame, and the
+      // SFU opens one QUIC unidirectional stream per group — one
+      // stream open + FIN per frame. Batching cuts that 3x. Frames
+      // still stream out of the open group as they encode
+      // (`readFrame()` on the watch side), so batching adds no
+      // delivery wait; it only coarsens catch-up granularity (a
+      // mid-group join replays up to 60 ms).
+      // (docs/dev/latency-optimization.md §7 finding 2)
+      groupDuration: Net.Time.Milli(60),
+      // In-band FEC: the audio latency budget (AUDIO_DELAY_MS on the
+      // downlink) has no room for retransmission, so a lost frame is
+      // lost — FEC lets the decoder reconstruct it from the redundancy
+      // of the following frames instead (docs/dev/latency-optimization.md
+      // §2 step 1). Costs bitrate; worth it on lossy paths.
+      codec: {
+        mime: "opus",
+        // 20 ms frames: two frames per 40 ms ring floor, gentle drain
+        // ratio (excess/floor = 0.5), fewer encode/insert/publish
+        // events; a lost frame is a 20 ms gap, reconstructed by FEC
+        // (docs/dev/latency-optimization.md §8 finding 4).
+        frameDuration: Net.Time.Milli(20),
+        // 48 kbps: the stock 32 kbps starved the in-band FEC layer —
+        // LBRR redundancy barely fits at 10 ms frames, so "lost"
+        // frames were never reconstructed. 48 k gives the redundancy
+        // room (docs/dev/latency-optimization.md §8 finding 2).
+        bitrate: 48_000,
+        useinbandfec: true,
+        packetlossperc: 10,
+      },
+    });
+  }
+
+  /** Swap the camera mid-call: tear the capture + encoder down, rebuild
+   *  from the new track on the same broadcast. The catalog updates (the
+   *  new encoder re-registers the `v` rendition) → re-announce →
+   *  receivers' stall watchdog re-subscribes; the canvas keeps its last
+   *  frame during the gap. */
+  swapVideo(track: MediaStreamTrack, on: boolean): void {
+    this.videoEncoder?.close();
+    this.videoEncoder = null;
+    this.videoCapture?.close();
+    this.videoCapture = null;
+    this.buildVideo(track);
+    // The new encoder gates on its own signal; re-apply the camera
+    // toggle so an off camera stays off across the swap.
+    this.videoEnabled?.set(on);
+  }
+
+  /** Swap the microphone mid-call (see `swapVideo`). */
+  swapAudio(track: MediaStreamTrack): void {
+    this.audioEncoder?.close();
+    this.audioEncoder = null;
+    this.audioCapture?.close();
+    this.audioCapture = null;
+    this.buildAudio(track);
   }
 
   /** Poll the transport's send-rate estimate into `estimate` at ~1 Hz

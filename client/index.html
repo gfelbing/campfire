@@ -31,8 +31,16 @@
           </div>
         </div>
         <div class="topbar-right">
-          <button id="mic-btn" class="topbar-toggle" title="mute / unmute"></button>
-          <button id="cam-btn" class="topbar-toggle" title="camera on / off"></button>
+          <div class="media-drop">
+            <button id="mic-btn" class="topbar-toggle" title="mute / unmute"></button>
+            <button id="mic-menu-btn" class="topbar-toggle topbar-chevron" title="microphone settings" aria-haspopup="true">▾</button>
+            <div id="mic-menu" class="map-list media-menu hidden"></div>
+          </div>
+          <div class="media-drop">
+            <button id="cam-btn" class="topbar-toggle" title="camera on / off"></button>
+            <button id="cam-menu-btn" class="topbar-toggle topbar-chevron" title="camera settings" aria-haspopup="true">▾</button>
+            <div id="cam-menu" class="map-list media-menu hidden"></div>
+          </div>
           <button id="screen-btn" class="topbar-toggle hidden" title="share the screen"></button>
           <div class="status-drop">
             <button id="status-btn" class="topbar-toggle" title="presence status" aria-haspopup="true">
