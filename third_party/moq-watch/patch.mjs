@@ -92,11 +92,6 @@ const M = [
     'new AudioContext({ latencyHint: 0, sampleRate: n }) // [campfire latency] 0 = minimum output buffer; "interactive" is 10-20 ms on most setups (docs/dev/latency-optimization.md §7 finding 1)'
   ],
   [
-    "AudioDecoder loop: skip stale head frames at join",
-    'let { frame: n } = t, a = r.Milli.fromMicro(n.timestamp);\n\t\t\t\tif (this.sync.received(a, "audio"), this.#e.stats.update((e) => ({ bytesReceived: (e?.bytesReceived ?? 0) + n.payload.byteLength })), !await this.#g(e, i, s, c, c.push({\n\t\t\t\t\t...t,\n\t\t\t\t\tframe: n\n\t\t\t\t}))) return;',
-    'let { frame: n } = t, a = r.Milli.fromMicro(n.timestamp);\n\t\t\t\tthis.sync.received(a, "audio");\n\t\t\t\tthis.#e.stats.update((e) => ({ bytesReceived: (e?.bytesReceived ?? 0) + n.payload.byteLength }));\n\t\t\t\t{ // [campfire latency] Skip stale head frames at join. moq-lite-02\n\t\t\t\t// serves groups newest-first: the publisher\'s held head arrives\n\t\t\t\t// after the live edge, the Order module releases it sorted\n\t\t\t\t// oldest-first, and the ring anchors at the oldest released\n\t\t\t\t// frame — the startup delay spike (observed up to 20 s, decaying\n\t\t\t\t// over 10-20 s as it drains). Drop frames older than the newest\n\t\t\t\t// arrival minus the sync\'s maxAge instead: the first decoded\n\t\t\t\t// frame is then a live one and the ring anchors at the live edge\n\t\t\t\t// (docs/dev/latency-optimization.md §10.3).\n\t\t\t\t\tconst newest = this.sync.out.timestamp.peek();\n\t\t\t\t\tconst maxAge = Number(this.sync.out.maxAge.peek() ?? 0);\n\t\t\t\t\tif (newest !== void 0 && a < newest - maxAge) { window.__campfire_skip = (window.__campfire_skip ?? 0) + 1; continue; }\n\t\t\t\t}\n\t\t\t\tif (!await this.#g(e, i, s, c, c.push({\n\t\t\t\t\t...t,\n\t\t\t\t\tframe: n\n\t\t\t\t}))) return;'
-  ],
-  [
     "SharedRingBuffer wrapper (Ce): initial capacity 4x floor",
     "\t\tlet a = Math.max(n, r * 2);",
     "\t\t// [campfire latency] 4x the floor instead of 2x — jitter headroom without\n\t\t// extra playback delay (docs/dev/latency-optimization.md §8).\n\t\tlet a = Math.max(n, r * 4);"
