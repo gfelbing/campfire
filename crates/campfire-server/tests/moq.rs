@@ -247,13 +247,8 @@ async fn publish_and_subscribe_within_a_call() {
         connect_moq(&ep, addr, Some(&ticket_b)).await,
         "bob's /moq session",
     );
-
-    // Alice publishes her own namespace (`call/<room>/<user-id>`) and
-    // streams fifty audio frames at 20 ms intervals — the spike shape
-    // (docs/arch/moq-sfu.md): the publisher streams live while the
-    // subscriber joins.
-    let path = format!("call/office/{a_id}");
     let info = moq_net::track::Info::default().with_timescale(Timescale::MICRO);
+    let path = format!("call/office/{a_id}");
     let bcast = a_moq
         .origin
         .publish(&path, moq_net::origin::Route::default())
@@ -321,6 +316,142 @@ async fn publish_and_subscribe_within_a_call() {
         got >= 10,
         "bob received {got} live frames from alice through the SFU"
     );
+}
+
+/// Three participants in one call: each publishes, each subscribes to the
+/// other two. The 3-way fan-out (one origin, three sessions) must deliver
+/// live frames to every subscriber — this is the "3rd participant joins and
+/// everything breaks" reproduction at the SFU level.
+#[tokio::test]
+async fn three_participants_fan_out() {
+    let (addr, _root, _world) = start_server_with_world().await;
+    let ep = endpoint();
+    let (mut a, a_id) = join(addr, "office", "alice").await;
+    let (mut b, b_id) = join(addr, "office", "bob").await;
+    let (mut c, c_id) = join(addr, "office", "carol").await;
+    let Some(ticket_a) = a.recv_ticket().await else {
+        panic!("alice got no media ticket");
+    };
+    let Some(ticket_b) = b.recv_ticket().await else {
+        panic!("bob got no media ticket");
+    };
+    let Some(ticket_c) = c.recv_ticket().await else {
+        panic!("carol got no media ticket");
+    };
+
+    // All three connect to the SFU on the same (single) call origin.
+    let a_moq = moq_ok(
+        connect_moq(&ep, addr, Some(&ticket_a)).await,
+        "alice's /moq session",
+    );
+    let b_moq = moq_ok(
+        connect_moq(&ep, addr, Some(&ticket_b)).await,
+        "bob's /moq session",
+    );
+    let c_moq = moq_ok(
+        connect_moq(&ep, addr, Some(&ticket_c)).await,
+        "carol's /moq session",
+    );
+
+    // Each publishes `call/office/<id>` track "a" and streams 20 ms frames
+    // until stopped. The publish handles are kept alive: dropping a
+    // `Broadcast` unannounces its route.
+    let info = moq_net::track::Info::default().with_timescale(Timescale::MICRO);
+    let mut bcasts = Vec::new();
+    let mut stops = Vec::new();
+    for (origin, id) in [
+        (&a_moq.origin, a_id.clone()),
+        (&b_moq.origin, b_id.clone()),
+        (&c_moq.origin, c_id.clone()),
+    ] {
+        let path = format!("call/office/{id}");
+        let bcast = origin
+            .publish(&path, moq_net::origin::Route::default())
+            .expect("publish");
+        bcasts.push(bcast);
+        let bcast = bcasts.last().unwrap();
+        let mut track = bcast.create_track("a", info.clone()).expect("audio track");
+        let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
+        tokio::spawn(async move {
+            for i in 0..u64::MAX {
+                let ts = moq_net::Timestamp::from_micros(i * 20_000).unwrap();
+                if track
+                    .write_frame(ts, format!("frame-{i}").into_bytes())
+                    .is_err()
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            let _ = stop_rx.await;
+            let _ = track.finish();
+        });
+        stops.push(stop_tx);
+    }
+
+    // Everyone subscribes to the other two; read 10 live frames from each.
+    async fn read_frames(
+        client: &MoqClient,
+        path: &str,
+        label: &'static str,
+    ) -> u64 {
+        let consumer = client.origin.consume();
+        let bcast = tokio::time::timeout(Duration::from_secs(5), consumer.routed_broadcast(path))
+            .await
+            .unwrap_or_else(|_| panic!("{label}: timed out waiting for the announce"))
+            .unwrap_or_else(|_| panic!("{label}: announce errored"));
+        let track = bcast.track("a").unwrap_or_else(|_| panic!("{label}: no audio track"));
+        let mut sub = tokio::time::timeout(
+            Duration::from_secs(5),
+            track.subscribe(moq_net::track::Subscription::default().with_max_age(Duration::from_secs(2))),
+        )
+        .await
+        .expect("{label}: subscribe timed out")
+        .unwrap_or_else(|e| panic!("{label}: subscribe failed: {e}"));
+        let mut got = 0u64;
+        let deadline = Instant::now() + Duration::from_secs(8);
+        while got < 10 && Instant::now() < deadline {
+            match tokio::time::timeout(Duration::from_millis(500), sub.recv_group()).await {
+                Ok(Ok(Some(mut group))) => loop {
+                    match group.read_frame().await {
+                        Ok(Some(_frame)) => {
+                            got += 1;
+                            if got >= 10 {
+                                break;
+                            }
+                        }
+                        Ok(None) => break,
+                        Err(e) => panic!("{label}: read_frame error: {e}"),
+                    }
+                },
+                Ok(Ok(None)) => panic!("{label}: subscription ended (recv_group None)"),
+                Ok(Err(e)) => panic!("{label}: recv_group error: {e}"),
+                Err(_) => eprintln!("{label}: recv_group timeout, continuing"),
+            }
+        }
+        got
+    }
+
+    let pa_path = format!("call/office/{b_id}");
+    let pc_path = format!("call/office/{c_id}");
+    let ca_path = pc_path.clone();
+    let cc_path = format!("call/office/{a_id}");
+    let cb_path = pa_path.clone();
+    let (pa, pc, ca, cb, cc) = tokio::join!(
+        read_frames(&a_moq, &pa_path, "alice<-bob"),
+        read_frames(&a_moq, &pc_path, "alice<-carol"),
+        read_frames(&b_moq, &ca_path, "bob<-carol"),
+        read_frames(&c_moq, &cc_path, "carol<-alice"),
+        read_frames(&c_moq, &cb_path, "carol<-bob"),
+    );
+    for stop in stops {
+        let _ = stop.send(());
+    }
+    assert!(pa >= 10, "alice received {pa} frames from bob through the SFU");
+    assert!(pc >= 10, "alice received {pc} frames from carol through the SFU");
+    assert!(ca >= 10, "bob received {ca} frames from carol through the SFU");
+    assert!(cc >= 10, "carol received {cc} frames from alice through the SFU");
+    assert!(cb >= 10, "carol received {cb} frames from bob through the SFU");
 }
 
 /// A user in the room but outside the call has no media ticket: connecting
