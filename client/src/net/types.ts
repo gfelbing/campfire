@@ -106,6 +106,12 @@ export type ServerMsg =
   | { t: "call_mute"; id: string; audio: boolean; video: boolean }
   | { t: "call_screen"; id: string; on: boolean }
   | {
+      /** A fresh media ticket (docs/arch/moq-sfu.md): the reply to `ticket`,
+       *  sent only to the requester. */
+      t: "ticket";
+      ticket: string;
+    }
+  | {
       /** Stepped onto an `exitUrl` zone: the server resolved the URL to a
        *  map id (README roadmap "Map enhancements"); navigate there with
        *  the same name + color. */
@@ -142,6 +148,9 @@ export type ClientMsg =
   /** Presence: we started/stopped screen sharing (camera track replaced). */
   | { t: "call_screen"; on: boolean }
   | { t: "call_leave" }
+  /** Ask for a fresh media ticket (docs/arch/moq-sfu.md): the sender's
+   *  current call membership is re-checked; the reply is `ticket`. */
+  | { t: "ticket" }
   /** Keepalive (docs/arch/protocol.md): the server ignores it; the stream activity
    *  alone resets the server's idle timeout, so a stationary user keeps
    *  their session (and identity + position) alive. */

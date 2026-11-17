@@ -984,6 +984,20 @@ impl World {
         Ok(())
     }
 
+    /// Mint a fresh media ticket for the sender's current call
+    /// (docs/arch/moq-sfu.md `ticket` request): membership is re-checked
+    /// — a caller outside any call gets `None` and the relay answers
+    /// `call_not_allowed`.
+    pub fn media_ticket(&self, room: &str, id: &str) -> Option<String> {
+        let rooms = self.rooms.lock().unwrap();
+        rooms
+            .get(room)?
+            .calls
+            .iter()
+            .find(|c| c.participants.contains_key(id))
+            .map(|c| self.tickets.mint(id, room, c.id))
+    }
+
     /// Hang up: the sender leaves the room's call (or cancels their ring).
     pub fn call_leave(&self, room: &str, from: &str) -> Result<(), ErrorCode> {
         let mut rooms = self.rooms.lock().unwrap();

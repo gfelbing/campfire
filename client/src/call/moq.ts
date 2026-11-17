@@ -77,6 +77,10 @@ export interface MoqCallOpts {
   /** A participant's downlink changed state (the manager re-pushes the
    *  roster so the UI tile flips "subscribing…" → "live"). */
   onDownlinkChange?: (id: string, status: DownlinkStatus) => void;
+  /** The MoQ session closed unexpectedly (network drop, server close).
+   *  Not called for a clean `stop()` — the manager uses it to request a
+   *  fresh ticket and restart the media session mid-call. */
+  onEnded?: () => void;
 }
 
 /** Downlink pipeline status, from the watch broadcast. */
@@ -168,6 +172,11 @@ export interface MoqDownHook {
    *  decoder's context: a suspended context stops the render worklet,
    *  which freezes the ring playhead and the paced decode loop. */
   audCtx: string | null;
+  /** The AudioContext's `currentTime` (s): advances while the context
+   *  renders (the worklet's process loop is being pulled); frozen means
+   *  the context is no longer rendering even though `state` says
+   *  "running". */
+  audCtxTime: number | null;
   /** Ring playhead, ms (the audio presentation position the decode loop
    *  paces inserts against): frozen while audio is flat. */
   audClock: number | null;
@@ -273,6 +282,18 @@ interface Downlink {
    *  decoded-audio total and the seconds it has been frozen. */
   stallSeconds: number;
   lastAudioBytes: number;
+  /** Decode-level stall watchdog: last ring playhead (ms on the media
+   *  timeline) and how long it has been frozen. A frozen playhead with
+   *  bytes still arriving is the delivery-alive-but-decode-stuck state
+   *  (the re-anchor storm: the peer's timeline resets mid-call and the
+   *  decode pipeline never re-anchors) — the off→on pulse cannot recover
+   *  it, only a full downlink rebuild can (see checkStalls). */
+  lastClockMs: number | null;
+  clockStallSeconds: number;
+  /** How many times this downlink has been rebuilt by the watchdog, and
+   *  the wall time of the last rebuild (the flap guard). */
+  rebuilds: number;
+  lastRebuildAt: number;
   /** E2e recorder tap for this downlink (build:e2e only; re-attached by
    *  wireAudio when the audio graph rewires). */
   recorderProc: ScriptProcessorNode | null;
@@ -336,26 +357,37 @@ export class MoqCall {
   private room: string;
   private onDownlinkChange?: (id: string, status: DownlinkStatus) => void;
   private onLevel?: (id: string, level: number) => void;
+  /** Unexpected session death (the manager restarts with a fresh ticket). */
+  private onEnded?: () => void;
   /** 10 Hz level-meter poll (see wireAudio); null when the session is down. */
   private levelTimer: number | null = null;
   private hookTimer: number | null = null;
   /** Stall watchdog (the re-announce pulse trigger), 1 Hz. */
   private stallTimer: number | null = null;
+  /** Set by a clean `stop()`: `closed` then reports nothing to `onEnded`. */
+  private cleanStop = false;
 
   private constructor(
     room: string,
     onDownlinkChange?: (id: string, status: DownlinkStatus) => void,
     onLevel?: (id: string, level: number) => void,
+    onEnded?: () => void,
   ) {
     this.room = room;
     this.onDownlinkChange = onDownlinkChange;
     this.onLevel = onLevel;
+    this.onEnded = onEnded;
   }
 
   /** Open the session and start the uplink. Rejects if the session cannot
    *  be established or the stream has no usable track. */
   static async start(opts: MoqCallOpts): Promise<MoqCall> {
-    const call = new MoqCall(opts.room, opts.onDownlinkChange, opts.onLevel);
+    const call = new MoqCall(
+      opts.room,
+      opts.onDownlinkChange,
+      opts.onLevel,
+      opts.onEnded,
+    );
     setHook({ url: opts.url, name: opts.name, version: null, state: "starting", error: null });
     try {
       const origin = new Net.Origin.Producer();
@@ -418,8 +450,9 @@ export class MoqCall {
       // Surface an unexpected session death (network drop, server close);
       // a clean stop() is expected and says nothing.
       void session.closed.then((err) => {
-        if (err && call.session === session) {
+        if (err && call.session === session && !call.cleanStop) {
           opts.onLog(`moq session closed: ${err.message}`);
+          call.onEnded?.();
         }
       });
       // Uplink scaling: sample the transport's send-rate estimate at
@@ -794,6 +827,10 @@ export class MoqCall {
       recorderProc: null,
       stallSeconds: 0,
       lastAudioBytes: 0,
+      lastClockMs: null,
+      clockStallSeconds: 0,
+      rebuilds: 0,
+      lastRebuildAt: 0,
       muted: false,
       lastStatus: "subscribing",
       camEnabled,
@@ -841,33 +878,118 @@ export class MoqCall {
     // (cooldown after). Mute does not false-positive (the sender keeps
     // encoding silence frames); camera-off omits the rendition without
     // touching audio.
-    this.stallTimer = window.setInterval(() => this.checkStalls(), 1000);
+    // The stall watchdog tick (1 s), one interval for the whole session:
+    // addParticipant used to start a fresh interval per downlink (the
+    // handle was overwritten, the old one leaked — one leaked 1 Hz tick
+    // per participant, each iterating every downlink).
+    if (this.stallTimer === null) {
+      this.stallTimer = window.setInterval(() => this.checkStalls(), 1000);
+    }
     this.downlinks.set(id, d);
     this.refreshDownlinks();
     return this.viewOf(d);
   }
 
-  /** The stall watchdog tick (1 s): decoded audio frozen for ≥ 2 s while
-   *  the broadcast is live → pulse the downlink's gates once (cooldown
-   *  via the negative count). See the re-announce guard comment at the
-   *  pulse wiring. */
+  /** The stall watchdog tick (1 s). Two freezes, two escalations:
+   *
+   *  1. **Delivery frozen** (no decoded-audio bytes while the broadcast is
+   *     live): the re-announce re-route killed the subscription and the
+   *     library only re-subscribes on an identity change → pulse the
+   *     off→on gates once (cooldown after). The pre-existing recovery.
+   *  2. **Decode frozen** (bytes keep arriving, the ring playhead does not
+   *     move): the decode pipeline is stuck past its re-anchor (the peer's
+   *     timeline reset mid-call — the group counter restarts and the
+   *     consumer never admits the new epoch). The pulse only re-subscribes
+   *     the same stuck pipeline and demonstrably cannot recover it (3-way
+   *     e2e: delay climbs 1 s/s forever), so rebuild the whole downlink:
+   *     fresh broadcast, subscription, decoder graph, audio context and
+   *     ring. A fresh downlink re-anchors reliably; the canvas element
+   *     keeps its identity through the manager's roster push. Cooldown
+   *     via `lastRebuildAt` so a stubborn case retries at most once per
+   *     5 s instead of flapping. */
   private checkStalls(): void {
     for (const d of this.downlinks.values()) {
       if (this.statusOf(d) !== "live") {
         d.stallSeconds = 0;
+        d.lastAudioBytes = 0;
+        d.clockStallSeconds = 0;
+        d.lastClockMs = null;
         continue;
       }
+      // Escalation 2: bytes flow, playhead frozen. Check first: the
+      // delivery watchdog below resets its own counters, and a downlink
+      // can be in both states in one tick (bytes moved while the ring
+      // stayed parked).
+      const clock = d.audDecoder.out.timestamp.peek() ?? null;
+      if (clock !== null && clock === d.lastClockMs) {
+        d.clockStallSeconds++;
+        // One decode-stall second of grace: the ring parks briefly on a
+        // latency rise or a join anchor; only a parked playhead that
+        // outlives the pulse path escalates to a rebuild. The flap guard
+        // backs off exponentially per rebuild of this downlink (5 s, 10 s,
+        // 20 s … capped at 60 s), so a wedge that comes back keeps the
+        // recovery churn bounded instead of rebuilding every 5 s forever.
+        if (d.clockStallSeconds >= 2) {
+          const now = Date.now();
+          const backoff = Math.min(5_000 << Math.min(d.rebuilds, 4), 60_000);
+          if (now - d.lastRebuildAt >= backoff) {
+            d.rebuilds++;
+            d.lastRebuildAt = now;
+            d.clockStallSeconds = 0;
+            d.lastClockMs = null;
+            d.stallSeconds = -2; // also cool the delivery watchdog
+            this.rebuildDownlink(d.id);
+            continue;
+          }
+        }
+      } else {
+        d.clockStallSeconds = 0;
+      }
+      d.lastClockMs = clock;
+      // Escalation 1: delivery frozen → pulse once, and if the pulses
+      // don't revive delivery (two failed cycles), rebuild the downlink
+      // like the decode-stall path — a dead subscription is a dead
+      // pipeline no matter where it wedged (cooldown via the negative
+      // count).
       const bytes = d.audDecoder.out.stats.peek()?.bytesReceived ?? 0;
       if (bytes > 0 && bytes === d.lastAudioBytes) {
         d.stallSeconds++;
-        if (d.stallSeconds >= 2) {
+        if (d.stallSeconds === 2 || d.stallSeconds === 6) {
           d.stallSeconds = -2; // cooldown: no re-pulse for ~4 s
-          this.schedulePulse(d);
+          const now = Date.now();
+          const backoff = Math.min(5_000 << Math.min(d.rebuilds, 4), 60_000);
+          if (d.stallSeconds === 6 && now - d.lastRebuildAt >= backoff) {
+            d.rebuilds++;
+            d.lastRebuildAt = now;
+            d.clockStallSeconds = 0;
+            d.lastClockMs = null;
+            this.rebuildDownlink(d.id);
+          } else {
+            this.schedulePulse(d);
+          }
         }
       } else {
         d.stallSeconds = 0;
       }
       d.lastAudioBytes = bytes;
+    }
+  }
+
+  /** Tear a downlink down and build it back from scratch (the decode-stall
+   *  recovery): a fresh Watch.Broadcast, subscription, decoders, audio
+   *  context and ring. The silent-zone mute and the UI canvases carry
+   *  over: `removeParticipant` drops the old pipeline, `addParticipant`
+   *  builds a new one, and the manager's `onPeers` push swaps the fresh
+   *  canvases into the tiles. */
+  private rebuildDownlink(id: string): void {
+    const d = this.downlinks.get(id);
+    if (!d) return;
+    const muted = d.muted;
+    this.removeParticipant(id);
+    this.addParticipant(id);
+    this.setMuted(id, muted);
+    if (__CAMPFIRE_DEBUG__) {
+      console.info(`campfire: rebuilt downlink for ${id} (decode stall, rebuild #${d.rebuilds})`);
     }
   }
 
@@ -971,6 +1093,7 @@ export class MoqCall {
 
   /** Tear everything down and close the session. Idempotent. */
   stop(): void {
+    this.cleanStop = true;
     for (const d of [...this.downlinks.values()]) {
       this.downlinks.delete(d.id);
       this.teardown(d);
@@ -1330,6 +1453,7 @@ export class MoqCall {
           audStalled: d.audDecoder.out.stalled.peek(),
           audRoot: d.audDecoder.out.root.peek() !== undefined,
           audCtx: d.audDecoder.out.context.peek()?.state ?? null,
+          audCtxTime: d.audDecoder.out.context.peek()?.currentTime ?? null,
           audClock: d.audDecoder.out.timestamp.peek() ?? null,
           audBuf: d.audDecoder.out.buffered.peek() ?? null,
           syncTs: d.audDecoder.sync.out.timestamp.peek() ?? null,

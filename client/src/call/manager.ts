@@ -89,6 +89,11 @@ export interface CallSignaling {
   sendCallMute(audio: boolean, video: boolean): void;
   sendCallScreen(on: boolean): void;
   sendCallLeave(): void;
+  /** Ask the server for a fresh media ticket (docs/arch/moq-sfu.md): the
+   *  reply arrives as `onTicket`. The media session asks when it dies
+   *  mid-call — its original ticket is single-use and a stable roster
+   *  sends no new `call_start`. */
+  requestTicket(): void;
   /** Transport RTT in ms (the `/wt` QUIC connection), `null` when the
    *  transport can't measure it (SSE fallback, or no `getStats()`). */
   getRtt(): Promise<number | null>;
@@ -297,6 +302,14 @@ export class CallManager {
       this.roster = participants;
       this.syncDownlinks();
       this.maybeAutoVoiceOnly();
+      // The roster re-broadcast carries a fresh media ticket. If our MoQ
+      // session is not up — it was never started (a ticketless catch-up
+      // `call_start` entered the call), or it died (the uplink aborted, a
+      // dropped QUIC connection that outlived the 30 s reconnect grace,
+      // the reload race) — (re)start it with the fresh ticket. A live
+      // session is kept: restarting it would tear down every peer's
+      // downlink to us for nothing.
+      if (ticket && !this.moq) this.startSession(ticket);
       this.pushPeers();
       return;
     }
@@ -611,6 +624,10 @@ export class CallManager {
       onLog: (t) => this.hooks.onLog(t),
       onLevel: (id, level) => this.hooks.onPeerLevel(id, level),
       onDownlinkChange: () => this.pushPeers(),
+      // The session died unexpectedly (network drop, server close): while
+      // we are still in the call, ask the server for a fresh ticket and
+      // restart. A clean stop() (leaving the call) notifies nothing.
+      onEnded: () => this.onSessionEnded(seq),
     })
       .then((c) => {
         // A reset raced the async start: drop the orphaned session.
@@ -629,6 +646,32 @@ export class CallManager {
       .catch((err) => {
         this.hooks.onLog(String(err));
       });
+  }
+
+  /** The MoQ session died while we are still in the call (network drop,
+   *  server close, the SFU aborting the session). The ticket it carried is
+   *  single-use and a stable roster sends no new `call_start`, so the only
+   *  way back is a fresh ticket (`docs/arch/moq-sfu.md` `ticket` request).
+   *  A short backoff keeps a rapidly dying session from spinning the
+   *  request; leaving the call cancels the retry via `sessionSeq`. */
+  private onSessionEnded(seq: number): void {
+    if (seq !== this.sessionSeq) return; // stale session, already replaced
+    if (this.phase.p !== "in-call") return;
+    if (!this.moq) return;
+    this.moq = null;
+    const delay = 1000;
+    window.setTimeout(() => {
+      if (this.phase.p !== "in-call") return;
+      this.send.requestTicket();
+    }, delay);
+  }
+
+  /** A fresh media ticket arrived (docs/arch/moq-sfu.md): restart the
+   *  media session with it. */
+  onTicket(ticket: string): void {
+    if (this.phase.p !== "in-call") return;
+    if (this.moq) return; // a live session is not ours to replace
+    this.startSession(ticket);
   }
 
   /** Stop the MoQ session (idempotent). */

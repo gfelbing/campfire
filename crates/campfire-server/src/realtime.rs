@@ -501,6 +501,24 @@ fn dispatch(
             };
             call_result(world.call_leave(&room, &id), tx)
         }
+        // Media ticket refresh (docs/arch/moq-sfu.md): re-check membership
+        // and mint a fresh ticket for the sender's current call. Sent only
+        // to the requester (a bearer token over their own session).
+        Ok(ClientMsg::Ticket) => {
+            let Some((room, id, _)) = session.clone() else {
+                return send(tx, ErrorCode::BadMessage);
+            };
+            match world.media_ticket(&room, &id) {
+                Some(ticket) => {
+                    tracing::debug!(user = %id, room = %room, "media ticket re-minted");
+                    tx.send(ServerMsg::Ticket { ticket }).is_ok()
+                }
+                None => {
+                    tracing::debug!(user = %id, room = %room, "media ticket refused: not in a call");
+                    send(tx, ErrorCode::CallNotAllowed)
+                }
+            }
+        }
         // Keepalive: the read loop's idle timer already reset with the
         // bytes, so there is nothing to do (docs/arch/protocol.md).
         Ok(ClientMsg::Ping) => true,

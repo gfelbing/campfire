@@ -724,6 +724,10 @@ async fn fallback_event(
                 // Keepalive (docs/arch/protocol.md): the session lives with the open SSE
                 // stream, not a command-stream idle timer — nothing to do.
                 ClientMsg::Ping => {}
+                // Media ticket refresh (docs/arch/moq-sfu.md): the SSE
+                // fallback has no MoQ media, so a ticket is useless —
+                // ignore.
+                ClientMsg::Ticket => {}
                 ClientMsg::Join { .. } => return Err(err(ErrorCode::BadMessage)),
             }
             Ok(Json(serde_json::json!({})))

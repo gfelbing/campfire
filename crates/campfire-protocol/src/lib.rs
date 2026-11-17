@@ -193,6 +193,14 @@ pub enum ClientMsg {
     },
     /// Leave the current call (1:1 or huddle).
     CallLeave,
+    /// Request a fresh media ticket (docs/arch/moq-sfu.md): the sender's
+    /// current call membership is re-checked and a new ticket minted. The
+    /// client asks when its MoQ session died mid-call — the original
+    /// ticket is single-use and a stable roster sends no new
+    /// `call_start`, so without this the media stays dead until the
+    /// roster next changes. Refused (`call_not_allowed`) when the sender
+    /// is not in a call.
+    Ticket,
     /// Keepalive (docs/arch/protocol.md): the server ignores it. The stream activity
     /// alone resets the server's idle timeout, so a stationary user (no
     /// movement, no chat) keeps their session — and with it their identity
@@ -301,6 +309,12 @@ pub enum ServerMsg {
     /// and color.
     Navigate {
         map: String,
+    },
+    /// A fresh media ticket for the requesting user's current call
+    /// (docs/arch/moq-sfu.md): the reply to `ticket`. Sent only to the
+    /// requester.
+    Ticket {
+        ticket: String,
     },
     Error {
         code: ErrorCode,

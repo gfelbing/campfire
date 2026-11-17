@@ -339,6 +339,7 @@ async function main(): Promise<void> {
     },
     onCallMute: (id, a, v) => manager.onCallMute(id, a, v),
     onCallScreen: (id, on) => manager.onCallScreen(id, on),
+    onTicket: (ticket) => manager.onTicket(ticket),
     // exitUrl zones (README roadmap "Map enhancements"): the server owns
     // the URL → map-id rule and tells us the target; same name + color.
     onNavigate: (map) => navigateToRoom(map, 50),

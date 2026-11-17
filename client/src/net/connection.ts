@@ -38,7 +38,10 @@ export interface ConnHandlers {
   onTyping: (id: string, on: boolean) => void;
   /** A member's presence status changed (profile menu). */
   onUserStatus: (id: string, status: OwnStatus) => void;
-  onMovement: (batch: MovementBatch) => void;
+  /** A fresh media ticket arrived (the reply to `ticket`,
+   *  docs/arch/moq-sfu.md): the call manager (re)starts its media
+   *  session with it. */
+  onTicket: (ticket: string) => void;  onMovement: (batch: MovementBatch) => void;
   /** A bubble started or grew; `participants` is the full list. `ticket`
    *  is our media ticket when we are a participant (docs/arch/moq-sfu.md). */
   onCallStart: (
@@ -224,6 +227,14 @@ export class Connection {
     this.transport?.sendMsg({ t: "call_leave" });
   }
 
+  /** Ask the server for a fresh media ticket (docs/arch/moq-sfu.md):
+   *  re-checks our call membership and answers `ticket`. The media
+   *  session asks when it dies mid-call — the original ticket is
+   *  single-use and a stable roster sends no new `call_start`. */
+  requestTicket(): void {
+    this.transport?.sendMsg({ t: "ticket" });
+  }
+
   /** Transport RTT in ms (the `/wt` QUIC connection's `smoothedRtt`), or
    *  `null` when unsupported (the SSE fallback, or a browser without
    *  `WebTransport.getStats()`). The `/wt` connection is a second QUIC
@@ -326,6 +337,9 @@ export class Connection {
         break;
       case "call_screen":
         this.handlers.onCallScreen(msg.id, msg.on);
+        break;
+      case "ticket":
+        this.handlers.onTicket(msg.ticket);
         break;
       case "navigate":
         this.handlers.onNavigate(msg.map);
