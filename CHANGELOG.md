@@ -4,6 +4,53 @@ All notable releases of campfire. Versions follow calendar-agnostic
 semver; releases are cut by tagging `vX.Y.Z` (the Docker image is built
 and pushed to GHCR on each tag).
 
+## [0.0.20] — 2026-11-17
+
+The self-healing-calls release: media sessions that die mid-call now
+come back on their own instead of staying silent until the roster next
+changes, the stall watchdog escalates from re-subscribe pulses to full
+downlink rebuilds when pulses cannot revive a pipeline, and the topbar
+gains per-device mic and camera menus. The 3-way fan-out at the SFU is
+now under regression test.
+
+### Added
+
+- Media-ticket refresh (`ticket` request → `ticket` reply): a MoQ
+  session that dies mid-call (network drop, server close, an aborted
+  uplink) can no longer strand a participant — the original ticket is
+  single-use and a stable roster sends no new `call_start`, so the
+  client now asks the server for a fresh one and restarts the media
+  session automatically. The server re-checks call membership before
+  minting.
+- The roster re-sync path (`call_start` on a roster change)
+  (re)starts the media session with its fresh ticket when no live
+  session exists — a ticketless catch-up `call_start` entry used to
+  leave a participant without media until the roster next changed.
+- An N-party browser e2e harness (`tools/e2e/moq3.js`, one browser
+  process per participant — Chromium pools QUIC connections per origin
+  per process, so 4+ pages in one browser never even connect) and a
+  3-way fan-out regression test at the SFU level
+  (`three_participants_fan_out`): three sessions on one call origin,
+  each publishing, each subscribing to the other two.
+- The topbar's camera and mic toggles each gain a chevron dropdown:
+  every camera and microphone on the machine (check mark on the active
+  one), plus a noise-cancellation item on the mic menu. Device swaps
+  mid-call rebuild the encoder on the same broadcast (receivers'
+  stall watchdog re-subscribes).
+
+### Fixed
+
+- The stall watchdog escalates: a decode pipeline that wedges with data
+  still flowing (bytes arriving, ring playhead frozen — the skip→reset
+  storm beyond the audio skip budget) is rebuilt wholesale, because the
+  re-subscribe pulse demonstrably cannot recover it. Delivery stalls
+  that two pulse cycles could not revive escalate the same way.
+  Rebuilds back off exponentially per downlink (5 s → 60 s) so a
+  recurring wedge stays bounded.
+- `addParticipant` leaked one 1 Hz watchdog interval per participant
+  (the interval handle was overwritten on every join); one interval per
+  session now.
+
 ## [0.0.19] — 2026-11-16
 
 The honest-clocks release: the call's delay indicators now tell the
