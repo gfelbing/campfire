@@ -14,9 +14,10 @@
 //! background itself gets louder — so a fan spinning up re-gates within
 //! seconds without the floor chasing speech.
 //!
-//! The toggle now drives both stages: browser `noiseSuppression` on the
-//! raw track plus this gate. OFF is fully raw (bypass), ON is browser
-//! NS + gate.
+//! The toggle drives this gate only — the browser's own
+//! `noiseSuppression` stays at its default either way (turning the gate
+//! off must keep the browser default, not strip the mic of its
+//! processing).
 //!
 //! The gate algorithm lives in `GATE_WORKLET_SOURCE` as a
 //! self-contained string (the worklet thread needs source text for
@@ -80,7 +81,7 @@ class Gate {
   }
 
   // One sample in, one out. The gate is bypassed entirely when disabled
-  // (the OFF path must be bit-raw).
+  // (the OFF path is the browser's default processing, untouched).
   step(x) {
     if (!this.enabled) return x;
     // DC blocker (one-pole high-pass): kills rumble and handler thumps

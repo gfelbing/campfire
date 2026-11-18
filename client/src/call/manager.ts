@@ -591,7 +591,6 @@ export class CallManager {
         [kind]: kind === "audio"
           ? {
               echoCancellation: true,
-              noiseSuppression: this.mediaPrefs.noiseSuppression,
               autoGainControl: true,
               deviceId: { ideal: deviceId },
             }
@@ -617,18 +616,12 @@ export class CallManager {
   async setNoiseSuppression(on: boolean): Promise<void> {
     this.mediaPrefs.noiseSuppression = on;
     saveMediaPrefs(this.mediaPrefs);
-    // Both stages follow the toggle: the browser's APM noise
-    // suppressor on the raw track, and our gate. OFF is fully raw.
+    // The toggle drives the campfire gate only. The browser's own
+    // `noiseSuppression` is left at its default either way — turning the
+    // gate off must keep the browser default, not strip the mic of its
+    // processing (the browser's APM is the better stage for most mics;
+    // the gate is the loud fan / steady hum specialist).
     this.denoiser?.setEnabled(on);
-    const audio = this.micRaw;
-    if (!audio) return;
-    try {
-      await audio.applyConstraints({ noiseSuppression: on });
-      const applied = audio.getSettings().noiseSuppression !== false;
-      if (applied !== on) throw new Error(`browser kept noiseSuppression ${applied}`);
-    } catch (err) {
-      this.hooks.onLog(`noise suppression toggle rejected: ${String(err)}`);
-    }
   }
 
   /** The current preferences snapshot (the dropdown menus' state). */

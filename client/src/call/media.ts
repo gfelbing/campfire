@@ -14,7 +14,10 @@ export interface MediaPrefs {
   cameraId?: string;
   /** Chosen microphone `deviceId`, or `undefined` for the OS default. */
   micId?: string;
-  /** Browser-side noise suppression on the mic track. Default: on. */
+  /** The campfire noise gate on the uplink. Default: on. The browser's
+   *  own `noiseSuppression` stays at its default either way — toggling
+   *  this off must not disable the browser's processing, it only
+   *  bypasses the gate. */
   noiseSuppression: boolean;
 }
 
@@ -54,10 +57,13 @@ export function saveMediaPrefs(prefs: MediaPrefs): void {
  * uplink stays within budget.
  */
 export async function getLocalMedia(prefs: MediaPrefs): Promise<MediaStream> {
+  // The audio constraints leave `noiseSuppression` unset: the browser
+  // keeps its own default processing. The toggleable stage is the
+  // campfire gate (call/denoiser.ts) — flipping it must not reach into
+  // the browser's APM, and a stored `false` must not either.
   const stream = await navigator.mediaDevices.getUserMedia({
     audio: {
       echoCancellation: true,
-      noiseSuppression: prefs.noiseSuppression,
       autoGainControl: true,
       ...(prefs.micId ? { deviceId: { ideal: prefs.micId } } : {}),
     },
