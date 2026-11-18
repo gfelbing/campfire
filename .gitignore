@@ -20,3 +20,4 @@ __pycache__/
 maps/*
 !maps/island
 !maps/office
+server.log
