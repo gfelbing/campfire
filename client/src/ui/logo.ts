@@ -9,7 +9,7 @@
 // solid: the pixelarticons `fire` icon is outline-style (rects with
 // gaps), and on the dark topbar those gaps read as black holes.
 
-/** 5×7 glyphs for the wordmark. '.' = off, 'X' = on. */
+/** 5×7 glyphs for the wordmark. '.' = off, '#' = on. */
 const GLYPHS: Record<string, string[]> = {
   C: [
     ".###.",
@@ -117,7 +117,7 @@ function wordmarkPath(): string {
     const glyph = GLYPHS[WORD[g]!]!;
     for (let row = 0; row < GLYPH_H; row++) {
       for (let col = 0; col < 5; col++) {
-        if (glyph[row]![col] === "X") {
+        if (glyph[row]![col] === "#") {
           const x = g * ADVANCE + col;
           d += `M${x} ${row}h1v1h-1z`;
         }
