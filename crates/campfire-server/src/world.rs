@@ -14,8 +14,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use campfire_protocol::{
-    Avatar, ChatMsg, ChatScope, Dir, ErrorCode, MovementEntry, ServerMsg, Status,
-    UserBrief, UserState,
+    Avatar, ChatMsg, ChatScope, Dir, ErrorCode, MovementEntry, ServerMsg, Status, UserBrief,
+    UserState,
 };
 use rand::Rng as _;
 
@@ -760,11 +760,8 @@ impl World {
                         }),
                     })
                     .collect();
-                let senders: Vec<tokio::sync::mpsc::Sender<Vec<u8>>> = room_entry
-                    .users
-                    .values()
-                    .map(|m| m.dtx.clone())
-                    .collect();
+                let senders: Vec<tokio::sync::mpsc::Sender<Vec<u8>>> =
+                    room_entry.users.values().map(|m| m.dtx.clone()).collect();
                 for m in room_entry.users.values_mut() {
                     m.dirty = false;
                 }
