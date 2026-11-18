@@ -17,7 +17,7 @@ use campfire_protocol::{
     Avatar, ChatMsg, ChatScope, Dir, ErrorCode, MovementBatch, MovementEntry, ServerMsg, Status,
     UserBrief, UserState,
 };
-use rand::RngCore;
+use rand::Rng as _;
 
 /// Maximum chat lines kept per room (docs/arch/protocol.md).
 const CHAT_HISTORY: usize = 100;
@@ -297,7 +297,7 @@ impl World {
     /// not be predictable).
     fn next_user_id(&self) -> String {
         let mut bytes = [0u8; 8];
-        rand::thread_rng().fill_bytes(&mut bytes);
+        rand::rng().fill_bytes(&mut bytes);
         format!(
             "u_{}",
             bytes.iter().map(|b| format!("{b:02x}")).collect::<String>()
@@ -307,7 +307,7 @@ impl World {
     /// Generate a fresh reconnect token: 32 random hex chars (docs/arch/protocol.md).
     fn next_token(&self) -> String {
         let mut bytes = [0u8; 16];
-        rand::thread_rng().fill_bytes(&mut bytes);
+        rand::rng().fill_bytes(&mut bytes);
         bytes.iter().map(|b| format!("{b:02x}")).collect()
     }
 

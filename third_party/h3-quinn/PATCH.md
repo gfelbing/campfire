@@ -37,3 +37,10 @@ Re-vendor when the workspace bumps h3/h3-quinn: download the new crate
 (`cargo download` or the crates.io API), replace `src/` and `Cargo.toml`,
 and re-apply the patch above (or drop it if the new version already carries
 it).
+
+## Freshness (2026-11-18)
+
+Checked against hyperium/h3 master: the fix is there upstream (the cached
+`id` field and the deferred `pending_stop`), but crates.io's latest
+release is still 0.0.10 (May 2025) — nothing released carries it. The
+fork stays until a release line does.

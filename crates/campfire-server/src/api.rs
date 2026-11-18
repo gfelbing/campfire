@@ -25,7 +25,7 @@ use bytes::Bytes;
 use campfire_protocol::{Avatar, ChatMsg, ClientMsg, ErrorCode, ServerMsg, to_line};
 use futures_util::StreamExt;
 use include_dir::{Dir, include_dir};
-use rand::RngCore;
+use rand::Rng as _;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::{IntervalStream, UnboundedReceiverStream};
@@ -324,8 +324,8 @@ async fn wt_ticket(
         .identity_for_cookie(&cookie)
         .ok_or(StatusCode::UNAUTHORIZED)?;
     let mut raw = [0u8; 32];
-    use rand::RngCore;
-    rand::thread_rng().fill_bytes(&mut raw);
+    use rand::Rng as _;
+    rand::rng().fill_bytes(&mut raw);
     let ticket: String = raw.iter().map(|b| format!("{b:02x}")).collect();
     let mut map = state.wt_tickets.lock().unwrap();
     map.retain(|_, (_, minted)| minted.elapsed() < WT_TICKET_TTL);
@@ -512,7 +512,7 @@ pub type FallbackMap = Arc<Mutex<HashMap<String, FallbackSession>>>;
 /// room member cannot impersonate another member's session with their id.
 fn fallback_secret() -> String {
     let mut bytes = [0u8; 16];
-    rand::thread_rng().fill_bytes(&mut bytes);
+    rand::rng().fill_bytes(&mut bytes);
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 

@@ -16,7 +16,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use rand::RngCore;
+use rand::Rng as _;
 
 /// A ticket's time to live. Short: the client presents the ticket within
 /// milliseconds of minting; a ticket left unused that long is a leak.
@@ -75,7 +75,7 @@ impl TicketRegistry {
     /// 32 random bytes, hex-encoded (64 chars).
     pub fn mint(&self, user: &str, room: &str, call_id: u64) -> String {
         let mut raw = [0u8; 32];
-        rand::thread_rng().fill_bytes(&mut raw);
+        rand::rng().fill_bytes(&mut raw);
         let id: String = raw.iter().map(|b| format!("{b:02x}")).collect();
         let mut map = self.inner.map.lock().unwrap();
         sweep_expired(&mut map, self.inner.ttl);

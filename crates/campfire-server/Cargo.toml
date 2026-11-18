@@ -19,7 +19,6 @@ bytes.workspace = true
 campfire-maps.workspace = true
 campfire-protocol.workspace = true
 clap.workspace = true
-crc32fast.workspace = true
 futures-util.workspace = true
 h3.workspace = true
 h3-axum.workspace = true

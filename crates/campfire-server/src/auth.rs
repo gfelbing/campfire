@@ -34,7 +34,7 @@ use std::time::{Duration, Instant};
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use jsonwebtoken::{DecodingKey, Validation};
-use rand::RngCore;
+use rand::Rng as _;
 use serde::Deserialize;
 
 /// How long a `state` may live unclaimed (a browser that abandons the IdP
@@ -509,7 +509,7 @@ fn trim_name(s: &str) -> String {
 /// session cookies.
 fn random_token() -> String {
     let mut buf = [0u8; 32];
-    rand::thread_rng().fill_bytes(&mut buf);
+    rand::rng().fill_bytes(&mut buf);
     URL_SAFE_NO_PAD.encode(buf)
 }
 

@@ -55,3 +55,11 @@ peers to the live edge, skipping non-latest groups older than nothing.
 The catalog track is single-group-per-update and the fetch/replay paths
 are unaffected (they carry explicit bounds). Re-vendor on a bump and
 re-apply or drop if upstream changes the semantics.
+
+## Freshness (2026-11-18)
+
+0.3.23 is still the newest crates.io release. Upstream main has diverged
+heavily since (the lite-07 wire, the auth rework, the `moq-tokio` API
+changes) but none of it is published; moving to it means rewriting the
+SFU integration against a new API. The fork stays at 0.3.23 + the
+announce-init patch above until a release line carries a reason to move.
