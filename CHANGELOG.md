@@ -4,6 +4,49 @@ All notable releases of campfire. Versions follow calendar-agnostic
 semver; releases are cut by tagging `vX.Y.Z` (the Docker image is built
 and pushed to GHCR on each tag).
 
+## [0.0.21] — 2026-11-19
+
+The face-lift release: the topbar logo joins the pixel-art visual
+language — a solid two-tone flame and a hand-rolled 5×7 pixel
+wordmark — and the noise-cancellation toggle grows real teeth: a
+noise-gate stage on the uplink mic, driven by the toggle, that
+attenuates the background between words instead of nudging a browser
+constraint that was already on.
+
+### Added
+
+- A pixel logo: the topbar's `🔥 Campfire` emoji string becomes one SVG
+  — a solid 6×8 flame bitmap (brand orange body `#e05f38`, the
+  favicon's amber `#f2a25c` as the glowing base) next to "Campfire" in
+  a hand-rolled 5×7 pixel wordmark (the eight glyphs of its own name;
+  no webfont dependency), rendered at 2× with `crispEdges`. The span
+  keeps the old text as the fallback until the bundle swaps it in.
+- A noise-gate stage on the uplink mic (`call/denoiser.ts`), inserted
+  between the browser's capture and the MoQ publish pipeline: a
+  high-pass, an adaptive noise floor (a decaying log-histogram of the
+  envelope — the percentile tracker that survives real speech), and a
+  soft gate (−22 dB below the floor, ~10 ms attack, 150 ms hold across
+  inter-word gaps). Mono end to end; the chain runs at 48 kHz.
+
+### Changed
+
+- The "Noise cancellation" toggle drives the campfire gate; the
+  browser's own `noiseSuppression` stays at its default either way
+  (turning the gate off keeps the browser default, it doesn't strip
+  the mic's APM). Mute and device-id settings ride the raw mic track —
+  the processed track is an AudioContext destination and ignores
+  `enabled`/reports no device.
+
+### Fixed
+
+- The wordmark's path builder checked for `X` while the glyph tables
+  mark lit pixels with `#` — the path data came out empty and the
+  wordmark rendered as nothing; the flame's first cut used the
+  outline-style `pixelarticons` fire icon whose internal gaps read as
+  black holes on the dark topbar. The logo is now self-drawn (solid
+  flame, light `var(--text)` wordmark fill, an 8 px gap between the
+  two) and verified in a real browser.
+
 ## [0.0.20] — 2026-11-17
 
 The self-healing-calls release: media sessions that die mid-call now
