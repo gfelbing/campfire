@@ -16,6 +16,7 @@
 import type { UserBrief } from "../net/types";
 import { MoqCall, type DownlinkStatus, type DownlinkView } from "./moq";
 import { getLocalMedia, getScreenMedia, loadMediaPrefs, saveMediaPrefs, type MediaPrefs } from "./media";
+import { Denoiser } from "./denoiser";
 
 /** Participant count at which the call degrades to voice-only (docs/ops/maps.md:
  *  "9+"; the done-when's "engages at 10" is satisfied, the 📷 button
@@ -127,6 +128,13 @@ export class CallManager {
   /** The call roster including ourselves (from `call_start`/`call_join`). */
   private roster: UserBrief[] = [];
   private localStream: MediaStream | null = null;
+  /** The raw mic track (before the noise-gate chain): mute toggles and
+   *  `getSettings().deviceId` read this — the processed track the
+   *  publisher sees reports no device and ignores `enabled`. */
+  private micRaw: MediaStreamTrack | null = null;
+  /** The uplink noise-gate chain (null: the gate could not load — the
+   *  raw track rides straight through). */
+  private denoiser: Denoiser | null = null;
   /** The one MoQ session for the current call (uplink + downlinks). */
   private moq: MoqCall | null = null;
   /** Monotonic guard for in-flight session starts (a reset must not let a
@@ -200,7 +208,9 @@ export class CallManager {
       this.audioOn = want;
       this.videoOn = want;
       this.autoVoicedOff = false;
-      for (const t of this.localStream?.getAudioTracks() ?? []) t.enabled = want;
+      // Mute rides the RAW mic track: the processed track comes from an
+      // AudioContext destination and ignores `enabled`.
+      if (this.micRaw) this.micRaw.enabled = want;
       for (const t of this.localStream?.getVideoTracks() ?? []) t.enabled = want;
       this.moq?.setVideoEnabled(want);
       if (this.phase.p === "in-call") this.send.sendCallMute(want, want);
@@ -219,8 +229,11 @@ export class CallManager {
     this.audioOn = !this.audioOn;
     // Disable the local track: the uplink encodes silence and the PiP
     // reflects it too. No stream yet (the top-bar button outside a call):
-    // acquireMedia applies the preference when a call starts.
-    for (const t of this.localStream?.getAudioTracks() ?? []) t.enabled = this.audioOn;
+    // acquireMedia applies the preference when a call starts. Mute rides
+    // the RAW mic track — the processed track (an AudioContext
+    // destination) ignores `enabled`, the raw capture goes silent, and
+    // the gate sees silence end to end.
+    if (this.micRaw) this.micRaw.enabled = this.audioOn;
     if (this.phase.p === "in-call") this.send.sendCallMute(this.audioOn, this.videoOn);
     this.hooks.onLocalMute(this.audioOn, this.videoOn);
   }
@@ -434,17 +447,37 @@ export class CallManager {
    *  preferences (they may have been set before the call) gate the fresh
    *  tracks right away. */
   private async acquireMedia(): Promise<MediaStream | null> {
+    let stream: MediaStream;
     try {
-      this.localStream = await getLocalMedia(this.mediaPrefs);
+      stream = await getLocalMedia(this.mediaPrefs);
     } catch (err) {
       this.hooks.onLog(`cannot access microphone/camera: ${String(err)}`);
       return null;
     }
+    // The noise-gate chain: the processed track replaces the raw one in
+    // the stream the UI and the publish pipeline see. The raw track is
+    // kept apart — mute (`enabled`) and the device-id settings read it,
+    // and the publish encoder would otherwise see a stereo destination
+    // track with no device id.
+    const [raw] = stream.getAudioTracks();
+    const [video] = stream.getVideoTracks();
+    let processed: MediaStreamTrack | null = null;
+    if (raw) {
+      this.micRaw = raw;
+      this.denoiser?.stop();
+      this.denoiser = await Denoiser.create(raw, this.mediaPrefs.noiseSuppression, (t) =>
+        this.hooks.onLog(t),
+      );
+      processed = this.denoiser?.track ?? null;
+    }
+    this.localStream = processed
+      ? new MediaStream([...(video ? [video] : []), processed])
+      : stream;
     // A stored device id is an `ideal` constraint: a vanished device
     // falls back to the OS default. Clear the stale id so the dropdown
     // does not keep advertising it.
     this.validateDevicePrefs();
-    for (const t of this.localStream.getAudioTracks()) t.enabled = this.audioOn;
+    if (this.micRaw) this.micRaw.enabled = this.audioOn;
     for (const t of this.localStream.getVideoTracks()) t.enabled = this.videoOn;
     this.hooks.onLocalStream(this.localStream);
     return this.localStream;
@@ -455,7 +488,7 @@ export class CallManager {
   private validateDevicePrefs(): void {
     if (!this.localStream) return;
     let dirty = false;
-    const [audio] = this.localStream.getAudioTracks();
+    const audio = this.micRaw;
     const [video] = this.localStream.getVideoTracks();
     if (this.mediaPrefs.micId && audio?.getSettings().deviceId !== this.mediaPrefs.micId) {
       this.mediaPrefs.micId = undefined;
@@ -492,8 +525,9 @@ export class CallManager {
    *  track honored it, else the track's actual device (the OS default
    *  the menu should then mark). */
   private currentMicId(): string | undefined {
-    const [audio] = this.localStream?.getAudioTracks() ?? [];
-    return audio?.getSettings().deviceId ?? this.mediaPrefs.micId;
+    // The RAW track: the processed (AudioContext destination) track
+    // reports no device id.
+    return this.micRaw?.getSettings().deviceId ?? this.mediaPrefs.micId;
   }
 
   private currentCamId(): string | undefined {
@@ -510,13 +544,21 @@ export class CallManager {
     if (!track) return;
     this.mediaPrefs.micId = deviceId;
     saveMediaPrefs(this.mediaPrefs);
+    // Re-wrap the fresh raw track in the gate chain and swap the
+    // processed track into the stream the publisher sees.
+    this.denoiser?.stop();
+    this.denoiser = await Denoiser.create(track, this.mediaPrefs.noiseSuppression, (t) =>
+      this.hooks.onLog(t),
+    );
+    const processed = this.denoiser?.track ?? track;
+    this.micRaw = track;
     const [old] = this.localStream?.getAudioTracks() ?? [];
     for (const t of this.localStream?.getAudioTracks() ?? []) t.stop();
     this.localStream?.removeTrack(old);
-    this.localStream?.addTrack(track);
+    this.localStream?.addTrack(processed);
     track.enabled = this.audioOn;
     this.hooks.onLocalStream(this.localStream!);
-    this.moq?.swapAudio(track);
+    this.moq?.swapAudio(processed);
     this.hooks.onLog(`microphone switched: ${track.label || deviceId}`);
   }
 
@@ -575,7 +617,10 @@ export class CallManager {
   async setNoiseSuppression(on: boolean): Promise<void> {
     this.mediaPrefs.noiseSuppression = on;
     saveMediaPrefs(this.mediaPrefs);
-    const [audio] = this.localStream?.getAudioTracks() ?? [];
+    // Both stages follow the toggle: the browser's APM noise
+    // suppressor on the raw track, and our gate. OFF is fully raw.
+    this.denoiser?.setEnabled(on);
+    const audio = this.micRaw;
     if (!audio) return;
     try {
       await audio.applyConstraints({ noiseSuppression: on });
@@ -781,6 +826,12 @@ export class CallManager {
     this.roster = [];
     this.localStream?.getTracks().forEach((t) => t.stop());
     this.localStream = null;
+    // The gate chain rides the raw track's lifetime; stopping both
+    // releases the device and the AudioContext.
+    this.denoiser?.stop();
+    this.denoiser = null;
+    this.micRaw?.stop();
+    this.micRaw = null;
     this.screenStream?.getTracks().forEach((t) => t.stop());
     this.screenStream = null;
     this.screenOn = false;
