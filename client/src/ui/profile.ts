@@ -129,6 +129,7 @@ export function openProfileLayer(
               const b = document.createElement("button");
               b.type = "button";
               b.className = "swatch character";
+              b.dataset.character = String(i);
               b.title = `character ${i + 1}`;
               const cell = previewCell(i, color);
               if (cell) {

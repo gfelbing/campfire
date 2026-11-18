@@ -30,7 +30,7 @@ export const WALK_FRAME_MS = 84;
 const sheets: Array<Texture | undefined> = [];
 /** Variant+color → frame grid, generated on demand: the outfit band of
  *  the sheet recolored to the user's color (see `tintedFrames`). */
-const tinted = new Map<string, Texture[][]>();
+const tinted = new Map<number, Map<number, Texture[][]>>();
 
 /** The outfit band in cell coordinates (y range): head above, legs
  *  below. Hair hangs into it on the side views — the overlay recolor
@@ -143,8 +143,15 @@ export function previewCell(variant: number, color: string): HTMLCanvasElement |
  * once, on the CPU, and cached).
  */
 export function tintedFrames(variant: number, color: number): Texture[][] {
-  const key = `${variant}:${color}`;
-  const cached = tinted.get(key);
+  // Numeric two-level cache: `refreshFrame` runs per avatar per frame, and
+  // the old `${variant}:${color}` string key was one template allocation
+  // per avatar per frame just for a cache lookup.
+  let byColor = tinted.get(variant);
+  if (!byColor) {
+    byColor = new Map();
+    tinted.set(variant, byColor);
+  }
+  const cached = byColor.get(color);
   if (cached) return cached;
   const sheet = sheets[variant];
   if (!sheet) return [];
@@ -173,6 +180,6 @@ export function tintedFrames(variant: number, color: number): Texture[][] {
     }
     grid.push(cols);
   }
-  tinted.set(key, grid);
+  byColor.set(color, grid);
   return grid;
 }

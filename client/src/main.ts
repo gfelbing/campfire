@@ -575,16 +575,20 @@ async function main(): Promise<void> {
     // The call area: every live zone call highlights its rectangle; the
     // proximity bubble is a one-tile circle at the centroid of our call's
     // participants (server computes membership from the same geometry).
-    const inCall = inCallAll();
+    // No union set here: the tick only needs "some call is live" — the
+    // per-badge membership check is refreshCallUi's event-driven job.
     const rects: Zone[] = [];
+    let live = false;
     for (const [k, s] of calls) {
-      if (k === "" || s.size === 0) continue;
+      if (s.size === 0) continue;
+      live = true;
+      if (k === "") continue;
       const zone = map.zones.find((z) => z.jitsiRoom === k || z.name === k);
       if (zone) rects.push(zone);
     }
     const key = myCallKey();
     const myRoster = key !== undefined ? calls.get(key)! : undefined;
-    if (inCall.size > 0 || rects.length > 0) {
+    if (live) {
       // The circle shows only our own proximity bubble; zone members in
       // other zones are already covered by their rects.
       const pts: Array<[number, number]> = [];

@@ -199,12 +199,31 @@ export async function createWorld(
 /** Draw the call areas: every live jitsi zone call highlights its zone
  *  rectangle (README roadmap "Map enhancements"); our own proximity bubble
  *  is the one-tile circle around the centroid of its participants (README
- *  §6.3). Empty `pts` and `rects` clear it. */
+ *  §6.3). Empty `pts` and `rects` clear it.
+ *
+ *  Dirty-checked: the tick calls this every frame, and `clear()` + re-fill
+ *  rebuilds the Graphics geometry each time — for a stationary player in a
+ *  static call the output is identical. Zone rects are stable objects (the
+ *  map's own zones) so identity equality is a safe short-circuit. */
+let bubbleRects: Zone[] | null = null;
+let bubblePts: Array<[number, number]> | null = null;
 export function drawBubble(
   world: World,
   rects: Zone[],
   pts: Array<[number, number]>,
 ): void {
+  if (
+    bubbleRects &&
+    bubblePts &&
+    bubbleRects.length === rects.length &&
+    bubblePts.length === pts.length &&
+    bubbleRects.every((z, i) => z === rects[i]) &&
+    bubblePts.every((p, i) => p[0] === pts[i][0] && p[1] === pts[i][1])
+  ) {
+    return;
+  }
+  bubbleRects = rects.slice();
+  bubblePts = pts.map((p) => [p[0], p[1]] as [number, number]);
   world.bubble.clear();
   const ts = world.map.tileSize;
   for (const z of rects) {

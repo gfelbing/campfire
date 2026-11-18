@@ -1,0 +1,9 @@
+[2m2026-11-18T22:00:09.304158Z[0m [32m INFO[0m [2mcampfire_server::bootstrap[0m[2m:[0m TLS front listening: Alt-Svc bootstrap [3mlisten[0m[2m=[0m[::]:8443
+[2m2026-11-18T22:00:09.307078Z[0m [32m INFO[0m [2mcampfire_server[0m[2m:[0m campfire listening over HTTP/3 (QUIC) [3mlocal[0m[2m=[0m[::]:8443
+[2m2026-11-18T22:00:12.202078Z[0m [32m INFO[0m [2mcampfire_server::realtime[0m[2m:[0m webtransport session opened [3msession_id[0m[2m=[0mSessionId(0)
+[2m2026-11-18T22:00:13.315110Z[0m [32m INFO[0m [2mcampfire_server::realtime[0m[2m:[0m webtransport session opened [3msession_id[0m[2m=[0mSessionId(0)
+[2m2026-11-18T22:00:15.516761Z[0m [32m INFO[0m [2mcampfire_server::moq::session[0m[2m:[0m moq session admitted [3mversion[0m[2m=[0mLite(Lite02) [3mcall[0m[2m=[0m0
+[2m2026-11-18T22:00:15.525803Z[0m [32m INFO[0m [2mcampfire_server::moq::session[0m[2m:[0m moq session admitted [3mversion[0m[2m=[0mLite(Lite02) [3mcall[0m[2m=[0m0
+[2m2026-11-18T22:00:20.689479Z[0m [32m INFO[0m [2mcampfire_server::realtime[0m[2m:[0m user left [3muser[0m[2m=[0mu_45cfb332729d65ac [3mroom[0m[2m=[0misland
+[2m2026-11-18T22:00:23.447190Z[0m [32m INFO[0m [2mcampfire_server::realtime[0m[2m:[0m webtransport session opened [3msession_id[0m[2m=[0mSessionId(0)
+[2m2026-11-18T22:00:31.142813Z[0m [32m INFO[0m [2mcampfire_server::realtime[0m[2m:[0m user left [3muser[0m[2m=[0mu_45cfb332729d65ac [3mroom[0m[2m=[0misland

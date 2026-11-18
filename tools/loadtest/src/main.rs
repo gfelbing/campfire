@@ -35,6 +35,10 @@ use campfire_protocol::{
 use clap::Parser;
 use tokio::io::AsyncWriteExt as _;
 
+/// A JSON line longer than this ends the bot's reader (same cap as the
+/// server's command stream: crates/campfire-server/src/realtime.rs).
+const MAX_LINE_BYTES: usize = 80 * 1024;
+
 /// Everything counted across all bots; printed as a rate in the reports.
 #[derive(Default)]
 struct Stats {
@@ -42,6 +46,8 @@ struct Stats {
     connect_errors: AtomicU64,
     sessions_dropped: AtomicU64,
     msgs_in: AtomicU64,
+    /// Lines that failed to decode, counted separately from stream ends.
+    bad_lines: AtomicU64,
     datagrams_in: AtomicU64,
     datagrams_out: AtomicU64,
     chats: AtomicU64,
@@ -194,7 +200,7 @@ async fn main() -> Result<()> {
             );
             let dt = last_at.elapsed().as_secs_f64().max(0.001);
             println!(
-                "msgs/s {:8.0}  dg_in/s {:8.0}  dg_out/s {:8.0}  chats/s {:5.1}  calls+ {}  conns {}  err {}  drop {}",
+                "msgs/s {:8.0}  dg_in/s {:8.0}  dg_out/s {:8.0}  chats/s {:5.1}  calls+ {}  conns {}  err {}  drop {}  bad {}",
                 (now.0 - last.0) as f64 / dt,
                 (now.1 - last.1) as f64 / dt,
                 (now.2 - last.2) as f64 / dt,
@@ -203,6 +209,7 @@ async fn main() -> Result<()> {
                 report_stats.connects.load(Ordering::Relaxed),
                 report_stats.connect_errors.load(Ordering::Relaxed),
                 report_stats.sessions_dropped.load(Ordering::Relaxed),
+                report_stats.bad_lines.load(Ordering::Relaxed),
             );
             last = now;
             last_at = Instant::now();
@@ -296,10 +303,10 @@ async fn bot(
     }
     // Skip until our hello (room-wide call broadcasts may interleave).
     loop {
-        match next_msg(&mut recv).await {
-            Some(ServerMsg::Hello { .. }) => break,
-            Some(_) => {}
-            None => return,
+        match next_msg(&mut recv, &stats).await {
+            NextMsg::Msg(ServerMsg::Hello { .. }) => break,
+            NextMsg::Msg(_) => {}
+            NextMsg::Overlong | NextMsg::Closed => return,
         }
     }
 
@@ -318,7 +325,7 @@ async fn bot(
     let in_call = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let reader_in_call = in_call.clone();
     let reader = tokio::spawn(async move {
-        while let Some(msg) = next_msg(&mut recv).await {
+        while let NextMsg::Msg(msg) = next_msg(&mut recv, &stats_in).await {
             stats_in.msgs_in.fetch_add(1, Ordering::Relaxed);
             if let ServerMsg::CallStart { participants, .. } = msg {
                 stats_in.call_starts.fetch_add(1, Ordering::Relaxed);
@@ -474,16 +481,48 @@ fn meeting_points(map: &campfire_maps::MapData, n: usize) -> Vec<(f32, f32)> {
     pts
 }
 
-async fn next_msg(recv: &mut wtransport::RecvStream) -> Option<ServerMsg> {
-    let mut line = Vec::new();
-    let mut byte = [0u8; 1];
+/// How `next_msg` ended: a message, or why the stream is no longer readable.
+enum NextMsg {
+    Msg(ServerMsg),
+    /// A line grew past `MAX_LINE_BYTES`: fatal for this bot's reader.
+    Overlong,
+    /// Stream EOF or transport error.
+    Closed,
+}
+
+/// Framing mirrors the server's command-stream reader
+/// (crates/campfire-server/src/realtime.rs): chunked buffered reads, scan
+/// for `\n`, cap the line at `MAX_LINE_BYTES` — never one byte per await,
+/// never an unbounded buffer. Undecodable lines are counted and skipped,
+/// not silently treated as EOF.
+async fn next_msg(recv: &mut wtransport::RecvStream, stats: &Stats) -> NextMsg {
+    let mut buf = Vec::new();
+    let mut chunk = [0u8; 4096];
     loop {
-        match recv.read_exact(&mut byte).await {
-            Ok(()) if byte[0] == b'\n' => break,
-            Ok(()) => line.push(byte[0]),
-            Err(_) => return None,
+        // No complete line buffered: pull the next chunk from the stream.
+        let Some(pos) = buf.iter().position(|b| *b == b'\n') else {
+            match recv.read(&mut chunk).await {
+                Ok(None) => return NextMsg::Closed, // EOF: server closed the stream
+                Ok(Some(n)) => {
+                    buf.extend_from_slice(&chunk[..n]);
+                    if buf.len() > MAX_LINE_BYTES {
+                        eprintln!("loadtest: line exceeded {MAX_LINE_BYTES} byte limit");
+                        return NextMsg::Overlong;
+                    }
+                }
+                Err(_) => return NextMsg::Closed,
+            }
+            continue;
+        };
+        // One complete line: decode it, or count and skip a bad one.
+        let line: Vec<u8> = buf.drain(..=pos).collect();
+        let text = String::from_utf8_lossy(&line[..line.len() - 1]);
+        match from_line::<ServerMsg>(&text) {
+            Ok(msg) => return NextMsg::Msg(msg),
+            Err(_) => {
+                stats.bad_lines.fetch_add(1, Ordering::Relaxed);
+                eprintln!("loadtest: undecodable line ignored ({text})");
+            }
         }
     }
-    let text = String::from_utf8_lossy(&line);
-    from_line::<ServerMsg>(&text).ok()
 }

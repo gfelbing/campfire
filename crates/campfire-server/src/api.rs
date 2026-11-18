@@ -28,7 +28,7 @@ use include_dir::{Dir, include_dir};
 use rand::Rng as _;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
-use tokio_stream::wrappers::{IntervalStream, UnboundedReceiverStream};
+use tokio_stream::wrappers::{IntervalStream, ReceiverStream};
 use tokio_stream::{Stream, StreamMap};
 use tracing::debug;
 
@@ -502,7 +502,10 @@ pub struct FallbackSession {
     /// 1 chat/s, like the WebTransport path.
     chat: Mutex<RateLimit>,
     /// The outbound receiver, taken exactly once by the /rt/sse stream.
-    rx: Mutex<Option<mpsc::UnboundedReceiver<ServerMsg>>>,
+    /// Bounded like every other session queue (see realtime.rs MSG_QUEUE):
+    /// the world's senders try_send and drop on full, so a client that
+    /// never opens the SSE stream cannot grow the queue without limit.
+    rx: Mutex<Option<mpsc::Receiver<ServerMsg>>>,
 }
 
 pub type FallbackMap = Arc<Mutex<HashMap<String, FallbackSession>>>;
@@ -561,13 +564,13 @@ async fn fallback_event(
             {
                 return Err(err(ErrorCode::BadMessage));
             }
-            let (tx, rx) = mpsc::unbounded_channel::<ServerMsg>();
+            let (tx, rx) = mpsc::channel::<ServerMsg>(crate::realtime::MSG_QUEUE);
             // Keep a clone: world.join stores the original in the member, and
             // we need a sender to push the hello into the session channel.
             let hello_tx = tx.clone();
             // Datagram channel is dropped immediately: the fallback has no
             // datagram path (movement is the one thing it cannot carry).
-            let (dtx, _dtx_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+            let (dtx, _dtx_rx) = mpsc::channel::<Vec<u8>>(crate::realtime::DATAGRAM_QUEUE);
             let session_id = state.world.next_session_id();
             let user_id = match state.world.join(
                 &room,
@@ -580,9 +583,10 @@ async fn fallback_event(
                 dtx,
             ) {
                 Ok(joined) => {
-                    // The unbounded channel buffers the hello until the SSE
-                    // stream claims the receiver.
-                    let _ = hello_tx.send(ServerMsg::Hello {
+                    // The bounded channel buffers the hello until the SSE
+                    // stream claims the receiver (queue size MSG_QUEUE; the
+                    // hello is the only message before that).
+                    let _ = hello_tx.try_send(ServerMsg::Hello {
                         you: joined.you.clone(),
                         token: joined.token,
                         room: room.clone(),
@@ -771,7 +775,7 @@ async fn sse_stream(
         )
     };
 
-    let messages = UnboundedReceiverStream::new(rx)
+    let messages = ReceiverStream::new(rx)
         .map(|msg| Ok::<_, std::convert::Infallible>(Event::default().data(to_line(&msg))))
         .boxed();
     let keep_alive = IntervalStream::new(tokio::time::interval(Duration::from_secs(15)))

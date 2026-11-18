@@ -167,9 +167,18 @@ trust: certs
 	@echo "campfire-dev-ca trusted for Brave/Chrome/Chromium — restart the browser fully"
 
 # Run the server (dev defaults; extra args pass through: just server -- --idle-timeout-secs 60)
+# The client is embedded into the binary at compile time (client/dist), so a
+# binary built before the last client change serves a stale client. Warn
+# when client/src is newer than the dist (vite --watch maintains dist
+# itself; this only nags when nothing is rebuilding it).
 server *args:
-	cargo run -p campfire-server --release -- \
-	  --listen "[::]:8443" --cert certs/cert.pem --key certs/key.pem "$@"
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [ -n "$(find client/src -newer client/dist/index.html -print -quit 2>/dev/null)" ]; then
+      echo "warn: client/src is newer than client/dist — rebuild with 'just client-build' or run vite --watch, then restart the server" >&2
+    fi
+    exec cargo run -p campfire-server --release -- \
+      --listen "[::]:8443" --cert certs/cert.pem --key certs/key.pem "$@"
 
 # Quick HTTP/3 sanity check against a running server.
 h3:

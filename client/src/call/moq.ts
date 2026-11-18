@@ -282,6 +282,10 @@ interface Downlink {
    *  decoded-audio total and the seconds it has been frozen. */
   stallSeconds: number;
   lastAudioBytes: number;
+  /** Consecutive failed pulse cycles: one cycle is a 2 s frozen stretch
+   *  that fired a pulse; two in a row (delivery never revived between
+   *  them) escalate to a full rebuild. Reset when bytes move again. */
+  stallCycles: number;
   /** Decode-level stall watchdog: last ring playhead (ms on the media
    *  timeline) and how long it has been frozen. A frozen playhead with
    *  bytes still arriving is the delivery-alive-but-decode-stuck state
@@ -827,6 +831,7 @@ export class MoqCall {
       recorderProc: null,
       stallSeconds: 0,
       lastAudioBytes: 0,
+      stallCycles: 0,
       lastClockMs: null,
       clockStallSeconds: 0,
       rebuilds: 0,
@@ -912,6 +917,7 @@ export class MoqCall {
       if (this.statusOf(d) !== "live") {
         d.stallSeconds = 0;
         d.lastAudioBytes = 0;
+        d.stallCycles = 0;
         d.clockStallSeconds = 0;
         d.lastClockMs = null;
         continue;
@@ -949,27 +955,33 @@ export class MoqCall {
       // Escalation 1: delivery frozen → pulse once, and if the pulses
       // don't revive delivery (two failed cycles), rebuild the downlink
       // like the decode-stall path — a dead subscription is a dead
-      // pipeline no matter where it wedged (cooldown via the negative
-      // count).
+      // pipeline no matter where it wedged. A cycle is one 2 s frozen
+      // stretch that fired a pulse (its ~4 s cooldown rides the negative
+      // count); `stallCycles` counts consecutive cycles and delivery
+      // moving again clears it.
       const bytes = d.audDecoder.out.stats.peek()?.bytesReceived ?? 0;
       if (bytes > 0 && bytes === d.lastAudioBytes) {
         d.stallSeconds++;
-        if (d.stallSeconds === 2 || d.stallSeconds === 6) {
-          d.stallSeconds = -2; // cooldown: no re-pulse for ~4 s
+        if (d.stallSeconds === 2) {
+          d.stallCycles++;
           const now = Date.now();
           const backoff = Math.min(5_000 << Math.min(d.rebuilds, 4), 60_000);
-          if (d.stallSeconds === 6 && now - d.lastRebuildAt >= backoff) {
+          if (d.stallCycles >= 2 && now - d.lastRebuildAt >= backoff) {
             d.rebuilds++;
             d.lastRebuildAt = now;
             d.clockStallSeconds = 0;
             d.lastClockMs = null;
+            d.stallSeconds = -2; // also cool the delivery watchdog
+            d.stallCycles = 0;
             this.rebuildDownlink(d.id);
-          } else {
-            this.schedulePulse(d);
+            continue;
           }
+          d.stallSeconds = -2; // cooldown: no re-pulse for ~4 s
+          this.schedulePulse(d);
         }
       } else {
         d.stallSeconds = 0;
+        d.stallCycles = 0;
       }
       d.lastAudioBytes = bytes;
     }

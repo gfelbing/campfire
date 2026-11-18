@@ -169,6 +169,10 @@ export class AvatarView {
   }
 
   setDir(dir: Dir): void {
+    // Same-direction calls arrive every frame while the local avatar idles
+    // (the tick unconditionally feeds setPos/setDir/setMoving); skip the
+    // frame-keyed texture work when the direction did not change.
+    if (dir === this.dir) return;
     this.dir = dir;
     this.refreshFrame(performance.now());
   }
@@ -199,18 +203,25 @@ export class AvatarView {
 
   /** Subtle bob while moving. */
   setMoving(moving: boolean, nowMs: number): void {
+    const changed = moving !== this.moving;
     this.moving = moving;
-    this.refreshFrame(nowMs);
     this.bobbing = moving;
     const bob = moving ? Math.sin(nowMs / 90) * 1.2 : 0;
     this.container.position.set(this.baseX, this.baseY + bob);
+    // The walk cycle needs a re-pick only while the state is `moving`
+    // (the cycle advances with the frame); an unchanged idle state redraws
+    // the same idle cell every frame otherwise.
+    if (changed || moving) this.refreshFrame(nowMs);
   }
 
   private apply(): void {
     const bob = this.bobbing ? Math.sin(performance.now() / 90) * 1.2 : 0;
     this.container.position.set(this.baseX, this.baseY + bob);
     // Overlapping avatars sort by their feet: the lower one draws last.
-    this.container.zIndex = this.baseY;
+    // Skip the write when unchanged: `sortableChildren` makes Pixi resort
+    // the layer's children when any zIndex changes, and a per-frame write
+    // from every avatar forces that sort sixty times a second.
+    if (this.container.zIndex !== this.baseY) this.container.zIndex = this.baseY;
   }
 }
 

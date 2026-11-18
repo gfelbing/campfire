@@ -40,6 +40,13 @@ type Who = Arc<Mutex<Option<(String, String)>>>;
 
 /// A JSON line longer than this is refused (docs/ops/README.md: no unbounded reads).
 const MAX_LINE_BYTES: usize = 80 * 1024;
+/// Outbound queues are bounded (no unbounded reads in reverse either): the
+/// tick can produce far faster than a stalled client drains, and an
+/// unbounded queue grows the session without limit. A full queue drops the
+/// message (datagrams are lossy; chat/roster degrade for a stalled client)
+/// and the command reader's idle timeout reaps the session.
+pub(crate) const MSG_QUEUE: usize = 256;
+pub(crate) const DATAGRAM_QUEUE: usize = 128;
 /// Close a session that sends nothing on the command stream for this long
 /// (docs/arch/protocol.md lifecycle). Generous by design: the client's 25 s keepalive
 /// ping (`ping`) is the liveness signal — a stationary user sends nothing
@@ -179,7 +186,12 @@ async fn session_task(
 
     // Outbound datagrams: the 50 ms tick pushes movement batches through this
     // queue (docs/arch/protocol.md).
-    let (dtx, mut dtx_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+    //
+    // Bounded (see MSG_QUEUE/DATAGRAM_QUEUE): a client that stops draining
+    // must not let the queue grow without limit. Senders use try_send and
+    // drop on full — datagrams are lossy by design — and the reader's idle
+    // timeout eventually reaps a session that never reads again.
+    let (dtx, mut dtx_rx) = mpsc::channel::<Vec<u8>>(DATAGRAM_QUEUE);
     let mut dtx_sender = session.datagram_sender();
     let metrics_out = metrics.clone();
     let datagram_sink = tokio::spawn(async move {
@@ -255,7 +267,7 @@ async fn run_command_stream<S>(
     world: &World,
     stream: S,
     who: Who,
-    dtx: mpsc::UnboundedSender<Vec<u8>>,
+    dtx: mpsc::Sender<Vec<u8>>,
     session_id: u64,
     metrics: Metrics,
     forced_name: Option<String>,
@@ -263,7 +275,10 @@ async fn run_command_stream<S>(
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + 'static,
 {
     let (mut rd, mut wr) = tokio::io::split(stream);
-    let (tx, mut rx) = mpsc::unbounded_channel::<ServerMsg>();
+    // Same bounded-queue policy as the datagram queue (see MSG_QUEUE): the
+    // senders are try_send and drop on full; a client that drains slower
+    // than the room produces loses messages until the idle timeout reaps it.
+    let (tx, mut rx) = mpsc::channel::<ServerMsg>(MSG_QUEUE);
 
     let writer = tokio::spawn(async move {
         while let Some(msg) = rx.recv().await {
@@ -357,11 +372,11 @@ async fn run_command_stream<S>(
 fn dispatch(
     world: &World,
     line: &str,
-    tx: &mpsc::UnboundedSender<ServerMsg>,
+    tx: &mpsc::Sender<ServerMsg>,
     session: &mut Option<(String, String, String)>,
     chat_limit: &mut RateLimit,
     who: &Who,
-    dtx: &mpsc::UnboundedSender<Vec<u8>>,
+    dtx: &mpsc::Sender<Vec<u8>>,
     session_id: u64,
     metrics: &Metrics,
     forced_name: Option<&str>,
@@ -422,7 +437,7 @@ fn dispatch(
                         call: joined.call,
                         ticket: joined.ticket,
                     };
-                    tx.send(msg).is_ok()
+                    tx.try_send(msg).is_ok()
                 }
                 Err(crate::world::JoinError::RoomFull) => send(tx, ErrorCode::RoomFull),
                 Err(crate::world::JoinError::UnknownRoom) => send(tx, ErrorCode::UnknownRoom),
@@ -511,7 +526,7 @@ fn dispatch(
             match world.media_ticket(&room, &id) {
                 Some(ticket) => {
                     tracing::debug!(user = %id, room = %room, "media ticket re-minted");
-                    tx.send(ServerMsg::Ticket { ticket }).is_ok()
+                    tx.try_send(ServerMsg::Ticket { ticket }).is_ok()
                 }
                 None => {
                     tracing::debug!(user = %id, room = %room, "media ticket refused: not in a call");
@@ -538,12 +553,12 @@ pub(crate) fn valid_room(room: &str) -> bool {
 }
 
 /// Send one `error` message; `false` means the client is gone.
-fn send(tx: &mpsc::UnboundedSender<ServerMsg>, code: ErrorCode) -> bool {
-    tx.send(ServerMsg::Error { code }).is_ok()
+fn send(tx: &mpsc::Sender<ServerMsg>, code: ErrorCode) -> bool {
+    tx.try_send(ServerMsg::Error { code }).is_ok()
 }
 
 /// A world call-method result as a dispatch return value.
-fn call_result(result: Result<(), ErrorCode>, tx: &mpsc::UnboundedSender<ServerMsg>) -> bool {
+fn call_result(result: Result<(), ErrorCode>, tx: &mpsc::Sender<ServerMsg>) -> bool {
     match result {
         Ok(()) => true,
         Err(code) => send(tx, code),

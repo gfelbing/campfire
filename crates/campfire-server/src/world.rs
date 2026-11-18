@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use campfire_protocol::{
-    Avatar, ChatMsg, ChatScope, Dir, ErrorCode, MovementBatch, MovementEntry, ServerMsg, Status,
+    Avatar, ChatMsg, ChatScope, Dir, ErrorCode, MovementEntry, ServerMsg, Status,
     UserBrief, UserState,
 };
 use rand::Rng as _;
@@ -70,9 +70,9 @@ struct Member {
     /// Position changed since the last tick; goes into the next batch.
     dirty: bool,
     /// Outbound reliable-stream queue for this session.
-    tx: tokio::sync::mpsc::UnboundedSender<ServerMsg>,
+    tx: tokio::sync::mpsc::Sender<ServerMsg>,
     /// Outbound datagram queue for this session (movement batches).
-    dtx: tokio::sync::mpsc::UnboundedSender<Vec<u8>>,
+    dtx: tokio::sync::mpsc::Sender<Vec<u8>>,
     /// The session that currently owns this member (guards against a stale
     /// session's disconnect clobbering a newer one, docs/arch/protocol.md reconnect).
     session: u64,
@@ -216,6 +216,10 @@ pub(crate) fn zone_maps() -> campfire_maps::Maps {
     campfire_maps::Maps::load(&dir)
 }
 
+/// What a tick's locked phase hands to its lock-free fan-out: per room,
+/// the dirty movement entries and the room members' datagram senders.
+type RoomsOut = Vec<(Vec<MovementEntry>, Vec<tokio::sync::mpsc::Sender<Vec<u8>>>)>;
+
 impl World {
     /// A world over the loaded maps (each registered as a room).
     pub fn new(maps: campfire_maps::Maps) -> Self {
@@ -340,8 +344,8 @@ impl World {
         token: Option<&str>,
         status: Status,
         session_id: u64,
-        tx: tokio::sync::mpsc::UnboundedSender<ServerMsg>,
-        dtx: tokio::sync::mpsc::UnboundedSender<Vec<u8>>,
+        tx: tokio::sync::mpsc::Sender<ServerMsg>,
+        dtx: tokio::sync::mpsc::Sender<Vec<u8>>,
     ) -> Result<Joined, JoinError> {
         let map = self.maps.get(room).ok_or(JoinError::UnknownRoom)?;
         let mut rooms = self.rooms.lock().unwrap();
@@ -454,7 +458,7 @@ impl World {
             };
             for (uid, m) in &room_entry.users {
                 if uid != &id {
-                    let _ = m.tx.send(ServerMsg::Joined {
+                    let _ = m.tx.try_send(ServerMsg::Joined {
                         user: brief.clone(),
                     });
                 }
@@ -468,7 +472,7 @@ impl World {
                 let Some(m) = room_entry.users.get(&id) else {
                     break;
                 };
-                let _ = m.tx.send(ServerMsg::CallStart {
+                let _ = m.tx.try_send(ServerMsg::CallStart {
                     room: room.to_owned(),
                     participants: call.participant_list(),
                     zone: call.zone.clone(),
@@ -546,7 +550,7 @@ impl World {
         };
         for (uid, m) in &room_entry.users {
             if uid != &id {
-                let _ = m.tx.send(ServerMsg::Joined {
+                let _ = m.tx.try_send(ServerMsg::Joined {
                     user: brief.clone(),
                 });
             }
@@ -561,7 +565,7 @@ impl World {
             let Some(m) = room_entry.users.get(&id) else {
                 break;
             };
-            let _ = m.tx.send(ServerMsg::CallStart {
+            let _ = m.tx.try_send(ServerMsg::CallStart {
                 room: room.to_owned(),
                 participants: call.participant_list(),
                 zone: call.zone.clone(),
@@ -691,7 +695,7 @@ impl World {
                 };
                 if z.contains(entry.x, entry.y) && !z.contains(prev.0, prev.1) {
                     if let Some(target) = self.maps.resolve_exit_url(room, url) {
-                        let _ = member.tx.send(ServerMsg::Navigate { map: target });
+                        let _ = member.tx.try_send(ServerMsg::Navigate { map: target });
                     }
                     break;
                 }
@@ -704,8 +708,17 @@ impl World {
     /// for every room batch the dirty members into datagram-sized movement
     /// JSON and fan it out to all members. Calls that end during the tick
     /// fire their hooks only after the rooms lock is dropped (B2).
+    ///
+    /// The lock covers phase one only (expiry, bubble bookkeeping,
+    /// gathering the dirty entries): the serde encode and the fan-out run
+    /// with the lock released. They scale with the room's dirty population,
+    /// and holding the rooms lock over them would extend the critical
+    /// section well past the short, non-awaiting mutations the module doc
+    /// promises. Senders are cloned out of the lock cheaply (`Sender` is
+    /// an Arc), and dirty is cleared under the lock because the entries
+    /// were copied out.
     pub fn tick(&self) {
-        let ended = {
+        let (ended, rooms_out): (Vec<u64>, RoomsOut) = {
             let mut rooms = self.rooms.lock().unwrap();
             let window = self.reconnect_window;
             let expired: Vec<(String, String)> = rooms
@@ -722,6 +735,7 @@ impl World {
             for (room, id) in &expired {
                 ended.extend(remove_from_room(&mut rooms, room, id));
             }
+            let mut rooms_out: RoomsOut = Vec::new();
             for (room, room_entry) in rooms.iter_mut() {
                 let map = self.maps.get(room);
                 ended.extend(update_bubbles(self, room, room_entry, Instant::now(), map));
@@ -746,25 +760,32 @@ impl World {
                         }),
                     })
                     .collect();
-                // Q5: each datagram must reach every member's channel, so
-                // one clone per member is inherent — but the last member
-                // takes the buffer by move, dropping one clone per chunk.
-                let members: Vec<&Member> = room_entry.users.values().collect();
-                for chunk in encode_batches(&entries) {
-                    let Some((last, rest)) = members.split_last() else {
-                        continue;
-                    };
-                    for m in rest {
-                        let _ = m.dtx.send(chunk.clone());
-                    }
-                    let _ = last.dtx.send(chunk);
-                }
+                let senders: Vec<tokio::sync::mpsc::Sender<Vec<u8>>> = room_entry
+                    .users
+                    .values()
+                    .map(|m| m.dtx.clone())
+                    .collect();
                 for m in room_entry.users.values_mut() {
                     m.dirty = false;
                 }
+                rooms_out.push((entries, senders));
             }
-            ended
+            (ended, rooms_out)
         };
+        // Phase two, lock-free: encode and fan out. One clone per member is
+        // inherent (Q5) — the last member takes the buffer by move, dropping
+        // one clone per chunk.
+        for (entries, senders) in rooms_out {
+            for chunk in encode_batches(&entries) {
+                let Some((last, rest)) = senders.split_last() else {
+                    continue;
+                };
+                for m in rest {
+                    let _ = m.try_send(chunk.clone());
+                }
+                let _ = last.try_send(chunk);
+            }
+        }
         for call_id in ended {
             self.call_ended(call_id);
         }
@@ -795,7 +816,7 @@ impl World {
                 }
                 let wire = build(&msg);
                 for m in entry.users.values() {
-                    let _ = m.tx.send(wire.clone());
+                    let _ = m.tx.try_send(wire.clone());
                 }
             }
             ChatScope::Call => {
@@ -815,7 +836,7 @@ impl World {
                         }
                         let wire = build(&msg);
                         for m in entry.users.values() {
-                            let _ = m.tx.send(wire.clone());
+                            let _ = m.tx.try_send(wire.clone());
                         }
                         return;
                     }
@@ -827,7 +848,7 @@ impl World {
                 let wire = build(&msg);
                 for uid in call_participants {
                     if let Some(m) = entry.users.get(&uid) {
-                        let _ = m.tx.send(wire.clone());
+                        let _ = m.tx.try_send(wire.clone());
                     }
                 }
             }
@@ -854,7 +875,7 @@ impl World {
         };
         for (uid, m) in &entry.users {
             if uid != id {
-                let _ = m.tx.send(ServerMsg::Typing {
+                let _ = m.tx.try_send(ServerMsg::Typing {
                     id: id.to_owned(),
                     on,
                 });
@@ -873,7 +894,7 @@ impl World {
         member.bubble_off = status == Status::Dnd;
         for (uid, m) in &entry.users {
             if uid != id {
-                let _ = m.tx.send(ServerMsg::Status {
+                let _ = m.tx.try_send(ServerMsg::Status {
                     id: id.to_owned(),
                     status,
                 });
@@ -928,7 +949,7 @@ impl World {
             .expect("checked above");
         for (uid, m) in &entry.users {
             if uid != from && call.participants.contains_key(uid) {
-                let _ = m.tx.send(ServerMsg::CallScreen {
+                let _ = m.tx.try_send(ServerMsg::CallScreen {
                     id: from.to_owned(),
                     on,
                 });
@@ -974,7 +995,7 @@ impl World {
             .expect("checked above");
         for (uid, m) in &entry.users {
             if uid != from && call.participants.contains_key(uid) {
-                let _ = m.tx.send(ServerMsg::CallMute {
+                let _ = m.tx.try_send(ServerMsg::CallMute {
                     id: from.to_owned(),
                     audio,
                     video,
@@ -1100,12 +1121,12 @@ fn leave_call(entry: &mut Room, id: &str) -> Option<u64> {
     let over = call.participants.len() <= 1;
     for m in entry.users.values() {
         let _ = if over {
-            m.tx.send(ServerMsg::CallEnd {
+            m.tx.try_send(ServerMsg::CallEnd {
                 reason: "last_left".to_owned(),
                 zone: call.zone.clone(),
             })
         } else {
-            m.tx.send(ServerMsg::CallLeave {
+            m.tx.try_send(ServerMsg::CallLeave {
                 id: id.to_owned(),
                 zone: call.zone.clone(),
             })
@@ -1180,6 +1201,10 @@ fn bubble_leaves(entry: &mut Room, now: Instant, map: Option<&campfire_maps::Map
     for ci in 0..entry.calls.len() {
         let call = &entry.calls[ci];
         let rect = zone_rect(map, &call.zone);
+        // A proximity call's centroid is the same for every member check
+        // this tick: compute it once per call, not once per participant
+        // (each computation walks the whole room's user map).
+        let center = (call.zone.is_none()).then(|| center_of_call(entry, call));
         for id in call.participants.keys() {
             let Some(m) = entry.users.get(id) else {
                 continue; // gone: stays in the bubble (reconnect grace)
@@ -1199,7 +1224,7 @@ fn bubble_leaves(entry: &mut Room, now: Instant, map: Option<&campfire_maps::Map
             let inside = match rect {
                 Some(z) if call.zone.is_some() => z.contains(m.pos.0, m.pos.1),
                 None if call.zone.is_some() => false,
-                _ => dist(center_of_call(entry, call), m.pos) < BUBBLE_RADIUS,
+                _ => dist(center.expect("proximity call has a center"), m.pos) < BUBBLE_RADIUS,
             };
             if !inside {
                 dropped.push(id.clone());
@@ -1305,9 +1330,21 @@ fn create_proximity_call(
         })
         .map(|(uid, m)| (uid.clone(), m.pos))
         .collect();
-    candidates.sort_by(|a, b| a.0.cmp(&b.0));
+    if candidates.len() < 2 {
+        return false;
+    }
+    // Sorted by x (id as tiebreak keeps the choice deterministic). A pair
+    // within BUBBLE_RADIUS is also within BUBBLE_RADIUS in x, so the
+    // pairwise scan sweeps a rightward window instead of walking the whole
+    // list for every candidate (it ran O(n²) every tick, worst case the
+    // room cap, twice a second).
+    candidates.sort_by(|a, b| a.1.0.total_cmp(&b.1.0).then_with(|| a.0.cmp(&b.0)));
     for i in 0..candidates.len() {
+        let xi = candidates[i].1.0;
         for j in i + 1..candidates.len() {
+            if candidates[j].1.0 - xi >= BUBBLE_RADIUS {
+                break;
+            }
             if dist(candidates[i].1, candidates[j].1) < BUBBLE_RADIUS {
                 let a = candidates[i].clone();
                 let b = candidates[j].clone();
@@ -1339,6 +1376,10 @@ fn bubble_joins(world: &World, room: &str, entry: &mut Room, map: Option<&campfi
     'calls: for ci in 0..entry.calls.len() {
         let call = &entry.calls[ci];
         let rect = zone_rect(map, &call.zone);
+        // One centroid per call per tick, not one per candidate (each
+        // computation walks the whole room's user map); the distance to it
+        // is likewise computed once per candidate.
+        let center = center_of_call(entry, call);
         let mut best: Option<(f32, String)> = None;
         for (uid, m) in &entry.users {
             if m.bubble_off
@@ -1353,16 +1394,13 @@ fn bubble_joins(world: &World, room: &str, entry: &mut Room, map: Option<&campfi
             if call.zone.is_none() && in_silent_zone(map, m.pos.0, m.pos.1) {
                 continue;
             }
+            let d = dist(center, m.pos);
             let inside = match rect {
                 Some(z) if call.zone.is_some() => z.contains(m.pos.0, m.pos.1),
                 None if call.zone.is_some() => false,
-                _ => dist(center_of_call(entry, call), m.pos) < BUBBLE_RADIUS,
+                _ => d < BUBBLE_RADIUS,
             };
-            if !inside {
-                continue;
-            }
-            let d = dist(center_of_call(entry, call), m.pos);
-            if best.as_ref().is_none_or(|(bd, _)| d < *bd) {
+            if inside && best.as_ref().is_none_or(|(bd, _)| d < *bd) {
                 best = Some((d, uid.clone()));
             }
         }
@@ -1419,7 +1457,7 @@ fn broadcast_call_start(world: &World, room: &str, entry: &Room, call: &call::Ca
             .participants
             .contains_key(uid)
             .then(|| world.tickets.mint(uid, room, call.id));
-        let _ = m.tx.send(ServerMsg::CallStart {
+        let _ = m.tx.try_send(ServerMsg::CallStart {
             room: room.to_owned(),
             participants: participants.clone(),
             zone: zone.clone(),
@@ -1455,7 +1493,7 @@ fn remove_from_room(rooms: &mut HashMap<String, Room>, room: &str, id: &str) -> 
             ended.push(call_id);
         }
         for m in entry.users.values() {
-            let _ = m.tx.send(ServerMsg::Left { id: id.to_owned() });
+            let _ = m.tx.try_send(ServerMsg::Left { id: id.to_owned() });
         }
     }
     if entry.users.is_empty() {
@@ -1501,14 +1539,21 @@ fn status_of(m: &Member) -> Option<Status> {
 /// Split a room's dirty entries into datagram-sized JSON batches: encode all
 /// at once, and when the batch would exceed the datagram cap split the entry
 /// list in halves and recurse (docs/arch/protocol.md overflow rule).
+///
+/// Serializes from a borrowed slice: `MovementBatch.m` is an owned `Vec`,
+/// and copying every entry (with its id `String`) just to encode would
+/// clone the whole batch every tick per dirty room.
+#[derive(serde::Serialize)]
+struct MovementBatchRef<'a> {
+    m: &'a [MovementEntry],
+}
+
 fn encode_batches(entries: &[MovementEntry]) -> Vec<Vec<u8>> {
     if entries.is_empty() {
         return Vec::new();
     }
-    let encoded = serde_json::to_vec(&MovementBatch {
-        m: entries.to_vec(),
-    })
-    .expect("movement batches always serialize");
+    let encoded = serde_json::to_vec(&MovementBatchRef { m: entries })
+        .expect("movement batches always serialize");
     if encoded.len() <= MAX_DATAGRAM_BYTES || entries.len() == 1 {
         return vec![encoded];
     }
@@ -1553,20 +1598,20 @@ pub struct RoomInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use campfire_protocol::from_line;
+    use campfire_protocol::{MovementBatch, from_line};
 
     fn channel() -> (
-        tokio::sync::mpsc::UnboundedSender<ServerMsg>,
-        tokio::sync::mpsc::UnboundedReceiver<ServerMsg>,
+        tokio::sync::mpsc::Sender<ServerMsg>,
+        tokio::sync::mpsc::Receiver<ServerMsg>,
     ) {
-        tokio::sync::mpsc::unbounded_channel()
+        tokio::sync::mpsc::channel(crate::realtime::MSG_QUEUE)
     }
 
     fn datagram_channel() -> (
-        tokio::sync::mpsc::UnboundedSender<Vec<u8>>,
-        tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>,
+        tokio::sync::mpsc::Sender<Vec<u8>>,
+        tokio::sync::mpsc::Receiver<Vec<u8>>,
     ) {
-        tokio::sync::mpsc::unbounded_channel()
+        tokio::sync::mpsc::channel(crate::realtime::DATAGRAM_QUEUE)
     }
 
     fn entry(id: &str, x: f32, y: f32, seq: u64) -> MovementEntry {
@@ -1584,7 +1629,7 @@ mod tests {
     /// Decode movement batches on `drx` until the entry for `id` arrives;
     /// return its silent flag — the `sz` flag rides the movement batch (README
     /// roadmap "Map enhancements").
-    fn first_movement(drx: &mut tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>, id: &str) -> bool {
+    fn first_movement(drx: &mut tokio::sync::mpsc::Receiver<Vec<u8>>, id: &str) -> bool {
         use campfire_protocol::from_line;
         loop {
             let batch: MovementBatch =
@@ -2089,9 +2134,9 @@ mod tests {
         id: String,
         /// The session that joined this user (session-guarded world calls).
         session: u64,
-        rx: tokio::sync::mpsc::UnboundedReceiver<ServerMsg>,
+        rx: tokio::sync::mpsc::Receiver<ServerMsg>,
         /// The member's datagram receiver (movement batches, `sz` flag).
-        drx: tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>,
+        drx: tokio::sync::mpsc::Receiver<Vec<u8>>,
     }
 
     fn join_user(world: &World, room: &str, name: &str) -> TestUser {
