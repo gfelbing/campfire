@@ -4,6 +4,66 @@ All notable releases of campfire. Versions follow calendar-agnostic
 semver; releases are cut by tagging `vX.Y.Z` (the Docker image is built
 and pushed to GHCR on each tag).
 
+## [0.0.22] — 2026-11-18
+
+The headroom release: an audit round that spends the server's and the
+render loop's slack — per-session queues are bounded so a stalled
+client can no longer grow memory without limit, the world tick's
+critical section shrinks to the bookkeeping it actually needs, the
+proximity engine's pairwise scan stops being O(n²) at the room cap,
+and the client's animation loop stops rebuilding identical geometry
+sixty times a second. Two client bugs fall out of the same audit: the
+profile's character highlight never applied, and the media watchdog's
+delivery-stall escalation was unreachable.
+
+### Changed
+
+- Session queues are bounded (`MSG_QUEUE` 256, `DATAGRAM_QUEUE` 128):
+  senders `try_send` and drop on full instead of growing an unbounded
+  mpsc forever behind a client that stopped reading — datagrams were
+  lossy by design, and a stalled reliable stream loses messages until
+  the command reader's idle timeout reaps the session.
+- The world tick holds the rooms lock only for expiry, bubble
+  bookkeeping and gathering the dirty entries; the datagram encode and
+  the per-member fan-out run with the lock released, so a big room's
+  serde pass no longer blocks joins, chat and movement.
+- The proximity-call engine sorts candidates by x and sweeps a
+  rightward window (a pair within the bubble radius is within the
+  radius in x), replacing the full O(n²) cross product that ran twice a
+  second at the room cap; fewer than two eligible users skip the scan
+  entirely.
+- The movement-batch encoder serializes a borrowed slice instead of
+  cloning every entry (id string included) per tick per room, and the
+  call centroid is computed once per call per tick rather than once per
+  participant.
+- The client's render loop dirties its way out of per-frame churn:
+  `drawBubble` redraws only when the zone rects or bubble points
+  actually change, the tick stops building a union call-membership set
+  it didn't use, direction/moving/zIndex updates are guarded, and the
+  tinted-frame cache keys numerically instead of allocating a template
+  string per avatar per frame.
+- Dependencies and runtime: Rust 1.99.1 → 1.100.0, GitHub Actions
+  majors (checkout v7, setup-node v6, buildx/login/metadata/build-push
+  to their latest), and the Rust majors with their code work —
+  jsonwebtoken 12 (with the pure-Rust `rust_crypto` provider), reqwest
+  0.13, rand 0.10, rcgen 0.14, hmac 0.13, base64 0.23.
+
+### Fixed
+
+- The profile menu's character buttons never set `dataset.character`,
+  so the "selected" highlight compared `NaN` and no numbered character
+  ever appeared chosen; only the no-character entry matched.
+- The delivery watchdog's escalation to a full `rebuildDownlink` was
+  unreachable: the two-second stall counter reset to −2 on every pulse,
+  so the "two failed cycles" threshold could never be reached and a
+  delivery stall only ever got pulses. Escalation now counts
+  consecutive stalled cycles explicitly, with the same backoff as the
+  decode-stall path.
+- The load harness reads chunked with the server's 80 KiB line cap and
+  reports undecodable lines instead of conflating them with EOF — the
+  old one-byte-per-await reader both distorted the load it measured and
+  could grow a bot's line buffer without bound.
+
 ## [0.0.21] — 2026-11-19
 
 The face-lift release: the topbar logo joins the pixel-art visual
