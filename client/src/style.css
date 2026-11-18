@@ -63,8 +63,9 @@ body {
 }
 
 .topbar-logo {
-  font-weight: 700;
-  font-size: 1.05rem;
+  display: flex;
+  align-items: center;
+  color: var(--text);
   white-space: nowrap;
 }
 

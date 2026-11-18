@@ -14,6 +14,7 @@
 import type { OwnStatus } from "../net/types";
 import type { SidebarUI } from "./sidebar";
 import { iconNode } from "./pixicons";
+import { logoNode } from "./logo";
 import { previewCell, variantFor } from "../world/characters";
 import type { Identity } from "./profile";
 
@@ -104,6 +105,11 @@ export function createHeader(
   // --- left: burger + logo --------------------------------------------------
 
   burger.addEventListener("click", () => sidebar.toggle());
+
+  // The pixel logo (ui/logo.ts) replaces the fallback text — the flame
+  // from the same icon set as the buttons, the word in pixel letters.
+  const logoHost = topbar.querySelector<HTMLElement>("#topbar-logo")!;
+  logoHost.replaceChildren(logoNode());
 
   // --- right: global media buttons -------------------------------------------
 
