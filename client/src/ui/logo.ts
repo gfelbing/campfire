@@ -131,17 +131,18 @@ function wordmarkPath(): string {
  *
  *  - flame: 6×8 bitmap × 3 → 18×24 px at x 0;
  *  - word:  47×7 bitmap × 2 → 94×14 px, centered on the flame's
- *    height (y = 5), at x 20;
- *  - total 114×24.
+ *    height (y = 5), at x 26 (an 8 px gap, the topbar's usual
+ *    breathing room);
+ *  - total 120×24.
  *
  *  The wordmark's fill is the theme's text color via an inline
  *  `var(--text)` style — currentColor through two nested SVGs proved
  *  unreliable (it rendered dark on the dark topbar). */
 export function logoNode(): SVGSVGElement {
   const el = document.createElementNS(NS, "svg");
-  el.setAttribute("width", "114");
+  el.setAttribute("width", "120");
   el.setAttribute("height", "24");
-  el.setAttribute("viewBox", "0 0 114 24");
+  el.setAttribute("viewBox", "0 0 120 24");
   el.setAttribute("shape-rendering", "crispEdges");
   el.setAttribute("aria-label", "Campfire");
   el.setAttribute("role", "img");
@@ -169,7 +170,7 @@ export function logoNode(): SVGSVGElement {
   const word = document.createElementNS(NS, "svg");
   word.setAttribute("width", "94");
   word.setAttribute("height", "14");
-  word.setAttribute("x", "20");
+  word.setAttribute("x", "26");
   word.setAttribute("y", "5");
   word.setAttribute("viewBox", `0 0 ${8 * ADVANCE - 1} ${GLYPH_H}`);
   word.setAttribute("shape-rendering", "crispEdges");
