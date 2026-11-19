@@ -4,7 +4,7 @@ All notable releases of campfire. Versions follow calendar-agnostic
 semver; releases are cut by tagging `vX.Y.Z` (the Docker image is built
 and pushed to GHCR on each tag).
 
-## [Unreleased]
+## [0.0.23] — 2026-11-19
 
 The modular avatar release: the Jephed 40-sheet character pack gives way
 to the MetroCity pack (JIK-A-4, CC0) and its layered sheets — body, hair
@@ -27,7 +27,6 @@ freely.
   auto entry is gone — every section has an explicit pick. The profile
   color tints the hair (caps stay untinted) and accents the UI
   elsewhere (label, dot, list).
-
 - Walking is faster: the walk speed goes 4 → 6 tiles/s, Shift runs at
   twice the walk (12 tiles/s, the new server movement cap, was 8),
   click-to-walk follows, and the walk cycle plays at 60 ms/frame so the
