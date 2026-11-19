@@ -21,3 +21,8 @@ maps/*
 !maps/island
 !maps/office
 server.log
+
+# hand-cut avatar source sheets, kept local (see tools/metrocity/merge.py)
+/Metrocity_merged/
+/MetroCity/
+/MetroCity 2.0/
