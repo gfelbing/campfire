@@ -7,12 +7,16 @@ import type { Dir, OwnStatus, UserBrief, UserState } from "../net/types";
 import { iconCanvas } from "../ui/pixicons";
 import {
   CELL_H,
-  IDLE_COL,
+  IDLE_FRAME,
+  LAYER_COUNT,
+  TOP_LAYER,
   WALK_CYCLE,
   WALK_FRAME_MS,
-  dirRow,
-  tintedFrames,
-  variantFor,
+  deriveLook,
+  isHairRow,
+  layerFrame,
+  normalizeLook,
+  type Look,
 } from "./characters";
 
 const SNAP_MAX_LAG_MS = 150;
@@ -39,11 +43,12 @@ export class AvatarView {
   readonly container = new Container();
   private body: Graphics;
   private facing: Graphics;
-  /** The pixel-art sprite (a framed cell of the character sheet); null
-   *  until the sheets are loaded — the circle below is the fallback. */
-  private sprite: Sprite | null = null;
-  private variant = -1;
-  private color = 0;
+  /** The pixel-art sprite stack (one sprite per look layer: body,
+   *  bottom, mid, head — framed cells of the avatar sheets); null until
+   *  the sheets are loaded — the circle below is the fallback. */
+  private sprites: Sprite[] | null = null;
+  private look: Look | null = null;
+  private color = 0xffffff;
   private dir: Dir = "s";
   private moving = false;
   label: Text;
@@ -87,30 +92,49 @@ export class AvatarView {
     this.setColor(color);
     this.setStatus("online");
   }
-
-  /** Attach the pixel-art sprite for `variant` (a character sheet index):
-   *  replaces the fallback circle once the character sheets are loaded. */
-  setVariant(variant: number): void {
-    if (variant === this.variant) return;
-    this.variant = variant;
-    if (!this.sprite) {
-      const grid = tintedFrames(variant, this.color);
-      if (grid.length === 0) return; // sheets not loaded (or failed)
-      this.sprite = new Sprite();
-      // The feet stand on the avatar's tile: the cell bottom sits at the
-      // tile's bottom edge (the position is the tile center, and the cell
-      // height equals the tile size). Scaled up (`SPRITE_SCALE`), the
-      // anchor keeps the feet planted where they were.
-      this.sprite.anchor.set(0.5, 1);
-      this.sprite.scale.set(SPRITE_SCALE);
-      this.sprite.y = CELL_H / 2;
-      this.container.addChildAt(this.sprite, 0);
+  /** Attach the pixel-art sprite stack for `look` (body/bottom/mid/top):
+   *  replaces the fallback circle once the avatar sheets are loaded. */
+  setLook(rawLook: Look): void {
+    // Clamp against the sheets: a bad wire value falls back to the caller's
+    // (already valid) pick instead of crashing the renderer.
+    const look = normalizeLook(rawLook, rawLook);
+    if (
+      this.look &&
+      look.skin === this.look.skin &&
+      look.top === this.look.top &&
+      look.mid === this.look.mid &&
+      look.bottom === this.look.bottom
+    ) {
+      return;
+    }
+    this.look = look;
+    if (!this.sprites) {
+      const stack: Sprite[] = [];
+      for (let layer = 0; layer < LAYER_COUNT; layer++) {
+        if (!layerFrame(layer, look, this.dir, IDLE_FRAME)) return; // sheets not loaded (or failed)
+        // The feet stand on the avatar's tile: the cell bottom sits at the
+        // tile's bottom edge (the position is the tile center, and the
+        // cell height equals the tile size). Scaled up (`SPRITE_SCALE`),
+        // the anchor keeps the feet planted where they were. Inserted in
+        // ascending layer order so the layers draw body → bottom →
+        // mid → top (hair/caps).
+        const sprite = new Sprite();
+        sprite.anchor.set(0.5, 1);
+        sprite.scale.set(SPRITE_SCALE);
+        sprite.y = CELL_H / 2;
+        stack.push(sprite);
+        this.container.addChildAt(sprite, layer);
+      }
+      this.sprites = stack;
       // The circle fallback (and its facing dot) only render when the
       // sheets are missing.
       this.body.visible = false;
       this.facing.visible = false;
     }
     this.refreshFrame(performance.now());
+    // Hair carries the user's profile color; caps stay untinted (also on
+    // a later look change, not just when the sprites are first built).
+    this.sprites![TOP_LAYER]!.tint = isHairRow(look) ? this.color : 0xffffff;
   }
 
   setName(name: string): void {
@@ -160,12 +184,14 @@ export class AvatarView {
 
   setColor(color: number): void {
     this.color = color;
+    if (this.sprites && this.look) {
+      this.sprites[TOP_LAYER]!.tint = isHairRow(this.look) ? color : 0xffffff;
+    }
     this.body
       .clear()
       .circle(0, 0, 10)
       .fill({ color, alpha: 0.95 })
       .stroke({ width: 2, color: 0x14161a, alpha: 0.6 });
-    if (this.sprite) this.refreshFrame(performance.now());
   }
 
   setDir(dir: Dir): void {
@@ -177,21 +203,20 @@ export class AvatarView {
     this.refreshFrame(performance.now());
   }
 
-  /** The cell for the current direction and walk phase: one of the
-   *  character sheet's direction rows (with the outfit recolored to the
-   *  user's color), cycling the 3-frame walk while moving, the neutral
-   *  middle cell while idle. */
+  /** The cells for the current direction and walk phase: one cell per
+   *  look layer (body, bottom, mid, top) from the sheets' direction
+   *  block, cycling the 6-frame walk while moving, the contact cell
+   *  while idle. */
   private refreshFrame(nowMs: number): void {
-    if (!this.sprite) return;
-    const grid = tintedFrames(this.variant, this.color);
-    const row = grid[dirRow(this.dir)];
-    if (!row) return;
-    const col = this.moving
+    if (!this.sprites || !this.look) return;
+    const frame = this.moving
       ? WALK_CYCLE[Math.floor(nowMs / WALK_FRAME_MS) % WALK_CYCLE.length]
-      : IDLE_COL;
-    const tex = row[col];
-    if (!tex) return;
-    this.sprite.texture = tex;
+      : IDLE_FRAME;
+    for (let layer = 0; layer < LAYER_COUNT; layer++) {
+      const tex = layerFrame(layer, this.look, this.dir, frame);
+      if (!tex) continue; // a missing layer's sheet contributes nothing
+      this.sprites[layer]!.texture = tex;
+    }
   }
 
   /** Set the un-bobbed position in pixels. */
@@ -263,11 +288,14 @@ function parseColor(color: string): number | null {
   return parseInt(hex, 16);
 }
 
-/** The avatar's character: the user's chosen one (rosters carry it) when
+/** The avatar's look: the user's chosen one (rosters carry it) when
  *  present, else a stable hash of their name (the id is random per
  *  session). */
-function characterOf(user: { name: string; character?: number }): number {
-  return user.character ?? variantFor(user.name);
+function lookOf(user: { name: string; skin?: number; top?: number; mid?: number; bottom?: number }): Look {
+  return normalizeLook(
+    { skin: user.skin, top: user.top, mid: user.mid, bottom: user.bottom },
+    deriveLook(user.name),
+  );
 }
 
 /** The avatar's color: the user's chosen one (sent in the rosters) when
@@ -301,11 +329,11 @@ export class AvatarManager {
         existing.view.setName(u.name);
         existing.dir = u.d;
         existing.view.setDir(u.d);
-        // The roster is the color/character authority: re-apply both on
+        // The roster is the color/look authority: re-apply both on
         // reconnect (and after an identity change).
         existing.color = colorOf(u);
         existing.view.setColor(existing.color);
-        existing.view.setVariant(characterOf(u));
+        existing.view.setLook(lookOf(u));
         existing.view.setStatus(u.status ?? "online");
         // The hello snapshot is authoritative: reset the history to it.
         existing.snap = [{ x: u.x, y: u.y, t: now }];
@@ -314,15 +342,14 @@ export class AvatarManager {
         const view = new AvatarView(u.name, color);
         view.setDir(u.d);
         view.setStatus(u.status ?? "online");
-        view.setVariant(characterOf(u));
+        view.setLook(lookOf(u));
         this.layer.addChild(view.container);
         this.remotes.set(u.id, {
           id: u.id,
           name: u.name,
           color,
           view,
-          dir: u.d,
-          moving: false,
+          dir: u.d,          moving: false,
           lastSeq: 0,
           snap: [{ x: u.x, y: u.y, t: now }],
         });
@@ -335,7 +362,7 @@ export class AvatarManager {
     const color = colorOf(user);
     const view = new AvatarView(user.name, color);
     view.setStatus(user.status ?? "online");
-    view.setVariant(characterOf(user));
+    view.setLook(lookOf(user));
     this.layer.addChild(view.container);
     this.remotes.set(user.id, {
       id: user.id,

@@ -226,7 +226,7 @@ fn expect_ids(participants: &[UserBrief], expected: &[&str]) {
 }
 
 /// Walk `c` from spawn eastwards, one step per datagram, respecting the
-/// server's speed gate (≤ 8 tiles/s). `tiles` must be reachable.
+/// server's speed gate (≤ 12 tiles/s). `tiles` must be reachable.
 async fn walk_out(c: &TestClient, id: &str, tiles: f32) {
     let steps = (tiles / 0.4).ceil() as u32;
     for i in 1..=steps {

@@ -16,19 +16,27 @@
 // redirected to the IdP.
 
 import type { OwnStatus } from "../net/types";
+import {
+  BOTTOM_COUNT,
+  MID_COUNT,
+  SKIN_COUNT,
+  TOP_COUNT,
+  deriveLook,
+  type Look,
+} from "../world/characters";
 
 export interface BootOptions {
   room: string;
   name: string;
   color: string;
-  /** The chosen pixel-art character (a sheet index); `null` = derived
-   *  from the name (the stable hash). */
-  character: number | null;
-  /** Whether the visitor picked the whole identity (name, color and
-   *  character — persisted, or auth/URL-provided). `false` opens the
-   *  full-page setup layer before the join; the URL-provided name+color
-   *  pair marks it complete too, so the e2e drivers (which never touch
-   *  the profile UI) pass straight through. */
+  /** The avatar look (body/mid/bottom/top sheet rows): the persisted pick,
+   *  else derived from the name (drivers and returning name-only users). */
+  look: Look;
+  /** Whether the visitor picked the whole identity (name, color and look
+   *  — persisted, or auth/URL-provided). `false` opens the full-page
+   *  setup layer before the join; the URL-provided name+color pair marks
+   *  it complete too, so the e2e drivers (which never touch the profile
+   *  UI) pass straight through. */
   identityComplete: boolean;
 }
 
@@ -46,7 +54,16 @@ const COLOR_RE = /^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/;
  *  here, so a reload (no URL params anymore) re-joins as the same user. */
 const NAME_KEY = "campfire.name";
 const COLOR_KEY = "campfire.color";
-const CHARACTER_KEY = "campfire.character";
+/** The avatar look parts (campfire.skin/mid/bottom/top), in `Look` key
+ *  order. */
+const LOOK_KEYS = [
+  "campfire.skin",
+  "campfire.mid",
+  "campfire.bottom",
+  "campfire.top",
+] as const;
+const LOOK_COUNTS = [SKIN_COUNT, MID_COUNT, BOTTOM_COUNT, TOP_COUNT] as const;
+const LOOK_FIELDS = ["skin", "mid", "bottom", "top"] as const;
 
 /** Presence-status persistence (the profile menu). */
 const STATUS_KEY = "campfire.status";
@@ -62,26 +79,36 @@ export function loadStatus(): OwnStatus {
   return "online";
 }
 
-function loadIdentity(): { name?: string; color?: string; character?: number | null } {
+function loadIdentity(): {
+  name?: string;
+  color?: string;
+  look?: Look;
+} {
   try {
+    const parts = LOOK_KEYS.map((k, i) => {
+      const raw = localStorage.getItem(k);
+      const v = raw !== null ? Number(raw) : NaN;
+      return Number.isInteger(v) && v >= 0 && v < LOOK_COUNTS[i] ? v : undefined;
+    });
+    const look = parts.every((p) => p !== undefined)
+      ? ({ skin: parts[0]!, mid: parts[1]!, bottom: parts[2]!, top: parts[3]! } as Look)
+      : undefined;
     return {
       name: localStorage.getItem(NAME_KEY) ?? undefined,
       color: localStorage.getItem(COLOR_KEY) ?? undefined,
-      character: localStorage.getItem(CHARACTER_KEY) !== null
-        ? Number(localStorage.getItem(CHARACTER_KEY))
-        : undefined,
+      look,
     };
   } catch {
     return {};
   }
 }
 
-export function saveIdentity(name: string, color: string, character: number | null): void {
+export function saveIdentity(name: string, color: string, look: Look): void {
   try {
     localStorage.setItem(NAME_KEY, name);
     localStorage.setItem(COLOR_KEY, color);
-    if (character === null) localStorage.removeItem(CHARACTER_KEY);
-    else localStorage.setItem(CHARACTER_KEY, String(character));
+    const values = LOOK_FIELDS.map((f) => look[f]);
+    LOOK_KEYS.forEach((k, i) => localStorage.setItem(k, String(values[i])));
   } catch {
     // ignore storage failures
   }
@@ -205,23 +232,21 @@ async function runBoot(forcedName: string | null): Promise<BootOptions> {
     stored.color && COLOR_RE.test(stored.color) ? stored.color : undefined;
   const urlColor = rawColor !== null && COLOR_RE.test(rawColor) ? rawColor : undefined;
   const color = storedColor ?? urlColor ?? randomColor();
-  // The chosen character (the profile layer); `null` = derive from the
-  // name. A URL-provided name (e2e drivers) resets it: a fresh identity
-  // should not inherit the previous one's character.
-  const character = named === stored.name && stored.character !== undefined
-    ? stored.character
-    : null;
-  saveIdentity(name, color, character);
+  // The avatar look (body/mid/bottom/top rows): the persisted pick. A
+  // URL-provided name (e2e drivers) resets it: a fresh identity should
+  // not inherit the previous one's look.
+  const look = named === stored.name && stored.look ? stored.look : deriveLook(name);
+  saveIdentity(name, color, look);
   // "Fully picked": the name and color were not randomly generated and
-  // the character is persisted — or the URL provided name and color
+  // the look is persisted — or the URL provided name and color
   // (driver intent; the drivers never open the profile layer). Anyone
   // else gets the full-page setup layer before the join.
   const identityComplete =
     (named !== undefined &&
       (storedColor !== undefined || urlColor !== undefined) &&
       named === stored.name &&
-      stored.character !== undefined) ||
+      stored.look !== undefined) ||
     (urlName !== undefined && urlColor !== undefined);
 
-  return { room, name, color, character, identityComplete };
+  return { room, name, color, look, identityComplete };
 }

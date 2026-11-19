@@ -15,7 +15,7 @@ import type { OwnStatus } from "../net/types";
 import type { SidebarUI } from "./sidebar";
 import { iconNode } from "./pixicons";
 import { logoNode } from "./logo";
-import { previewCell, variantFor } from "../world/characters";
+import { previewCell } from "../world/characters";
 import type { Identity } from "./profile";
 
 interface MapInfo {
@@ -32,8 +32,8 @@ const STATUSES: Array<{ id: OwnStatus; label: string }> = [
 export interface HeaderOptions {
   name: string;
   color: string;
-  /** The chosen pixel-art character; `null` = derived from the name. */
-  character: number | null;
+  /** The chosen avatar look (body/hair/top/bottom sheet rows). */
+  look: Identity["look"];
   /** The joined presence status. */
   status: OwnStatus;
   onSwitchMap: (map: string) => void;
@@ -285,7 +285,7 @@ export function createHeader(
   // The committed identity: the profile button renders its character
   // thumbnail; the draft editing happens in the full-page layer
   // (`ui/profile.ts`), opened by the button.
-  const identity = { name: opts.name, color: opts.color, character: opts.character };
+  const identity = { name: opts.name, color: opts.color, look: opts.look };
   let status = opts.status;
 
   // Status rows live in their own topbar popover (issues.md #1); the
@@ -313,7 +313,7 @@ export function createHeader(
     profileBtn.querySelector<HTMLElement>(".sdot")!.className = `sdot ${status}`;
     profileBtn.title = STATUSES.find((s) => s.id === status)!.label;
     const initial = profileBtn.querySelector<HTMLElement>(".status-initial")!;
-    const cell = previewCell(identity.character ?? variantFor(identity.name), identity.color);
+    const cell = previewCell(identity.look);
     if (!cell) {
       initial.classList.remove("hidden");
       profileBtn.style.background = identity.color;

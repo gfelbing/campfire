@@ -4,7 +4,7 @@ import { Application, Assets, Container, Graphics, Rectangle, Sprite, Texture } 
 
 import type { MapData, TilesetRef, Zone } from "./mapdata";
 import { AvatarManager, AvatarView } from "./avatars";
-import { loadCharacters, variantFor } from "./characters";
+import { loadAvatarSheets, type Look } from "./characters";
 
 /** Tiled stores flip flags in the GID's high bits (no diagonal support yet). */
 const GID_MASK = 0x1fffffff;
@@ -29,7 +29,7 @@ export async function createWorld(
   map: MapData,
   localName: string,
   localColor: string,
-  localCharacter: number | null,
+  localLook: Look,
 ): Promise<World> {
   const app = new Application();
   await app.init({
@@ -151,12 +151,12 @@ export async function createWorld(
   const avatars = new Container();
   world.addChild(avatars);
 
-  // The character sheets must be in before any AvatarView attaches its
-  // sprite; a failed load leaves every avatar on the circle fallback.
-  await loadCharacters();
+  // The avatar sheets must be in before any AvatarView attaches its
+  // sprite stack; a failed load leaves every avatar on the circle fallback.
+  await loadAvatarSheets();
 
   const local = new AvatarView(localName, parseHex(localColor));
-  local.setVariant(localCharacter ?? variantFor(localName));
+  local.setLook(localLook);
   avatars.addChild(local.container);
 
   // Zoom: the wheel scales the world container (1.0 = 1:1 tiles, 0.5–3).

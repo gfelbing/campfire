@@ -43,11 +43,23 @@ pub enum Status {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Avatar {
     pub color: String,
-    /// The chosen pixel-art character (a `client/public/characters/`
-    /// sheet index); `None` means "derived from the name" (older clients
+    /// The chosen base sprite row (a `client/public/metrocity/body.png`
+    /// skin row); `None` means "derived from the name" (older clients
     /// and users who never opened the profile menu).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub character: Option<u8>,
+    pub skin: Option<u8>,
+    /// The chosen upper-body garment (a `client/public/metrocity/mid.png`
+    /// row).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mid: Option<u8>,
+    /// The chosen lower-body garment (a `client/public/metrocity/bottom.png`
+    /// row).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bottom: Option<u8>,
+    /// The chosen head layer (a `client/public/metrocity/top.png` row:
+    /// hair styles first, then caps; hair is tinted with the color).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub top: Option<u8>,
 }
 
 /// Another user, by id, name and (optional) chosen color (presence events).
@@ -58,10 +70,17 @@ pub struct UserBrief {
     /// The user's chosen avatar color (`#rrggbb`); present when they set one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub color: Option<String>,
-    /// The user's chosen pixel-art character; `None` means "derived from
-    /// the name" (the client's stable hash).
+    /// The user's chosen pixel-art look: base row, garments and head
+    /// layer (`client/public/metrocity/` sheet rows); absent means
+    /// "derived from the name" (the client's stable hash).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub character: Option<u8>,
+    pub skin: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mid: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bottom: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub top: Option<u8>,
     /// The user's presence status; `None` means `online` (the default).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status: Option<Status>,
@@ -82,10 +101,17 @@ pub struct UserState {
     /// The user's chosen avatar color (`#rrggbb`); present when they set one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub color: Option<String>,
-    /// The user's chosen pixel-art character; `None` means "derived from
-    /// the name" (the client's stable hash).
+    /// The user's chosen pixel-art look: base row, garments and head
+    /// layer (`client/public/metrocity/` sheet rows); absent means
+    /// "derived from the name" (the client's stable hash).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub character: Option<u8>,
+    pub skin: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mid: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bottom: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub top: Option<u8>,
     /// The user's presence status; `None` means `online` (the default).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status: Option<Status>,
@@ -375,7 +401,10 @@ mod tests {
             name: "georg".into(),
             avatar: Some(Avatar {
                 color: "#e05f38".into(),
-                character: None,
+                skin: None,
+                mid: None,
+                bottom: None,
+                top: None,
             }),
             token: None,
             status: None,
@@ -400,7 +429,10 @@ mod tests {
                 d: Dir::South,
                 sz: false,
                 color: Some("#e05f38".into()),
-                character: Some(3),
+                skin: Some(3),
+                mid: Some(1),
+                bottom: Some(4),
+                top: Some(2),
                 status: Some(Status::Away),
             }],
             chat: vec![ChatMsg {
@@ -421,7 +453,10 @@ mod tests {
                 id: "u_77ab".into(),
                 name: "jules".into(),
                 color: None,
-                character: None,
+                skin: None,
+                mid: None,
+                bottom: None,
+                top: None,
                 status: None,
             }],
             // A minted media ticket (docs/arch/moq-sfu.md): 32 random bytes,

@@ -18,11 +18,15 @@ export interface UserState {
   /** `sz`: the user stands inside a silentZone (README roadmap "Map
    *  enhancements"). Only sent when true. */
   sz?: boolean;
-  /** The user's chosen avatar color (`#rrggbb`); present when they set one. */
+  /** The user's chosen color (`#rrggbb`); present when they set one. */
   color?: string;
-  /** The user's chosen pixel-art character; absent means "derived from
-   *  the name" (the client's stable hash). */
-  character?: number;
+  /** The user's chosen look (metrocity sheet rows): skin, garments,
+   *  head layer. Absent means "derived from the name" (the client's
+   *  stable hash). */
+  skin?: number;
+  mid?: number;
+  bottom?: number;
+  top?: number;
   /** The user's presence status; absent means `online`. */
   status?: OwnStatus;
 }
@@ -32,9 +36,13 @@ export interface UserBrief {
   name: string;
   /** The user's chosen avatar color (`#rrggbb`); present when they set one. */
   color?: string;
-  /** The user's chosen pixel-art character; absent means "derived from
-   *  the name" (the client's stable hash). */
-  character?: number;
+  /** The user's chosen look (metrocity sheet rows): skin, garments,
+   *  head layer. Absent means "derived from the name" (the client's
+   *  stable hash). */
+  skin?: number;
+  mid?: number;
+  bottom?: number;
+  top?: number;
   /** The user's presence status; absent means `online`. */
   status?: OwnStatus;
 }
@@ -127,7 +135,7 @@ export type ClientMsg =
       t: "join";
       room: string;
       name: string;
-      avatar?: { color: string; character?: number };
+      avatar?: { color: string; skin?: number; top?: number; mid?: number; bottom?: number };
       /** Reconnect token (docs/arch/protocol.md): restore the previous identity. */
       token?: string;
       /** The joiner's presence status; absent means `online`. */

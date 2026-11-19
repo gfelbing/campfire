@@ -53,7 +53,7 @@ failing the boot, so a bad map cannot take the server down. See
 
 The server owns movement, membership and call state:
 
-- Movement is validated per datagram: tile space, max 8 tiles/s, walkable
+- Movement is validated per datagram: tile space, max 12 tiles/s, walkable
   tiles only, ≤ 30 moves/s per user; stale sequence numbers are dropped.
 - Call membership (proximity bubbles + zone calls) is computed by the server
   in the 50 ms tick; clients only render what the server broadcasts.

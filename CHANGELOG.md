@@ -4,6 +4,38 @@ All notable releases of campfire. Versions follow calendar-agnostic
 semver; releases are cut by tagging `vX.Y.Z` (the Docker image is built
 and pushed to GHCR on each tag).
 
+## [Unreleased]
+
+The modular avatar release: the Jephed 40-sheet character pack gives way
+to the MetroCity pack (JIK-A-4, CC0) and its layered sheets — body, hair
+and clothes alpha-stack into one 32×32 sprite, so users pick each part
+freely.
+
+### Changed
+
+- Avatars are composited from four sheets (`client/public/metrocity/`,
+  cut by hand from the pack into `Metrocity_merged/`, merged by
+  `tools/metrocity/merge.py`): 6 skin tones, 11 shirts (`mid`), 11
+  bottoms, and a head layer of 4 hair styles (tinted with the profile
+  color) + 3 caps — one sheet row per part (`Avatar.skin`/`mid`/
+  `bottom`/`top` on the wire, replacing `character`). Users who never
+  picked (or old clients) render a stable look derived from a hash of
+  their room-visible name.
+- The profile modal picks skin, head (hair & hats), shirt and bottom
+  from composited thumbnails with a live full-look preview; the profile
+  button opens the same modal with the current setup selected. The ∅
+  auto entry is gone — every section has an explicit pick. The profile
+  color tints the hair (caps stay untinted) and accents the UI
+  elsewhere (label, dot, list).
+
+- Walking is faster: the walk speed goes 4 → 6 tiles/s, Shift runs at
+  twice the walk (12 tiles/s, the new server movement cap, was 8),
+  click-to-walk follows, and the walk cycle plays at 60 ms/frame so the
+  feet don't slide at the new speed.
+- The head picker loses two broken options from the pack: Hair.png's
+  eyebrows-only row (rendered as a bald head) and Suit.png's blank row
+  (an invisible "cap"). 4 hair styles + 3 caps remain.
+
 ## [0.0.22] — 2026-11-18
 
 The headroom release: an audit round that spends the server's and the

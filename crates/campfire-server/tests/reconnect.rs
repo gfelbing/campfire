@@ -245,7 +245,7 @@ async fn reconnect_within_window_keeps_identity_no_flicker() {
     assert!(matches!(a.recv().await, ServerMsg::Joined { .. }));
 
     // Alice walks half a tile east of spawn (20.5, 15.5 → 21.0, 15.5):
-    // within the one-tile bubble radius. The speed gate (8 tiles/s) needs
+    // within the one-tile bubble radius. The speed gate (12 tiles/s) needs
     // headroom since the join.
     tokio::time::sleep(Duration::from_millis(300)).await;
     let batch = MovementBatch {

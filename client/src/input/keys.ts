@@ -63,13 +63,14 @@ export function attachKeys(): void {
   });
 }
 
-/** Desired velocity in tiles/s from the key state (walk 4, run 8 — docs/arch/protocol.md). */
+/** Desired velocity in tiles/s from the key state (walk 6, run 12 = twice
+ *  the walk — docs/arch/protocol.md). */
 export function desiredVelocity(dtTiles: number): { vx: number; vy: number; moving: boolean } {
   const vx = (keys.right ? 1 : 0) - (keys.left ? 1 : 0);
   const vy = (keys.down ? 1 : 0) - (keys.up ? 1 : 0);
   if (vx === 0 && vy === 0) return { vx: 0, vy: 0, moving: false };
   const len = Math.hypot(vx, vy);
-  const speed = keys.run ? 8 : 4;
+  const speed = keys.run ? 12 : 6;
   const step = (speed * dtTiles) / len;
   return { vx: vx * step, vy: vy * step, moving: true };
 }

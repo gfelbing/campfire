@@ -1,62 +1,80 @@
 // The identity layer: a full-page overlay to pick your profile — name,
-// color and pixel-art character. Two uses:
+// color and the modular avatar look (skin, mid, bottom, top). Two uses:
 //
 // * **setup** (not dismissible): shown while the app loads when the
 //   visitor has not picked everything yet (no persisted identity, no
 //   URL-provided one) — the join waits for the confirm.
 // * **edit** (dismissible): the profile button opens it over the running
-//   game; confirming with a changed identity rejoins (the identity is
-//   fixed at join), confirming unchanged just closes.
+//   game with the current setup selected; confirming with a changed
+//   identity rejoins (the identity is fixed at join), confirming
+//   unchanged just closes.
 //
-// Replaces the old topbar popover: the same form, one layer, one code
-// path (tools/e2e drives identities through the URL params and never
-// opens this).
+// The avatar config happens only here: there is no other surface that
+// edits the look. The look parts pick one row per sheet
+// (`world/characters.ts`); the thumbnails and the preview are composited
+// cells of the four layers (tools/e2e drives identities through the URL
+// params and never opens this).
 
 import { COLORS, saveIdentity } from "./boot";
 import {
-  CHARACTER_COUNT,
-  loadCharacters,
+  BODY_LAYER,
+  BOTTOM_COUNT,
+  BOTTOM_LAYER,
+  IDLE_FRAME,
+  MID_COUNT,
+  MID_LAYER,
+  SKIN_COUNT,
+  TOP_COUNT,
+  TOP_LAYER,
+  loadAvatarSheets,
+  parseColor,
   previewCell,
+  type Look,
 } from "../world/characters";
 
 export interface Identity {
   name: string;
   color: string;
-  /** The chosen pixel-art character; `null` = derived from the name. */
-  character: number | null;
+  /** The picked avatar look (one row per sheet). */
+  look: Look;
 }
 
 export interface ProfileLayerOptions {
-  /** `setup` requires a character pick and cannot be dismissed; `edit`
-   *  offers the ∅ auto entry and Escape/backdrop close. */
+  /** `setup` cannot be dismissed; `edit` offers Escape/backdrop close. */
   mode: "setup" | "edit";
   /** The confirm button label ("Join" on first setup, "Done" on edits). */
   confirmLabel: string;
 }
 
+/** The look keys, indexed by picker (0 = skin, 1 = top/head, 2 = mid,
+ *  3 = bottom). */
+const LOOK_KEYS = ["skin", "top", "mid", "bottom"] as const;
+/** Picker indexes (the grid order in the card). */
+const SKIN_PICKER = 0;
+const TOP_PICKER = 1;
+const MID_PICKER = 2;
+const BOTTOM_PICKER = 3;
+
 /** Open the full-page layer; resolves with the confirmed identity
  *  (`saveIdentity` already persisted it), or `null` when dismissed
- *  (edit mode only). The character sheets must be in before the picker
- *  can build its thumbnails, so this awaits them (a no-op once loaded —
- *  the world's `loadCharacters` dedupes through pixi's asset cache). */
+ *  (edit mode only). The avatar sheets must be in before the picker can
+ *  build its thumbnails, so this awaits them (a no-op once loaded — the
+ *  world's `loadAvatarSheets` dedupes through pixi's asset cache). */
 export function openProfileLayer(
   root: HTMLElement,
   initial: Identity,
   opts: ProfileLayerOptions,
 ): Promise<Identity | null> {
-  // The character sheets must be in before the picker can build its
-  // thumbnails, so this awaits them (a no-op once loaded — the world's
-  // `loadCharacters` dedupes through pixi's asset cache).
-  return loadCharacters()
+  return loadAvatarSheets()
     .catch(() => undefined)
     .then(
       () =>
         new Promise<Identity | null>((resolve) => {
-          // Drafts: they start at the current identity and only commit on the
-          // confirm button.
+          // Drafts: they start at the current identity and only commit on
+          // the confirm button.
           let name = initial.name;
           let color = initial.color;
-          let character = initial.character;
+          const look: Look = { ...initial.look };
 
           const layer = document.createElement("div");
           layer.className = "identity-layer";
@@ -70,7 +88,7 @@ export function openProfileLayer(
           hint.className = "identity-hint";
           hint.textContent =
             opts.mode === "setup"
-              ? "pick a name, a color and a character — everyone sees them"
+              ? "pick a name, a color and your look — everyone sees them"
               : "changes rejoin the room";
           const nameInput = document.createElement("input");
           nameInput.className = "profile-name-input";
@@ -82,8 +100,18 @@ export function openProfileLayer(
           nameError.className = "profile-error hidden";
           const swatches = document.createElement("div");
           swatches.className = "profile-swatches";
-          const characters = document.createElement("div");
-          characters.className = "profile-characters";
+          // The composited avatar preview: updates on every pick.
+          const preview = document.createElement("canvas");
+          preview.className = "identity-preview";
+          const previewWrap = document.createElement("div");
+          previewWrap.className = "identity-preview-wrap";
+          previewWrap.appendChild(preview);
+          const pickers: HTMLDivElement[] = [];
+          for (let i = 0; i < 4; i++) {
+            const grid = document.createElement("div");
+            grid.className = "profile-characters";
+            pickers.push(grid);
+          }
           const doneBtn = document.createElement("button");
           doneBtn.className = "profile-done";
           doneBtn.textContent = opts.confirmLabel;
@@ -103,46 +131,43 @@ export function openProfileLayer(
             b.addEventListener("click", () => {
               color = c;
               syncSwatchSelection();
-              renderCharacterGrid();
+              // The hair thumbnails and the preview carry the color.
+              syncPickers(true);
             });
             swatches.appendChild(b);
           }
 
-          // A canvas thumbnail per sheet (the idle south frame, recolored to
-          // the draft color), plus the ∅ auto entry (edit mode only): the
-          // character derived from the name hash, the pre-picker behavior.
-          function renderCharacterGrid(): void {
-            characters.replaceChildren();
-            if (opts.mode === "edit") {
-              const auto = document.createElement("button");
-              auto.type = "button";
-              auto.className = "swatch character";
-              auto.textContent = "∅";
-              auto.title = "derive the character from your name";
-              auto.addEventListener("click", () => {
-                character = null;
-                syncCharacterSelection();
-              });
-              characters.appendChild(auto);
-            }
-            for (let i = 0; i < CHARACTER_COUNT; i++) {
+          /** One option button per sheet row. `parts` selects which layers
+           *  the thumbnail composites (the part's own layer alone — the
+           *  full preview above shows the combined look); the hair thumbs
+           *  are tinted with the draft color. */
+          function renderPicker(
+            index: number,
+            count: number,
+            parts: readonly number[],
+          ): void {
+            const grid = pickers[index]!;
+            grid.replaceChildren();
+            const tint = parseColor(color);
+            for (let i = 0; i < count; i++) {
               const b = document.createElement("button");
               b.type = "button";
               b.className = "swatch character";
-              b.dataset.character = String(i);
-              b.title = `character ${i + 1}`;
-              const cell = previewCell(i, color);
+              b.dataset.part = String(index);
+              b.dataset.option = String(i);
+              b.title = ["skin", "hair or cap", "shirt", "bottom"][index]! + ` ${i + 1}`;
+              const draft = { ...look, [LOOK_KEYS[index]!]: i } as Look;
+              const cell = previewCell(draft, IDLE_FRAME, parts, tint);
               if (cell) {
                 cell.className = "character-cell";
                 b.appendChild(cell);
               }
               b.addEventListener("click", () => {
-                character = i;
-                syncCharacterSelection();
+                look[LOOK_KEYS[index]!] = i;
+                syncPickers();
               });
-              characters.appendChild(b);
+              grid.appendChild(b);
             }
-            syncCharacterSelection();
           }
 
           function syncSwatchSelection(): void {
@@ -154,14 +179,30 @@ export function openProfileLayer(
             }
           }
 
-          function syncCharacterSelection(): void {
-            for (const el of characters.children) {
-              const b = el as HTMLElement;
-              const sel =
-                b.textContent === "∅"
-                  ? character === null
-                  : Number(b.dataset.character) === character;
-              b.classList.toggle("selected", sel);
+          /** Refresh the preview + the pickers' selection marks. `rerender`
+           *  rebuilds the grids' thumbnails (a skin or color change shows
+           *  through hair/top/bottom thumbs). */
+          function syncPickers(rerender = false): void {
+            const cell = previewCell(look, IDLE_FRAME, undefined, parseColor(color));
+            if (cell) {
+              preview.width = cell.width;
+              preview.height = cell.height;
+              preview.getContext("2d")!.drawImage(cell, 0, 0);
+            }
+            if (rerender) {
+              renderPicker(SKIN_PICKER, SKIN_COUNT, [BODY_LAYER]);
+              renderPicker(TOP_PICKER, TOP_COUNT, [BODY_LAYER, TOP_LAYER]);
+              renderPicker(MID_PICKER, MID_COUNT, [BODY_LAYER, MID_LAYER]);
+              renderPicker(BOTTOM_PICKER, BOTTOM_COUNT, [BODY_LAYER, BOTTOM_LAYER]);
+            }
+            for (const grid of pickers) {
+              for (const el of grid.children) {
+                const b = el as HTMLElement;
+                b.classList.toggle(
+                  "selected",
+                  Number(b.dataset.option) === look[LOOK_KEYS[Number(b.dataset.part)!]!],
+                );
+              }
             }
           }
 
@@ -185,15 +226,10 @@ export function openProfileLayer(
               nameError.classList.remove("hidden");
               return;
             }
-            if (opts.mode === "setup" && character === null) {
-              nameError.textContent = "Pick a character below.";
-              nameError.classList.remove("hidden");
-              return;
-            }
             name = trimmed;
-            saveIdentity(name, color, character);
+            saveIdentity(name, color, look);
             close();
-            resolve({ name, color, character });
+            resolve({ name, color, look });
           });
 
           if (opts.mode === "edit") {
@@ -216,18 +252,29 @@ export function openProfileLayer(
           card.append(
             title,
             hint,
-            label("Name"),
             nameInput,
             nameError,
             label("Color"),
             swatches,
-            label("Character"),
-            characters,
+            previewWrap,
+            label("Skin"),
+            pickers[SKIN_PICKER]!,
+            label("Hair & hats"),
+            pickers[TOP_PICKER]!,
+            label("Shirt"),
+            pickers[MID_PICKER]!,
+            label("Bottom"),
+            pickers[BOTTOM_PICKER]!,
             doneBtn,
           );
           layer.appendChild(card);
           root.appendChild(layer);
-          renderCharacterGrid();
+          renderPicker(SKIN_PICKER, SKIN_COUNT, [BODY_LAYER]);
+          renderPicker(TOP_PICKER, TOP_COUNT, [BODY_LAYER, TOP_LAYER]);
+          renderPicker(MID_PICKER, MID_COUNT, [BODY_LAYER, MID_LAYER]);
+          renderPicker(BOTTOM_PICKER, BOTTOM_COUNT, [BODY_LAYER, BOTTOM_LAYER]);
+          syncSwatchSelection();
+          syncPickers();
           nameInput.focus();
         }),
     );

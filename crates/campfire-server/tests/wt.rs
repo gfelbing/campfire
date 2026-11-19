@@ -420,7 +420,7 @@ async fn movement_relay_invalid_move_rejected_chat_history() {
     };
     assert_eq!(user.id, b_id);
 
-    // Spawn is the office center (20.5, 15.5). Give the speed gate (8 tiles/s)
+    // Spawn is the office center (20.5, 15.5). Give the speed gate (12 tiles/s)
     // a 300 ms headroom before the first 1-tile step.
     tokio::time::sleep(Duration::from_millis(300)).await;
 
@@ -435,7 +435,7 @@ async fn movement_relay_invalid_move_rejected_chat_history() {
         "bob must see alice at her new position"
     );
 
-    // Alice "teleports" 14 tiles: far beyond 8 tiles/s, so the server rejects
+    // Alice "teleports" 14 tiles: far beyond 12 tiles/s, so the server rejects
     // it. Nothing is broadcast for the rejected move.
     a.conn
         .send_datagram(move_datagram(&a_id, 35.5, 15.5, 2))

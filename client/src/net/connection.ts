@@ -9,6 +9,7 @@ import type {
   UserState,
 } from "./types";
 import { encodeLine } from "./types";
+import type { Look } from "../world/characters";
 
 /**
  * One realtime connection to the server, with automatic reconnection.
@@ -106,7 +107,7 @@ export class Connection {
     private room: string,
     private name: string,
     private avatarColor: string,
-    private avatarCharacter: number | null,
+    private avatarLook: Look,
     private status: OwnStatus,
     private handlers: ConnHandlers,
   ) {
@@ -358,7 +359,7 @@ export class Connection {
   joinPayload(): {
     room: string;
     name: string;
-    avatar?: { color: string; character?: number };
+    avatar?: { color: string; skin?: number; top?: number; mid?: number; bottom?: number };
     token?: string;
     status?: OwnStatus;
   } {
@@ -367,7 +368,10 @@ export class Connection {
       name: this.name,
       avatar: {
         color: this.avatarColor,
-        ...(this.avatarCharacter !== null ? { character: this.avatarCharacter } : {}),
+        skin: this.avatarLook.skin,
+        top: this.avatarLook.top,
+        mid: this.avatarLook.mid,
+        bottom: this.avatarLook.bottom,
       },
       ...(this.token ? { token: this.token } : {}),
       ...(this.status !== "online" ? { status: this.status } : {}),

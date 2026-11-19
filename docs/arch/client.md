@@ -8,7 +8,7 @@ client/src/
 ├── world/    # mapdata.ts (Tiled subset), render.ts (sprites + bubble), avatars.ts
 ├── net/      # WebTransport + SSE fallback, reconnect, token persistence
 ├── call/     # MoQ media (uplink + downlink), getUserMedia, bubble state machine
-├── input/    # keyboard (walk 4 tiles/s, run 8)
+├── input/    # keyboard (walk 6 tiles/s, run 12)
 └── ui/       # boot overlay, chat, presence, call theater
 ```
 
@@ -25,11 +25,17 @@ not the picture. Tiled **group layers** are flattened in draw order.
 - Local movement (WASD/arrows) with client-side prediction; sends at 15 Hz
   while moving, 2 Hz while idle. Remote avatars are interpolated between the
   server's 50 ms batched datagrams; name labels follow.
-- **Avatars are pixel-art characters** (`world/characters.ts` + 40 sprite
-  sheets in `client/public/characters/` — Jephed / Game Between The Lines,
-  see the `CREDITS.md` there): each user gets a stable variant (a hash of
-  their room-visible name) with a 4-direction 3-frame walk cycle; the
-  user's profile color is baked into the outfit band of their frames. A
+- **Avatars are modular pixel-art characters** (`world/characters.ts` +
+  four sprite sheets in `client/public/metrocity/` — cut by hand from
+  the MetroCity pack by JIK-A-4 into `Metrocity_merged/`, merged by
+  `tools/metrocity/merge.py`, see the `CREDITS.md` there): the look is
+  one row per layer (6 skin tones in `body.png`, 11 shirts in `mid.png`,
+  11 bottoms in `bottom.png`, and in `top.png` 4 hair styles tinted with
+  the profile color followed by 3 caps), picked in the profile modal and
+  carried on the wire (`Avatar.skin`/`mid`/`bottom`/`top`). Each sheet
+  is 32×32 cells, 4 direction blocks × 6 walk frames; the layers
+  alpha-stack into the sprite. Users who never picked (or old clients)
+  get a stable look derived from a hash of their room-visible name. A
   plain circle renders until the sheets load, or if they fail.
 - **Click-to-walk**: a click routes the avatar along the shortest walkable
   path (BFS over the collision grid); keyboard input cancels.

@@ -1,104 +1,177 @@
-// Character sprite sheets (client/public/characters/): 40 pre-drawn
-// top-down characters (Jephed, Game Between The Lines — see the CREDITS.md
-// next to the PNGs). Each sheet is 64×128 holding 12 cells of 20×32
-// (3 columns × 4 rows): the rows are the four walk directions (south,
-// west, east, north — top to bottom) and each row's three columns are the
-// walk cycle, with the middle column the neutral (idle) frame.
+// The modular avatar sheets (client/public/metrocity/, cut from the
+// MetroCity pack by JIK-A-4 — see the CREDITS.md next to the PNGs): four
+// layers that stack into one character.
 //
-// Loaded once up front; `AvatarView` renders a framed cell and falls back
-// to the plain circle while the sheets are still loading (or when they are
-// missing entirely, e.g. a broken deploy).
+// Every sheet is 32×32 cells in 24 columns: 4 direction blocks × 6
+// animation frames. Direction blocks run south (columns 0–5), east (6–11),
+// north (12–17), west (18–23); within a block frame 0 is the idle stance
+// and frames 1–5 the walk cycle. A look is one row per layer: `body.png`
+// carries 6 skin tones, `mid.png` 11 upper-body garments, `bottom.png` 11
+// lower-body garments, and `top.png` 9 head layers — 5 hair styles
+// (tinted with the user's profile color at render time) followed by 4
+// caps (untinted). Compositing is a plain alpha stack of the same cell
+// across the sheets.
+//
+// Loaded once up front; `AvatarView` renders the layer stack and falls
+// back to a plain circle while the sheets are still loading (or when
+// they are missing entirely, e.g. a broken deploy).
 
 import { Assets, Rectangle, Texture } from "pixi.js";
 
 import type { Dir } from "../net/types";
 
-export const CHARACTER_COUNT = 40;
-export const CELL_W = 20;
+/** Option counts: one row per sheet. */
+export const SKIN_COUNT = 6;
+export const MID_COUNT = 11;
+export const BOTTOM_COUNT = 11;
+export const TOP_COUNT = 7;
+/** The first `HAIR_ROWS` rows of `top.png` are hair (tinted with the
+ *  profile color); the rest are caps (drawn as-is). */
+export const HAIR_ROWS = 4;
+
+export const CELL_W = 32;
 export const CELL_H = 32;
-export const COLS = 3;
-/** Sheet rows top→bottom: south, west, east, north. */
-const DIR_ROW: Record<Dir, number> = { s: 0, w: 1, e: 2, n: 3 };
-/** The walk cycle in cell columns: stride, neutral, stride — the loop a
- *  moving avatar plays; an idle avatar sits on the neutral cell. */
-export const WALK_CYCLE = [1, 0, 1, 2] as const;
-export const IDLE_COL = 1;
-/** Walk animation rate: 4 frames at 12 fps ≈ one full cycle per ⅓ s —
- *  brisk enough for the 4 tiles/s walk speed. */
-export const WALK_FRAME_MS = 84;
+export const COLS = 24;
+/** Frames per direction block. */
+export const FRAMES_PER_DIR = 6;
+/** Column where each direction's block starts. */
+const DIR_START: Record<Dir, number> = { s: 0, e: 6, n: 12, w: 18 };
+/** The walk cycle in block-relative frames: the pack's six frames are a
+ *  complete walk (two contact poses, two passes); an idle avatar sits on
+ *  the contact pose (frame 0). */
+export const WALK_CYCLE = [0, 1, 2, 3, 4, 5] as const;
+export const IDLE_FRAME = 0;
+/** Walk animation rate: 6 frames at ~17 fps — one full cycle (two steps,
+ *  ≈2 tiles) per ⅓ s, matching the 6 tiles/s walk speed so the feet
+ *  don't slide. */
+export const WALK_FRAME_MS = 60;
 
-const sheets: Array<Texture | undefined> = [];
-/** Variant+color → frame grid, generated on demand: the outfit band of
- *  the sheet recolored to the user's color (see `tintedFrames`). */
-const tinted = new Map<number, Map<number, Texture[][]>>();
-
-/** The outfit band in cell coordinates (y range): head above, legs
- *  below. Hair hangs into it on the side views — the overlay recolor
- *  just shifts its hue slightly. */
-const TINT_TOP = 15;
-const TINT_BOTTOM = 25;
-
-/** Overlay-blend `color` into the RGBA `data`'s pixel band `y0..y1`,
- *  columns `x0..x1`: shifts the outfit's hue toward the color while
- *  keeping the shading (a multiply vanishes on the pack's dark clothes;
- *  a light color lightens, a dark one darkens). */
-function recolorBand(
-  d: Uint8ClampedArray,
-  width: number,
-  y0: number,
-  y1: number,
-  x0: number,
-  x1: number,
-  color: number,
-): void {
-  const tint = [(color >> 16) & 255, (color >> 8) & 255, color & 255];
-  for (let y = y0; y < y1; y++) {
-    for (let x = x0; x < x1; x++) {
-      const i = (y * width + x) * 4;
-      if (d[i + 3] === 0) continue;
-      for (let ch = 0; ch < 3; ch++) {
-        const b = d[i + ch]! / 255;
-        const t = tint[ch]! / 255;
-        d[i + ch] = Math.round(
-          255 * (b < 0.5 ? 2 * b * t : 1 - 2 * (1 - b) * (1 - t)),
-        );
-      }
-    }
-  }
+export interface Look {
+  /** `body.png` row (skin tone). */
+  skin: number;
+  /** `mid.png` row (upper-body garment). */
+  mid: number;
+  /** `bottom.png` row (lower-body garment). */
+  bottom: number;
+  /** `top.png` row (hair style or cap). */
+  top: number;
 }
 
-/** Preload every character sheet (nearest sampling: the pixels stay
- *  crisp at any zoom). A missing sheet simply leaves its slot empty. */
-export async function loadCharacters(): Promise<void> {
+/** Layer order (and draw order: body bottom-most, the head layer on
+ *  top). */
+export const BODY_LAYER = 0;
+export const BOTTOM_LAYER = 1;
+export const MID_LAYER = 2;
+export const TOP_LAYER = 3;
+export const LAYER_COUNT = 4;
+
+/** The sheets as cell textures, `grid[layer][row][col]`. Empty until
+ *  `loadAvatarSheets`. */
+const grids: Texture[][][] = [];
+
+const SHEETS = [
+  { url: "/metrocity/body.png", rows: SKIN_COUNT },
+  { url: "/metrocity/bottom.png", rows: BOTTOM_COUNT },
+  { url: "/metrocity/mid.png", rows: MID_COUNT },
+  { url: "/metrocity/top.png", rows: TOP_COUNT },
+];
+
+/** Preload the four sheets (nearest sampling: the pixels stay crisp at
+ *  any zoom) and slice them into per-cell textures. A missing sheet
+ *  leaves its layer empty — the avatars fall back to the circle. */
+export async function loadAvatarSheets(): Promise<void> {
   await Promise.all(
-    Array.from({ length: CHARACTER_COUNT }, (_, i) => {
-      const url = `/characters/${String(i).padStart(3, "0")}.png`;
-      return Assets.load<Texture>(url).then(
-        (t) => {
-          t.source.scaleMode = "nearest";
-          sheets[i] = t;
-        },
-        () => undefined,
-      );
+    SHEETS.map(async (sheet, layer) => {
+      let tex: Texture;
+      try {
+        tex = await Assets.load<Texture>(sheet.url);
+      } catch {
+        return; // missing sheet: the layer contributes nothing
+      }
+      tex.source.scaleMode = "nearest";
+      const grid: Texture[][] = [];
+      for (let row = 0; row < sheet.rows; row++) {
+        const cols: Texture[] = [];
+        for (let col = 0; col < COLS; col++) {
+          cols.push(
+            new Texture({
+              source: tex.source,
+              frame: new Rectangle(
+                col * CELL_W,
+                row * CELL_H,
+                CELL_W,
+                CELL_H,
+              ),
+            }),
+          );
+        }
+        grid.push(cols);
+      }
+      grids[layer] = grid;
     }),
   );
 }
 
-/** Stable avatar variant: hash the room-visible name into one of the
- *  sheets — the same person is the same character across reloads (the
- *  server-assigned id is random per session, the name is not). */
-export function variantFor(id: string): number {
-  let h = 0;
-  for (let i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) | 0;
-  return Math.abs(h) % CHARACTER_COUNT;
-}
-
 export function hasSheets(): boolean {
-  return sheets[0] !== undefined;
+  return grids[BODY_LAYER] !== undefined;
 }
 
-export function dirRow(dir: Dir): number {
-  return DIR_ROW[dir];
+/** Stable derived look for users who never picked one (or old clients
+ *  whose joins carry no look): hash the room-visible name into one row
+ *  per layer — the same person is the same look across reloads (the
+ *  server-assigned id is random per session, the name is not). */
+export function deriveLook(name: string): Look {
+  const hash = (salt: number): number => {
+    let h = salt;
+    for (let i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) | 0;
+    return Math.abs(h);
+  };
+  return {
+    skin: hash(0) % SKIN_COUNT,
+    mid: hash(0x51ed) % MID_COUNT,
+    bottom: hash(0x2f6a) % BOTTOM_COUNT,
+    top: hash(0x9e37) % TOP_COUNT,
+  };
+}
+
+/** The look's row per layer (the render loop's per-layer pick). */
+function rowOf(layer: number, look: Look): number {
+  return [look.skin, look.bottom, look.mid, look.top][layer]!;
+}
+
+/** Clamp a look's parts into their sheets (a bad wire value must not
+ *  crash the renderer). */
+export function normalizeLook(
+  look: Partial<Look> | undefined,
+  fallback: Look,
+): Look {
+  const counts = [SKIN_COUNT, BOTTOM_COUNT, MID_COUNT, TOP_COUNT];
+  const keys = ["skin", "bottom", "mid", "top"] as const;
+  const out = { ...fallback };
+  for (let layer = 0; layer < LAYER_COUNT; layer++) {
+    const v = look?.[keys[layer]!];
+    out[keys[layer]!] = typeof v === "number" && Number.isInteger(v) && v >= 0 && v < counts[layer]
+      ? v
+      : fallback[keys[layer]!];
+  }
+  return out;
+}
+
+/** Whether `look`'s head layer is hair (tinted with the profile color)
+ *  rather than a cap (drawn as-is). */
+export function isHairRow(look: Look): boolean {
+  return look.top < HAIR_ROWS;
+}
+
+/** One layer's cell texture for `look`, `dir` and block-relative `frame`;
+ *  `undefined` when the layer's sheet is missing. */
+export function layerFrame(
+  layer: number,
+  look: Look,
+  dir: Dir,
+  frame: number,
+): Texture | undefined {
+  return grids[layer]?.[rowOf(layer, look)]?.[DIR_START[dir] + frame];
 }
 
 /** The `#rgb`/`#rrggbb` hex `color` as a number; `null` when malformed. */
@@ -110,76 +183,50 @@ export function parseColor(color: string): number | null {
   return parseInt(hex, 16);
 }
 
-/** A standalone preview canvas of one character's idle south frame with
- *  the outfit recolored to the `#rrggbb` color — the profile menu's
- *  character picker thumbnails. `null` when the sheet is missing. */
-export function previewCell(variant: number, color: string): HTMLCanvasElement | null {
-  const sheet = sheets[variant];
-  const tint = parseColor(color) ?? 0xffffff;
-  if (!sheet) return null;
-  const img = sheet.source.resource as HTMLImageElement | HTMLCanvasElement;
+/** A standalone preview canvas of `look`'s cell (south, `frame`), the
+ *  layers alpha-composited and the hair multiplied with `tint` (the
+ *  profile color; caps stay untinted) — the profile modal's thumbnails
+ *  and the profile button's face. `null` while the sheets are missing.
+ *  `parts` hides layers (the part pickers show the picked layer alone). */
+export function previewCell(
+  look: Look,
+  frame: number = IDLE_FRAME,
+  parts: readonly number[] = [BODY_LAYER, BOTTOM_LAYER, MID_LAYER, TOP_LAYER],
+  tint: number | null = null,
+): HTMLCanvasElement | null {
+  if (!hasSheets()) return null;
   const canvas = document.createElement("canvas");
   canvas.width = CELL_W;
   canvas.height = CELL_H;
   const ctx = canvas.getContext("2d");
   if (!ctx) return null;
-  ctx.drawImage(
-    img,
-    IDLE_COL * CELL_W, 0, CELL_W, CELL_H,
-    0, 0, CELL_W, CELL_H,
-  );
-  const image = ctx.getImageData(0, 0, CELL_W, CELL_H);
-  recolorBand(image.data, CELL_W, TINT_TOP, TINT_BOTTOM, 0, CELL_W, tint);
-  ctx.putImageData(image, 0, 0);
-  return canvas;
-}
-
-/**
- * The sheet's frames with the outfit recolored to `color`: the torso band
- * of every cell passes through an overlay blend toward the color, which
- * shifts the outfit's hue while keeping the shading (a pixi multiply
- * vanishes on the pack's dark clothes, and the non-multiply blend modes
- * do not render under a mask — so the tint is baked per variant+color
- * once, on the CPU, and cached).
- */
-export function tintedFrames(variant: number, color: number): Texture[][] {
-  // Numeric two-level cache: `refreshFrame` runs per avatar per frame, and
-  // the old `${variant}:${color}` string key was one template allocation
-  // per avatar per frame just for a cache lookup.
-  let byColor = tinted.get(variant);
-  if (!byColor) {
-    byColor = new Map();
-    tinted.set(variant, byColor);
-  }
-  const cached = byColor.get(color);
-  if (cached) return cached;
-  const sheet = sheets[variant];
-  if (!sheet) return [];
-  const img = sheet.source.resource as HTMLImageElement | HTMLCanvasElement;
-  const canvas = document.createElement("canvas");
-  canvas.width = img.width;
-  canvas.height = img.height;
-  const ctx = canvas.getContext("2d");
-  if (!ctx) return [];
-  ctx.drawImage(img, 0, 0);
-  const image = ctx.getImageData(0, 0, canvas.width, canvas.height);
-  recolorBand(image.data, canvas.width, TINT_TOP, TINT_BOTTOM, 0, CELL_W * COLS, color);
-  ctx.putImageData(image, 0, 0);
-  const tex = Texture.from(canvas);
-  tex.source.scaleMode = "nearest";
-  const grid: Texture[][] = [];
-  for (let row = 0; row < 4; row++) {
-    const cols: Texture[] = [];
-    for (let col = 0; col < COLS; col++) {
-      cols.push(
-        new Texture({
-          source: tex.source,
-          frame: new Rectangle(col * CELL_W, row * CELL_H, CELL_W, CELL_H),
-        }),
-      );
+  for (const layer of parts) {
+    const tex = layerFrame(layer, look, "s", frame);
+    if (!tex) continue;
+    // The texture frames a cell of the loaded sheet image; its source
+    // resource is that image element.
+    const img = tex.source.resource as HTMLImageElement | HTMLCanvasElement;
+    const fr = tex.frame;
+    if (layer === TOP_LAYER && tint !== null && isHairRow(look)) {
+      // Tint on a scratch canvas (multiply flattens transparent pixels,
+      // so it must not touch the layers already on `canvas`), then stamp
+      // the tinted hair over them.
+      const scratch = document.createElement("canvas");
+      scratch.width = CELL_W;
+      scratch.height = CELL_H;
+      const sctx = scratch.getContext("2d");
+      if (!sctx) continue;
+      sctx.drawImage(img, fr.x, fr.y, fr.width, fr.height, 0, 0, CELL_W, CELL_H);
+      const hex = `#${(tint & 0xffffff).toString(16).padStart(6, "0")}`;
+      sctx.globalCompositeOperation = "multiply";
+      sctx.fillStyle = hex;
+      sctx.fillRect(0, 0, CELL_W, CELL_H);
+      sctx.globalCompositeOperation = "destination-in";
+      sctx.drawImage(img, fr.x, fr.y, fr.width, fr.height, 0, 0, CELL_W, CELL_H);
+      ctx.drawImage(scratch, 0, 0);
+    } else {
+      ctx.drawImage(img, fr.x, fr.y, fr.width, fr.height, 0, 0, CELL_W, CELL_H);
     }
-    grid.push(cols);
   }
-  byColor.set(color, grid);
-  return grid;
+  return canvas;
 }

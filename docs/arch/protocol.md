@@ -9,8 +9,10 @@ JSON lines (join/leave, chat, typing, call state, keepalive, errors);
 
 ```jsonc
 // client → server (stream)
-{"t":"join", "room":"office", "name":"georg", "avatar":{"color":"#e05f38"}}
+{"t":"join", "room":"office", "name":"georg", "avatar":{"color":"#e05f38","skin":3,"top":2,"mid":7,"bottom":4}}
              // "token":"…" restores the previous identity on reconnect
+             // avatar.skin/mid/bottom/top: the metrocity sheet rows (top = head layer,
+             // hair rows tinted with the color); absent = derived from the name
 {"t":"leave"} {"t":"chat","text":"hi"} {"t":"typing","on":true}
 {"t":"bubble","off":true}                    // opt out of calls
 {"t":"call_mute"/"call_screen"/"call_leave", …}   // call presence
@@ -42,7 +44,7 @@ JSON lines (join/leave, chat, typing, call state, keepalive, errors);
 ## Movement
 
 Datagrams only. Each entry carries a sequence number `s`; the server drops
-stale ones. **Server-side validation**: tile space, max 8 tiles/s, walkable
+stale ones. **Server-side validation**: tile space, max 12 tiles/s, walkable
 tiles only, ≤ 30 moves/s per user. Each 50 ms tick the server broadcasts one
 batched datagram (≤ 1200 B) per room.
 

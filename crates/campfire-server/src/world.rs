@@ -45,8 +45,9 @@ const BUBBLE_RETURN_GRACE: Duration = Duration::from_secs(2);
 const MAX_DATAGRAM_BYTES: usize = 1200;
 /// Movement entries per user per second (docs/arch/protocol.md: client sends ≤15 Hz).
 const MOVES_PER_SEC: usize = 30;
-/// Maximum avatar speed in tiles per second (docs/arch/protocol.md).
-const MAX_SPEED: f32 = 8.0;
+/// Maximum avatar speed in tiles per second (docs/arch/protocol.md): the
+/// run speed (twice the 6 tiles/s walk).
+const MAX_SPEED: f32 = 12.0;
 
 /// Id of a connected user, e.g. `u_1f3a9c02be47d158`.
 pub type UserId = String;
@@ -441,7 +442,10 @@ impl World {
                 id: id.clone(),
                 name: member.name.clone(),
                 color: member.avatar.as_ref().map(|a| a.color.clone()),
-                character: member.avatar.as_ref().and_then(|a| a.character),
+                skin: member.avatar.as_ref().and_then(|a| a.skin),
+                mid: member.avatar.as_ref().and_then(|a| a.mid),
+                top: member.avatar.as_ref().and_then(|a| a.top),
+                bottom: member.avatar.as_ref().and_then(|a| a.bottom),
                 status: status_of(&member),
             };
             room_entry.users.insert(id.clone(), member);
@@ -541,11 +545,26 @@ impl World {
                 .get(&id)
                 .and_then(|m| m.avatar.as_ref())
                 .map(|a| a.color.clone()),
-            character: room_entry
+            skin: room_entry
                 .users
                 .get(&id)
                 .and_then(|m| m.avatar.as_ref())
-                .and_then(|a| a.character),
+                .and_then(|a| a.skin),
+            mid: room_entry
+                .users
+                .get(&id)
+                .and_then(|m| m.avatar.as_ref())
+                .and_then(|a| a.mid),
+            top: room_entry
+                .users
+                .get(&id)
+                .and_then(|m| m.avatar.as_ref())
+                .and_then(|a| a.top),
+            bottom: room_entry
+                .users
+                .get(&id)
+                .and_then(|m| m.avatar.as_ref())
+                .and_then(|a| a.bottom),
             status: room_entry.users.get(&id).map(status_of).unwrap_or_default(),
         };
         for (uid, m) in &room_entry.users {
@@ -641,7 +660,7 @@ impl World {
     /// Validate and apply one user's movement batch (docs/arch/protocol.md "Movement
     /// rules"). Every entry must come from the caller, carry a strictly
     /// newer sequence number, stay inside the map on a walkable tile, and
-    /// respect the 8 tiles/s speed gate. Rejected entries are dropped
+    /// respect the 12 tiles/s speed gate. Rejected entries are dropped
     /// silently; nothing changes for them.
     pub fn apply_movement(&self, room: &str, user_id: &str, entries: &[MovementEntry]) {
         let mut rooms = self.rooms.lock().unwrap();
@@ -670,7 +689,7 @@ impl World {
             if !map.is_walkable(entry.x, entry.y) {
                 continue;
             }
-            // Speed gate: no farther than 8 tiles/s since the last accepted
+            // Speed gate: no farther than 12 tiles/s since the last accepted
             // move. Rejected moves leave `last_move_at` untouched.
             let dt = now.duration_since(member.last_move_at).as_secs_f32();
             let dx = entry.x - member.pos.0;
@@ -1522,7 +1541,10 @@ fn user_snapshot(entry: &Room, map: Option<&campfire_maps::MapData>) -> Vec<User
                     .any(|z| z.silent && z.contains(m.pos.0, m.pos.1))
             }),
             color: m.avatar.as_ref().map(|a| a.color.clone()),
-            character: m.avatar.as_ref().and_then(|a| a.character),
+            skin: m.avatar.as_ref().and_then(|a| a.skin),
+            mid: m.avatar.as_ref().and_then(|a| a.mid),
+            top: m.avatar.as_ref().and_then(|a| a.top),
+            bottom: m.avatar.as_ref().and_then(|a| a.bottom),
             status: status_of(m),
         })
         .collect()

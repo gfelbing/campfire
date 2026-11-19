@@ -11,7 +11,7 @@ import { boot, loadStatus } from "./ui/boot";
 import { createChat, type ChatUI } from "./ui/chat";
 import { createHeader } from "./ui/header";
 import { openProfileLayer, type Identity } from "./ui/profile";
-import { parseColor, variantFor } from "./world/characters";
+import { deriveLook, parseColor, normalizeLook } from "./world/characters";
 import { createPresence } from "./ui/presence";
 import { createSidebar } from "./ui/sidebar";
 import { isWalkablePoint, parseMap, tileAt, zoneContains, type MapData, type Zone } from "./world/mapdata";
@@ -129,7 +129,7 @@ async function main(): Promise<void> {
   let identity: Identity = {
     name: opts.name,
     color: opts.color,
-    character: opts.character,
+    look: opts.look,
   };
   const setupLayer = opts.identityComplete
     ? null
@@ -141,13 +141,13 @@ async function main(): Promise<void> {
   const res = await fetch(`/api/v1/maps/${encodeURIComponent(opts.room)}`);
   if (!res.ok) throw new Error(`map fetch failed: ${res.status}`);
   const map = parseMap(opts.room, await res.json());
-  const world = await createWorld(map, opts.name, opts.color, opts.character);
+  const world = await createWorld(map, opts.name, opts.color, opts.look);
   if (setupLayer) {
     identity = (await setupLayer)!;
     // The world was built with the pre-setup identity: apply the picked one.
     world.local.setName(identity.name);
     world.local.setColor(parseColor(identity.color) ?? 0xffffff);
-    world.local.setVariant(identity.character ?? variantFor(identity.name));
+    world.local.setLook(identity.look);
   }
   // Click-to-walk (README roadmap "Map enhancements"): a click on the canvas
   // pathfinds to the clicked tile (unreachable → ignored).
@@ -225,7 +225,7 @@ async function main(): Promise<void> {
     presence.setInCall(inCall);
   };
 
-  const conn = new Connection(opts.room, identity.name, identity.color, identity.character, loadStatus(), {
+  const conn = new Connection(opts.room, identity.name, identity.color, identity.look, loadStatus(), {
     onHello: (h) => {
       myId = h.you;
       const me = h.users.find((u) => u.id === h.you);
@@ -237,10 +237,15 @@ async function main(): Promise<void> {
       roster.clear();
       for (const u of h.users) roster.set(u.id, u);
       world.local.setDir(dir);
-      // Our own pixel-art variant: the chosen character (the profile
-      // menu), else the stable hash of our room-visible name (the id is
-      // random per session).
-      world.local.setVariant(me?.character ?? variantFor(me?.name ?? identity.name));
+      // Our own pixel-art look: the chosen one (the profile menu), else
+      // the stable hash of our room-visible name (the id is random per
+      // session). The roster is the authority; clamp against the sheets.
+      world.local.setLook(
+        normalizeLook(
+          { skin: me?.skin, top: me?.top, mid: me?.mid, bottom: me?.bottom },
+          deriveLook(me?.name ?? identity.name),
+        ),
+      );
       world.manager.hello(h.users, h.you);
       // Presence dots on the map: every rostered avatar (ours included).
       for (const u of h.users) world.manager.setStatus(u.id, u.status ?? "online");
@@ -431,7 +436,7 @@ async function main(): Promise<void> {
   const header = createHeader(sidebar, opts.room, {
     name: identity.name,
     color: identity.color,
-    character: identity.character,
+    look: identity.look,
     status: loadStatus(),
     onSwitchMap: (map) => navigateToRoom(map, 150),
     onOpenProfile: () => {
@@ -443,7 +448,10 @@ async function main(): Promise<void> {
         if (
           next.name !== identity.name ||
           next.color !== identity.color ||
-          next.character !== identity.character
+          next.look.skin !== identity.look.skin ||
+          next.look.top !== identity.look.top ||
+          next.look.mid !== identity.look.mid ||
+          next.look.bottom !== identity.look.bottom
         ) {
           identity = next;
           navigateToRoom(opts.room, 150);
@@ -547,7 +555,7 @@ async function main(): Promise<void> {
         walkPath.shift();
         if (walkPath.length === 0) moving = false; // the path is done
       } else {
-        const speed = keys.run ? 8 : 4;
+        const speed = keys.run ? 12 : 6;
         const step = Math.min(speed * dt, d);
         const nx = x + (dx / d) * step;
         const ny = y + (dy / d) * step;
