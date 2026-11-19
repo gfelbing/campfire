@@ -67,16 +67,14 @@ struct Shared<S: crate::transport::poll::Session> {
 	estimate: kio::ProducerWeak<crate::session::Estimate>,
 }
 
-/// Largest millisecond duration every implementation can carry losslessly.
-const MAX_SAFE_AGE_MS: u64 = (1_u64 << 53) - 1;
-
 /// The budget to serve a peer with, given what its wire could tell us.
 ///
-/// A version without the field decodes as [`Duration::ZERO`], which is
-/// indistinguishable from a peer genuinely asking for the live edge. Serving that
-/// as real time would discard backlog a legacy subscriber never declined, so fall
-/// back to a window wide enough not to drop and leave enforcement to the receiver,
-/// exactly as the IETF path does for the same reason.
+/// Campfire deviation (see PATCH.md): upstream falls back to an unbounded
+/// budget (`MAX_SAFE_AGE_MS`, now removed as unused here) for wires that
+/// cannot carry the subscriber max-age, so nothing is ever skipped under
+/// legacy peers. Campfire serves only its own lite-02 clients and that
+/// budget is actively harmful for live calls, so every wire is held to
+/// the requested (possibly ZERO = live edge) budget.
 fn serving_max_age(version: Version, requested: Duration) -> Duration {
 	match version.carries_max_age() {
 		true => requested,

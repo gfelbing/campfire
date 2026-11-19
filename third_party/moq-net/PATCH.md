@@ -56,6 +56,10 @@ The catalog track is single-group-per-update and the fetch/replay paths
 are unaffected (they carry explicit bounds). Re-vendor on a bump and
 re-apply or drop if upstream changes the semantics.
 
+With both arms identical the upstream fallback constant
+`MAX_SAFE_AGE_MS` became dead code; it is removed (its doc comment
+lives on in the rewritten `serving_max_age` doc).
+
 ## Freshness (2026-11-18)
 
 0.3.23 is still the newest crates.io release. Upstream main has diverged
