@@ -38,6 +38,11 @@ freely.
   phones), a 5× live preview, and part grids that fill the width. A
   new last head option picks "bald" — an explicit empty head layer,
   distinct from never having picked.
+- Dependencies: `@moq/net` 0.4.8, Vite 6 → 8, actions/setup-node v6 → v7
+  and CI's Node 24 → 26. TypeScript stays 5.9 — typescript-eslint still
+  caps its peer at < 6.1. Rust crates are already at their highest
+  compatible versions; `web-transport-trait` 0.5 needs the vendored
+  moq-net fork moved off the 0.3.23 line first, so it stays 0.4.
 
 ## [0.0.22] — 2026-11-18
 
