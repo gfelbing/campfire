@@ -31,7 +31,7 @@ not the picture. Tiled **group layers** are flattened in draw order.
   `tools/metrocity/merge.py`, see the `CREDITS.md` there): the look is
   one row per layer (6 skin tones in `body.png`, 11 shirts in `mid.png`,
   11 bottoms in `bottom.png`, and in `top.png` 4 hair styles tinted with
-  the profile color followed by 3 caps), picked in the profile modal and
+  the profile color, 3 caps and an empty bald row), picked in the profile modal and
   carried on the wire (`Avatar.skin`/`mid`/`bottom`/`top`). Each sheet
   is 32×32 cells, 4 direction blocks × 6 walk frames; the layers
   alpha-stack into the sprite. Users who never picked (or old clients)

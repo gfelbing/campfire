@@ -155,7 +155,10 @@ export function openProfileLayer(
               b.className = "swatch character";
               b.dataset.part = String(index);
               b.dataset.option = String(i);
-              b.title = ["skin", "hair or cap", "shirt", "bottom"][index]! + ` ${i + 1}`;
+              b.title =
+                index === TOP_PICKER && i === TOP_COUNT - 1
+                  ? "bald"
+                  : `${["skin", "hair or cap", "shirt", "bottom"][index]!} ${i + 1}`;
               const draft = { ...look, [LOOK_KEYS[index]!]: i } as Look;
               const cell = previewCell(draft, IDLE_FRAME, parts, tint);
               if (cell) {

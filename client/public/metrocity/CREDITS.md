@@ -14,8 +14,9 @@ from this directory:
 * `bottom.png` — 11 lower-body garments (`bottom`: Suit ×4, Suit1 ×5,
   Outfit1 + Outfit3)
 * `top.png` — head layers: 4 hair styles (the client tints them with the
-  user's profile color) followed by 3 caps (`top`: Hair.png + Suit.png;
-  the pack's eyebrows-only Hair row and a blank Suit row are skipped)
+  user's profile color), 3 caps, and an empty final row for the explicit
+  "bald" pick (`top`: Hair.png + Suit.png; the pack's eyebrows-only Hair
+  row and a blank Suit row are skipped)
 
 All sheets: 32×32 cells, 24 columns = 4 directions (s/e/n/w) × 6
 animation frames (0 = idle, 1–5 = walk).

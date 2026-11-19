@@ -66,7 +66,11 @@ def main() -> None:
     hats = Image.open(SRC / "top" / "Suit.png").convert("RGBA")
     hair_rows = rows(hair, skip={1})  # row 1 is eyebrows, not a hairstyle
     hat_rows = rows(hats, skip={2})  # row 2 is blank
-    stack(hair_rows + hat_rows).save(OUT / "top.png")
+    # The last row is the explicit "bald" pick: an empty cell — no head
+    # layer at all (distinct from the wire's absent top, which means
+    # "derived from the name").
+    bald = Image.new("RGBA", (hair.width, CELL_H), (0, 0, 0, 0))
+    stack(hair_rows + hat_rows + [bald]).save(OUT / "top.png")
 
     mid_suits = Image.open(SRC / "mid" / "Suit.png").convert("RGBA")
     mid_shirts = Image.open(SRC / "mid" / "Suit1.png").convert("RGBA")
@@ -87,8 +91,8 @@ def main() -> None:
     stack(bottom_rows).save(OUT / "bottom.png")
 
     print(
-        f"written to {OUT}: {len(hair_rows) + len(hat_rows)} tops "
-        f"({len(hair_rows)} hair + {len(hat_rows)} hats), "
+        f"written to {OUT}: {len(hair_rows) + len(hat_rows) + 1} tops "
+        f"({len(hair_rows)} hair + {len(hat_rows)} hats + 1 bald), "
         f"{len(mid_rows)} mids, "
         f"{len(bottom_rows)} bottoms"
     )

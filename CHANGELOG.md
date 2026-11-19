@@ -34,6 +34,10 @@ freely.
 - The head picker loses two broken options from the pack: Hair.png's
   eyebrows-only row (rendered as a bald head) and Suit.png's blank row
   (an invisible "cap"). 4 hair styles + 3 caps remain.
+- The profile modal is roomier: half the viewport on desktop (90% on
+  phones), a 5× live preview, and part grids that fill the width. A
+  new last head option picks "bald" — an explicit empty head layer,
+  distinct from never having picked.
 
 ## [0.0.22] — 2026-11-18
 

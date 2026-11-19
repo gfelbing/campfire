@@ -24,7 +24,7 @@ import type { Dir } from "../net/types";
 export const SKIN_COUNT = 6;
 export const MID_COUNT = 11;
 export const BOTTOM_COUNT = 11;
-export const TOP_COUNT = 7;
+export const TOP_COUNT = 8;
 /** The first `HAIR_ROWS` rows of `top.png` are hair (tinted with the
  *  profile color); the rest are caps (drawn as-is). */
 export const HAIR_ROWS = 4;
@@ -53,7 +53,7 @@ export interface Look {
   mid: number;
   /** `bottom.png` row (lower-body garment). */
   bottom: number;
-  /** `top.png` row (hair style or cap). */
+  /** `top.png` row (hair style, cap, or the empty bald row). */
   top: number;
 }
 
@@ -130,7 +130,7 @@ export function deriveLook(name: string): Look {
     skin: hash(0) % SKIN_COUNT,
     mid: hash(0x51ed) % MID_COUNT,
     bottom: hash(0x2f6a) % BOTTOM_COUNT,
-    top: hash(0x9e37) % TOP_COUNT,
+    top: hash(0x9e37) % (TOP_COUNT - 1),
   };
 }
 
