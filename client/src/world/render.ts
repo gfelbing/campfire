@@ -171,9 +171,12 @@ export async function createWorld(
   app.canvas.addEventListener("wheel", onWheel, { passive: false });
 
   // Click-to-walk (README roadmap "Map enhancements"): the callback returns
-  // the clicked tile coordinates (world-space), or null for a miss.
+  // the clicked tile coordinates (world-space), or null for a miss. Only
+  // the left button walks (a stray right-click during keyboard walking
+  // must not leave a walk path running after the keys are released).
   const onClick: { cb: ((x: number, y: number) => void) | null } = { cb: null };
   app.canvas.addEventListener("pointerdown", (e) => {
+    if (e.button !== 0) return;
     if (!onClick.cb) return;
     // Screen → world: the world container's position + scale.
     const rect = app.canvas.getBoundingClientRect();
