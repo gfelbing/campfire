@@ -4,6 +4,32 @@ All notable releases of campfire. Versions follow calendar-agnostic
 semver; releases are cut by tagging `vX.Y.Z` (the Docker image is built
 and pushed to GHCR on each tag).
 
+## [0.0.24] — 2026-11-19
+
+The comfort release: the profile modal gets room to breathe, bald becomes
+a real choice, and the toolchain moves to Vite 8 on CI's Node 26.
+
+### Changed
+
+- The profile modal is roomier: half the viewport on desktop (90% on
+  phones), a 5× live preview, and part grids that fill the width. A
+  new last head option picks "bald" — an explicit empty head layer
+  (`top.png`'s empty final row, `TOP_COUNT` 7 → 8), distinct from never
+  having picked (the wire's absent top, which still means
+  derived-from-the-name). Name-derived looks never land on the bald row.
+- Dependencies: `@moq/net` 0.4.8, Vite 6 → 8, actions/setup-node v6 → v7
+  and CI's Node 24 → 26. TypeScript stays 5.9 — typescript-eslint still
+  caps its peer at < 6.1. Rust crates are already at their highest
+  compatible versions; `web-transport-trait` 0.5 needs the vendored
+  moq-net fork moved off the 0.3.23 line first, so it stays 0.4.
+  Housekeeping: the local MetroCity source packs are gitignored and an
+  unused `MAX_SAFE_AGE_MS` drops from the vendored moq-net.
+
+### Fixed
+
+- Click-to-walk ignores right and middle clicks instead of walking on
+  them.
+
 ## [0.0.23] — 2026-11-19
 
 The modular avatar release: the Jephed 40-sheet character pack gives way
@@ -34,15 +60,6 @@ freely.
 - The head picker loses two broken options from the pack: Hair.png's
   eyebrows-only row (rendered as a bald head) and Suit.png's blank row
   (an invisible "cap"). 4 hair styles + 3 caps remain.
-- The profile modal is roomier: half the viewport on desktop (90% on
-  phones), a 5× live preview, and part grids that fill the width. A
-  new last head option picks "bald" — an explicit empty head layer,
-  distinct from never having picked.
-- Dependencies: `@moq/net` 0.4.8, Vite 6 → 8, actions/setup-node v6 → v7
-  and CI's Node 24 → 26. TypeScript stays 5.9 — typescript-eslint still
-  caps its peer at < 6.1. Rust crates are already at their highest
-  compatible versions; `web-transport-trait` 0.5 needs the vendored
-  moq-net fork moved off the 0.3.23 line first, so it stays 0.4.
 
 ## [0.0.22] — 2026-11-18
 
